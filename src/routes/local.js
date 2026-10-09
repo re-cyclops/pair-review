@@ -24,6 +24,7 @@ const { broadcastReviewEvent } = require('../events/review-events');
 const { fireHooks, hasHooks } = require('../hooks/hook-runner');
 const { buildReviewStartedPayload, buildReviewLoadedPayload, buildAnalysisStartedPayload, buildAnalysisCompletedPayload, getCachedUser } = require('../hooks/payloads');
 const { mergeInstructions } = require('../utils/instructions');
+const { diffContext } = require('../review-progress');
 const { getGitHubToken, resolveLoadSkills, buildCouncilProviderOverrides, getSummaryEnabled, getTourEnabled } = require('../config');
 const { backgroundQueue } = require('../ai/background-queue');
 const localReview = require('../local-review');
@@ -992,6 +993,7 @@ router.get('/api/local/:reviewId/diff', async (req, res) => {
     }
     res.json({
       diff: diffContent || '',
+      progress_context: diffContext(review.local_head_sha, canonicalDiff),
       generated_files: generatedFiles,
       hunk_hashes_by_file: hunkHashesByFile,
       stats: {

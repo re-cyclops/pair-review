@@ -412,7 +412,7 @@ describe('WSClient', () => {
       client.connect();
       lastWs().simulateOpen();
 
-      expect(global.window.dispatchEvent).not.toHaveBeenCalled();
+      expect(global.window.dispatchEvent.mock.calls.some(([event]) => event.type === 'wsReconnected')).toBe(false);
     });
 
     it('should dispatch wsReconnected on reconnect after disconnect', () => {
@@ -423,35 +423,27 @@ describe('WSClient', () => {
       vi.advanceTimersByTime(1000);
       lastWs().simulateOpen(); // this is a reconnect
 
-      expect(global.window.dispatchEvent).toHaveBeenCalledTimes(1);
-      const event = global.window.dispatchEvent.mock.calls[0][0];
-      expect(event).toBeInstanceOf(MockCustomEvent);
-      expect(event.type).toBe('wsReconnected');
+      const reconnects = global.window.dispatchEvent.mock.calls.map(([event]) => event).filter(event => event.type === 'wsReconnected');
+      expect(reconnects).toHaveLength(1);
     });
 
     it('should dispatch wsReconnected on each subsequent reconnect', () => {
       client.connect();
-      lastWs().simulateOpen(); // initial — no event
+      lastWs().simulateOpen();
 
       // First reconnect
       lastWs().simulateClose();
       vi.advanceTimersByTime(1000);
       lastWs().simulateOpen();
-      expect(global.window.dispatchEvent).toHaveBeenCalledTimes(1);
+      expect(global.window.dispatchEvent.mock.calls.filter(([event]) => event.type === 'wsReconnected')).toHaveLength(1);
 
       // Second reconnect
       lastWs().simulateClose();
       vi.advanceTimersByTime(1000);
       lastWs().simulateOpen();
-      expect(global.window.dispatchEvent).toHaveBeenCalledTimes(2);
+      expect(global.window.dispatchEvent.mock.calls.filter(([event]) => event.type === 'wsReconnected')).toHaveLength(2);
     });
 
-    it('should set _hasConnected flag after first connect', () => {
-      expect(client._hasConnected).toBe(false);
-      client.connect();
-      lastWs().simulateOpen();
-      expect(client._hasConnected).toBe(true);
-    });
   });
 
   describe('close', () => {

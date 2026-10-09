@@ -1343,6 +1343,7 @@
             }
         }
     </style>
+    <link rel="stylesheet" href="/css/workspace.css">
 </head>
 <body>
     <div class="app">
@@ -1381,12 +1382,12 @@
                 <div class="recent-reviews-section" id="recent-reviews-section">
                     <div class="section-header" id="recent-reviews-header">
                         <div class="tab-bar" id="unified-tab-bar">
-                            <button class="tab-btn active" data-tab="pr-tab" type="button">Pull Requests</button>
-                            <button class="tab-btn" data-tab="review-requests-tab" type="button">My Review Requests</button>
-                            <button class="tab-btn" data-tab="team-reviews-tab" type="button">Team Review Requests</button>
-                            <button class="tab-btn" data-tab="my-prs-tab" type="button">My PRs</button>
-                            <span class="tab-divider"></span>
-                            <button class="tab-btn" data-tab="local-tab" type="button">Local Reviews</button>
+                            <button class="tab-btn active" data-tab="pr-tab" data-workspace-view="all" type="button">Review inbox</button>
+                            <button class="tab-btn" data-tab="review-requests-tab" data-workspace-view="needs-you" type="button">Needs you</button>
+                            <button class="tab-btn" data-tab="pr-tab" data-workspace-view="drafts" type="button">Ready to preview</button>
+                            <button class="tab-btn" data-tab="team-reviews-tab" data-workspace-view="teams" type="button" hidden>Team requests</button>
+                            <button class="tab-btn" data-tab="my-prs-tab" type="button">My pull requests</button>
+                            <button class="tab-btn" data-tab="local-tab" type="button">Local reviews</button>
                         </div>
                     </div>
 
@@ -1575,6 +1576,10 @@
     <script src="/js/components/AdvancedConfigTab.js"></script>
     <script src="/js/theme.js"></script>
     <script src="/js/repo-links.js"></script>
+    <script src="/js/components/ReviewEvidence.js"></script>
+    <script src="/js/modules/draft-store.js"></script>
+    <script src="/js/components/Workspace.js"></script>
     <script src="/js/index.js"></script>
+    <script src="/js/components/ReviewInbox.js"></script>
 </body>
 </html>

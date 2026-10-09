@@ -244,19 +244,6 @@ test.describe('AI Panel', () => {
     await expect(segmentControl.first()).toBeVisible();
   });
 
-  test('should have AI and Comments segment buttons', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await waitForDiffToRender(page);
-
-    // Should have AI segment button
-    const aiSegment = page.locator('.segment-btn[data-segment="ai"], button:has-text("AI")');
-    await expect(aiSegment.first()).toBeVisible();
-
-    // Should have Comments segment button
-    const commentsSegment = page.locator('.segment-btn[data-segment="comments"], button:has-text("Comments")');
-    await expect(commentsSegment.first()).toBeVisible();
-  });
-
   test('should show findings list container', async ({ page }) => {
     await page.goto('/pr/test-owner/test-repo/1');
     await waitForDiffToRender(page);

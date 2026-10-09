@@ -96,4 +96,83 @@ describe('read-only review snapshots', () => {
     expect(data.viewer.needsYou).toBe(true);
     expect(client.octokit.rest.pulls.listRequestedReviewers).toHaveBeenCalledTimes(2);
   });
+
+  it.each([false, true])('does not let an older request replace newer-head evidence (older failure: %s)', async failOlder => {
+    const client = fixture();
+    const get = client.octokit.rest.pulls.get;
+    let releaseOlder, rejectOlder;
+    const delayed = new Promise((resolve, reject) => { releaseOlder = resolve; rejectOlder = reject; });
+    client.octokit.rest.pulls.get = vi.fn()
+      .mockImplementationOnce(() => delayed)
+      .mockImplementation(async () => {
+        const response = await get();
+        response.data.head.sha = 'new-head';
+        return response;
+      });
+    client.octokit.rest.checks.listForRef = ({ ref }) => result({ check_runs: [
+      { id: 1, name: 'ci', status: 'completed', conclusion: ref === 'new-head' ? 'failure' : 'success' }
+    ] });
+    const older = fetchReviewSnapshot(client, identity, { headSha: 'old-head' });
+    const newer = await fetchReviewSnapshot(client, identity, { headSha: 'new-head' });
+    expect(newer.headSha).toBe('new-head');
+    if (failOlder) rejectOlder(Object.assign(new Error('Old request rate limited'), { status: 429 }));
+    else {
+      const response = await get();
+      response.data.head.sha = 'old-head';
+      releaseOlder(response);
+    }
+    await older;
+    const current = await fetchReviewSnapshot(client, identity);
+    expect(current.headSha).toBe('new-head');
+    expect(current.checks.counts).toMatchObject({ failed: 1, passed: 0 });
+    expect(current.availability).not.toBe('unavailable');
+    expect(client.octokit.rest.pulls.get).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not reuse earlier-head checks after a caller observes a new revision', async () => {
+    const client = fixture();
+    const get = client.octokit.rest.pulls.get;
+    let head = 'first-head';
+    client.octokit.rest.pulls.get = async () => {
+      const response = await get();
+      response.data.head.sha = head;
+      return response;
+    };
+    client.octokit.rest.checks.listForRef = ({ ref }) => result({ check_runs: [{
+      id: 1, name: 'ci', status: 'completed', conclusion: ref === 'first-head' ? 'success' : 'failure'
+    }] });
+    expect((await fetchReviewSnapshot(client, identity)).checks.counts.passed).toBe(1);
+    head = 'second-head';
+    const current = await fetchReviewSnapshot(client, identity, { headSha: head });
+    expect(current).toMatchObject({ headSha: 'second-head', checks: { revision: 'second-head', counts: { failed: 1, passed: 0 } } });
+  });
+
+  it('does not certify an approval total when reviewers are deleted or history is truncated', async () => {
+    const deleted = fixture();
+    deleted.octokit.rest.pulls.listReviews = () => result([{ id: 1, user: null, state: 'APPROVED' }]);
+    expect((await fetchReviewSnapshot(deleted, identity)).approvals)
+      .toMatchObject({ availability: 'partial', unattributed: true, observedCount: null });
+    const truncated = fixture();
+    truncated.octokit.rest.pulls.listReviews = async () => ({
+      data: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED' }],
+      headers: { link: '<next>; rel="next"' }
+    });
+    const partial = await fetchReviewSnapshot(truncated, identity);
+    expect(partial.approvals).toMatchObject({ availability: 'partial', complete: false, observedCount: null });
+    expect(partial.viewer.needsYou).toBeNull();
+  });
+
+  it('keeps viewer and team responsibility unknown when identity permissions are unavailable', async () => {
+    const team = fixture();
+    team.octokit.rest.teams.listForAuthenticatedUser = async () => { throw Object.assign(new Error('Denied'), { status: 403 }); };
+    team.octokit.rest.pulls.listRequestedReviewers = () => result({ users: [], teams: [{ id: 7, slug: 'maintainers' }] });
+    const teamSnapshot = await fetchReviewSnapshot(team, identity);
+    const anonymous = fixture();
+    anonymous.octokit.rest.users.getAuthenticated = async () => { throw Object.assign(new Error('Denied'), { status: 403 }); };
+    anonymous.octokit.rest.pulls.listReviews = () => result([{ id: 1, state: 'PENDING', user: null }]);
+    const unknown = await fetchReviewSnapshot(anonymous, identity);
+    expect({ team: teamSnapshot.viewer.requestedViaTeam, teamNeeds: teamSnapshot.viewer.needsYou,
+      self: unknown.viewer.self, direct: unknown.viewer.requestedDirectly, pending: unknown.viewer.pendingReview })
+      .toEqual({ team: null, teamNeeds: null, self: null, direct: null, pending: null });
+  });
 });

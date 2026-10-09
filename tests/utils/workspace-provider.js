@@ -9,6 +9,11 @@ const finish = () => {
   if (!fs.existsSync(gate)) return;
   const result = JSON.parse(fs.readFileSync(gate, 'utf8'));
   watcher?.close();
+  if (result.capture) {
+    const args = process.argv.slice(2);
+    const prompts = args.filter(arg => arg.startsWith('@')).map(arg => fs.readFileSync(arg.slice(1), 'utf8'));
+    fs.appendFileSync(`${gate}.requests.jsonl`, JSON.stringify({ cwd: process.cwd(), args, prompts }) + '\n');
+  }
   if (result.fail) { console.error('Synthetic provider failure'); process.exit(1); }
   const body = { suggestions: result.suggestions || [], summary: 'Synthetic fixture review completed.' };
   console.log(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify(body) }], stopReason: 'stop' } }));

@@ -69,6 +69,7 @@ const serverReceipt = async (config, sources = [], defaults = {}) => ({
 
 const runReceipt = row => ({
   runId: row.id, provider: row.provider, model: row.model, headSha: row.head_sha, tier: row.tier,
+  reviewedBaseline: row.review_baseline ? JSON.parse(row.review_baseline) : null,
   instructions: ['global_instructions', 'repo_instructions', 'request_instructions'].map(source => ({
     source, present: !!row[source], digest: row[source] ? digest(row[source]) : null
   })),

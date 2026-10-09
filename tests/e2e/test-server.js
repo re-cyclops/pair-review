@@ -270,26 +270,17 @@ async function startTestServer(port) {
   const { GitWorktreeManager } = require('../../src/git/worktree');
   const configModule = require('../../src/config');
 
-  // Mock GitHub client
-  GitHubClient.prototype.fetchPullRequest = async () => mockGitHubResponses.fetchPullRequest;
+  const originalBuildOctokit = GitHubClient.prototype._buildOctokit;
+  // Keep native host adapters and the durable publisher; mock only HTTP effects.
+  const { createSubmissionHost } = require('../utils/submission-host');
+  const reviewHost = await createSubmissionHost({
+    repository: 'test-owner/test-repo', head: mockGitHubResponses.fetchPullRequest.head_sha,
+    base: mockGitHubResponses.fetchPullRequest.base_sha, author: mockGitHubResponses.fetchPullRequest.author,
+    pr: mockGitHubResponses.fetchPullRequest, diff: mockWorktreeResponses.generateUnifiedDiff
+  });
+  const hostTransport = new GitHubClient({ apiHost: reviewHost.baseUrl, token: 'synthetic-e2e-only' }).octokit;
+  GitHubClient.prototype._buildOctokit = () => hostTransport;
   GitHubClient.prototype.repositoryExists = async () => true;
-  GitHubClient.prototype.getPendingReviewForUser = async () => null;
-  GitHubClient.prototype.getReviewById = async () => null;
-  GitHubClient.prototype.createReviewGraphQL = async () => ({
-    id: 'PRR_test12345',
-    databaseId: 12345,
-    html_url: 'https://github.com/test-owner/test-repo/pull/1#review-12345',
-    state: 'APPROVED',
-    comments_count: 0,
-    submitted_at: new Date().toISOString()
-  });
-  GitHubClient.prototype.createDraftReviewGraphQL = async () => ({
-    id: 'PRR_test12346',
-    databaseId: 12346,
-    html_url: 'https://github.com/test-owner/test-repo/pull/1#review-12346',
-    state: 'PENDING',
-    comments_count: 0
-  });
 
   // Mock worktree manager
   GitWorktreeManager.prototype.getWorktreePath = async () => mockWorktreeResponses.getWorktreePath;
@@ -586,32 +577,6 @@ async function startTestServer(port) {
     }
   });
 
-  // Mock suggestions endpoint (unified)
-  app.get('/api/reviews/:reviewId/suggestions', (req, res) => {
-    const { reviewId } = req.params;
-    try {
-      const rows = db.prepare(`
-        SELECT id, source, author, ai_run_id, ai_level, ai_confidence,
-               file, line_start, line_end, side, type, title, body,
-               reasoning, status, status_reason, is_file_level, created_at, updated_at
-        FROM comments
-        WHERE review_id = ? AND source = 'ai'
-          AND (ai_level IS NULL)
-          AND status IN ('active', 'dismissed', 'adopted', 'draft', 'submitted')
-          AND (is_raw = 0 OR is_raw IS NULL)
-        ORDER BY is_file_level DESC, file, line_start
-      `).all(parseInt(reviewId));
-
-      const suggestions = rows.map(row => ({
-        ...row,
-        reasoning: row.reasoning ? JSON.parse(row.reasoning) : null
-      }));
-
-      res.json({ suggestions });
-    } catch (e) {
-      res.json({ suggestions: [] });
-    }
-  });
 
   // Mock suggestion status update endpoint (unified)
   app.post('/api/reviews/:reviewId/suggestions/:id/status', (req, res) => {
@@ -634,24 +599,6 @@ async function startTestServer(port) {
       res.json({ success: true, status });
     } catch (e) {
       res.status(500).json({ error: 'Failed to update status' });
-    }
-  });
-
-  // E2E-only cleanup hook: delete AI-seeded suggestion + analysis-run rows for
-  // a review. The mock analyses POST above inserts AI rows straight into the
-  // `comments` table (source='ai') plus an `analysis_runs` row; production has
-  // no route that deletes those (the user-comment DELETE routes are scoped to
-  // source='user'). A describe block that seeds AI suggestions uses this so it
-  // can tear down symmetrically and not leak AI rows into later tests that
-  // revisit the same review on the shared per-worker DB.
-  app.delete('/api/reviews/:reviewId/ai-suggestions', (req, res) => {
-    const reviewId = parseInt(req.params.reviewId, 10);
-    try {
-      const info = db.prepare("DELETE FROM comments WHERE review_id = ? AND source = 'ai'").run(reviewId);
-      db.prepare('DELETE FROM analysis_runs WHERE review_id = ?').run(reviewId);
-      res.json({ success: true, deleted: info.changes });
-    } catch (e) {
-      res.status(500).json({ error: e.message });
     }
   });
 
@@ -929,13 +876,23 @@ async function startTestServer(port) {
 
   // Start server on the given port
   const server = await new Promise((resolve, reject) => {
-    const srv = app.listen(port, () => resolve(srv));
+    const srv = app.listen(port, '127.0.0.1', () => resolve(srv));
     srv.on('error', (err) => reject(err));
   });
+  const ws = require('../../src/ws');
+  ws.attachWebSocket(server, db);
 
   console.log(`E2E test server (worker) running on http://localhost:${port}`);
 
-  return { server, db, app, port };
+  return { server, db, app, port, reviewHost, async close() {
+    ws.closeAll();
+    const stopped = new Promise(resolve => server.close(resolve));
+    server.closeAllConnections();
+    await stopped;
+    await reviewHost.close();
+    db.close();
+    GitHubClient.prototype._buildOctokit = originalBuildOctokit;
+  } };
 }
 
 module.exports = { startTestServer };

@@ -9713,6 +9713,10 @@ body.resizing * {
 }
 
 @media (max-width: 1200px) {
+  .main-layout {
+    --sidebar-width: 0px;
+  }
+
   .main-layout .sidebar {
     display: none;
   }
@@ -9723,6 +9727,10 @@ body.resizing * {
 }
 
 @media (max-width: 900px) {
+  .main-layout {
+    --right-panel-group-width: 0px;
+  }
+
   .right-panel-group,
   .ai-panel,
   .chat-panel {

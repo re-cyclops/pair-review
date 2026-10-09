@@ -145,28 +145,21 @@ test.describe('Editing File Comments', () => {
     await expect(cardBody).toContainText('Edited file comment', { timeout: 5000 });
   });
 
-  test('should cancel edit and restore original text', async ({ page }) => {
+  test('retains a pending file edit after closing and reloading', async ({ page }) => {
     const card = page.locator(`[data-comment-id="${commentId}"]`);
-    const editBtn = card.locator('.btn-edit-comment');
-    await editBtn.click();
-
-    // Wait for edit form
-    const editTextarea = card.locator('.file-comment-textarea');
-    await expect(editTextarea).toBeVisible({ timeout: 5000 });
-
-    // Type different text
-    await editTextarea.fill('This should be discarded');
-
-    // Cancel the edit
-    const cancelEditBtn = card.locator('.cancel-edit-btn');
-    await cancelEditBtn.click();
-
-    // Edit form should close
-    await expect(editTextarea).not.toBeVisible({ timeout: 5000 });
-
-    // Card should still show original text
-    const cardBody = card.locator('.user-comment-body');
-    await expect(cardBody).toContainText('Original file comment');
+    await card.locator('.btn-edit-comment').click();
+    const textarea = card.locator('.file-comment-textarea');
+    await expect(textarea).toBeEditable();
+    const text = 'Preserve the file invariant before changing `request.state`';
+    await textarea.fill(text);
+    const saved = page.waitForResponse(response =>
+      response.url().endsWith(`/comments/${commentId}`) && response.request().method() === 'PUT' && response.ok());
+    await card.getByRole('button', { name: 'Close', exact: true }).click();
+    await saved;
+    await page.reload();
+    await waitForDiffToRender(page);
+    await card.locator('.btn-edit-comment').click();
+    await expect(card.locator('.file-comment-textarea')).toHaveValue(text);
   });
 
   test('should correctly edit file comments containing double quotes', async ({ page }) => {

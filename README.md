@@ -831,6 +831,13 @@ termination is acknowledged separately. Completion can report partial results.
 Record a result as seen with `POST /api/analyses/:id/seen` and its exact
 `sequence`; stale acknowledgements return `409`.
 
+Terminal results remain unread until explicitly marked seen, including after
+navigation or reconnection. Browser completion notifications are optional:
+enable them from the activity panel to request permission. A notification
+attempt is claimed once per run in the shared database; reconnecting tabs do
+not claim it again. The in-app result remains available without permission or
+successful desktop delivery.
+
 `GET /api/pr/:owner/:repo/:number/snapshot` reads approvals, requests, policy,
 threads, and head/test-merge checks through the existing host binding. It does
 not prepare a worktree. Missing permissions and truncated pagination remain
@@ -844,6 +851,58 @@ GitHub calls or worktree setup.
 HTTP and WebSocket listeners bind to loopback. For a remote instance, use an
 authenticated tunnel and its browser-reachable URL; a server-local URL alone
 does not establish that the browser is observing the same process.
+
+### Saved drafts and exact publication
+
+Inline, file-level and review-body drafts are saved with revision checks.
+Multiple editors remain independent across refreshes and navigation. A
+conflicting save preserves both versions for explicit resolution; it does not
+silently overwrite another tab. Unacknowledged browser text remains recoverable
+until the server acknowledges it.
+
+Inclusion is separate from dismissal and deletion. The review dialog lists
+every saved draft, including comments outside the rendered files. Its selected
+count, exact Markdown preview and publication payload come from one server
+manifest. Changes to text, selection, target, account, head or anchors invalidate
+confirmation. Publication adds no hidden attribution, location prefix or footer.
+Local-only authoring does not need GitHub; remote publication requires an
+explicit PR association and a clean, branch-inclusive checkout at the PR head.
+
+Submission attempts and per-comment receipts survive reloads and restarts.
+Accepted comments are not replayed. An ambiguous write is not retried merely
+because a subsequent read finds nothing; use the recorded receipt and host
+link to inspect the outcome. Unrelated pending reviews are neither submitted
+nor deleted. The app checks an owned pending review's contents after its final
+identity check and before submission.
+
+Host reads and submission are not atomic. Do not edit that pending review from
+another host client while publishing: an edit after the final content read can
+still race with submission. The final preview displays this limitation.
+
+### Reviewed revisions and finding freshness
+
+Use **Mark revision reviewed…** to record a human-reviewed baseline. Opening a
+review, viewing a file, and completing AI analysis record separate facts; none
+approves or publishes a review. The progress strip distinguishes file visits,
+content-bound viewed marks, triaged findings, selected comments, and prior
+submission receipts.
+
+Within the same review scope, viewed marks survive unchanged diff/context
+content and merge across tabs. Changed content invalidates the affected marks. Legacy viewed history
+lacks revision evidence and is not treated as proof that current content was
+reviewed. `GET /api/reviews/:id/progress` returns the current state; mutations
+require its content-bound token and reject a changed review context.
+
+**Changes since reviewed…** compares the recorded baseline using the existing
+checkout. It leaves the full current diff available and falls back to that
+diff when ancestry, scope, local changes, renamed/deleted paths, or missing
+history prevent a reliable comparison. The baseline is additional AI context,
+not a smaller analysis scope, and is frozen in each run's protocol receipt.
+
+Findings from an older or unknown revision are labelled without rewriting
+their text or anchors. Draft publication still requires current, verified
+anchors. The analysis-history selector owns the displayed run across refreshes;
+late responses and deferred renders cannot replace its newer findings.
 
 
 ### Three-Level AI Analysis

@@ -34,6 +34,13 @@
       .replace(/'/g, '&#39;');
   }
 
+  function buildRevisionWarningHtml(revision) {
+    if (!revision || revision.state === 'current') return '';
+    const label = revision.state === 'stale' ? 'Older revision — verify anchors' : 'Revision unknown — verify anchors';
+    const detail = `Recorded head: ${revision.head || 'unknown'}. Current head: ${revision.currentHead || 'unknown'}. Text is preserved; verify against the current diff before publication.`;
+    return `<span class="ai-revision-warning" title="${escapeReasonHtml(detail)}">${label}</span>`;
+  }
+
   /**
    * Build the expanded reply-styled dismissal note block. Rendered under the
    * suggestion body of a dismissed AI suggestion when a reason is present.
@@ -186,6 +193,7 @@
     DISMISSAL_NOTE_LABEL,
     POPOVER_DISMISSAL_HEADING,
     escapeReasonHtml,
+    buildRevisionWarningHtml,
     buildDismissalNoteHtml,
     buildReasoningPopoverContentHtml,
     setCollapsedStateTooltip,

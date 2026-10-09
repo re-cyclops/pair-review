@@ -4,15 +4,12 @@ const restImpl = require('../impl/rest/review-lifecycle');
 
 /**
  * Dispatcher for the `review_lifecycle` area:
- *   - addPullRequestReview (creates a pending review)
  *   - addPullRequestReviewWithBody (creates a pending review with a body)
  *   - submitPullRequestReview (submits a pending review with an event)
- *   - deletePullRequestReview (deletes a pending review)
  *
  * Each operation inspects `features.review_lifecycle`:
  *   - `"graphql"` (default for github.com): delegates to the GraphQL impl
- *     in `impl/graphql/review-lifecycle.js`. Identical behaviour to what
- *     `GitHubClient` did before the Phase 3 refactor.
+ *     in `impl/graphql/review-lifecycle.js`.
  *   - `"rest"`: delegates to `impl/rest/review-lifecycle.js`. The REST
  *     impl requires a `prContext = { owner, repo, prNumber, reviewId? }`
  *     because REST endpoints identify the review by
@@ -38,25 +35,6 @@ function notYetAvailable(mode) {
 }
 
 /**
- * Create a pending review (no body).
- *
- * @param {Object} octokit
- * @param {Object} features
- * @param {string} prNodeId - GraphQL node id; required for GraphQL, accepted for REST signature parity
- * @param {Object} [prContext] - { owner, repo, prNumber } — REQUIRED for REST mode
- */
-async function addPullRequestReview(octokit, features, prNodeId, prContext) {
-  const mode = selectFeature(features);
-  if (mode === 'graphql') {
-    return graphqlImpl.addPullRequestReview(octokit, prNodeId);
-  }
-  if (mode === 'rest') {
-    return restImpl.addPullRequestReview(octokit, prNodeId, prContext);
-  }
-  notYetAvailable(mode);
-}
-
-/**
  * Create a pending review with a body.
  *
  * @param {Object} octokit
@@ -68,7 +46,7 @@ async function addPullRequestReview(octokit, features, prNodeId, prContext) {
 async function addPullRequestReviewWithBody(octokit, features, prNodeId, body, prContext) {
   const mode = selectFeature(features);
   if (mode === 'graphql') {
-    return graphqlImpl.addPullRequestReviewWithBody(octokit, prNodeId, body);
+    return graphqlImpl.addPullRequestReviewWithBody(octokit, prNodeId, body, prContext);
   }
   if (mode === 'rest') {
     return restImpl.addPullRequestReviewWithBody(octokit, prNodeId, body, prContext);
@@ -97,30 +75,9 @@ async function submitPullRequestReview(octokit, features, reviewId, event, body,
   notYetAvailable(mode);
 }
 
-/**
- * Delete a pending review.
- *
- * @param {Object} octokit
- * @param {Object} features
- * @param {string|number} reviewId
- * @param {Object} [prContext] - { owner, repo, prNumber, reviewId? } — REQUIRED for REST mode
- */
-async function deletePullRequestReview(octokit, features, reviewId, prContext) {
-  const mode = selectFeature(features);
-  if (mode === 'graphql') {
-    return graphqlImpl.deletePullRequestReview(octokit, reviewId);
-  }
-  if (mode === 'rest') {
-    return restImpl.deletePullRequestReview(octokit, reviewId, prContext);
-  }
-  notYetAvailable(mode);
-}
-
 module.exports = {
-  addPullRequestReview,
   addPullRequestReviewWithBody,
   submitPullRequestReview,
-  deletePullRequestReview,
   AREA,
   IMPLEMENTED_MODES
 };

@@ -29,7 +29,7 @@
  *     contains two files, sorted alphabetically: 'src/main.js' (first) and
  *     'src/utils.js' (second). Both are expanded by default and render on load.
  *   - We make 'src/main.js' start COLLAPSED by mocking the viewed-state
- *     endpoint (GET /api/pr/:owner/:repo/:number/files/viewed) per-test via
+ *     endpoint (GET /api/reviews/:reviewId/progress) per-test via
  *     page.route(). A viewed file starts collapsed (renderFileDiff: isViewed →
  *     isCollapsed). This is fully isolated — no shared-fixture changes — and
  *     keeps 'src/utils.js' expanded so waitForDiffToRender() still resolves.
@@ -56,15 +56,14 @@ const EXPANDED_FILE = 'src/utils.js';
  * @param {string[]} files
  */
 async function mockViewedFiles(page, files) {
-  await page.route('**/api/pr/*/*/*/files/viewed', async (route) => {
+  await page.route('**/api/reviews/*/progress', async (route) => {
     if (route.request().method() !== 'GET') {
-      // Let POSTs (save viewed state) hit the real handler.
+      // Let mutations hit the real handler.
       return route.fallback();
     }
-    await route.fulfill({
-      contentType: 'application/json',
-      body: JSON.stringify({ files })
-    });
+    const response = await route.fetch();
+    const state = await response.json();
+    await route.fulfill({ response, json: { ...state, files } });
   });
 }
 
@@ -164,10 +163,13 @@ async function mockLargeMainDiff(page) {
     '+added line\n' +
     ' line b';
   await page.route('**/api/pr/*/*/*/diff', async (route) => {
+    const response = await route.fetch();
+    const original = await response.json();
     await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({
         diff,
+        progress_context: original.progress_context,
         changed_files: [
           { file: 'src/main.js', additions: 20100, deletions: 0 },
           { file: 'src/utils.js', additions: 1, deletions: 0 }

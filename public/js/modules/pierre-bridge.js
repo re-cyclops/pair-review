@@ -1899,6 +1899,8 @@ class PierreBridge {
    * @private
    */
   _renderCommentAnnotation(comment, id) {
+    const preserved = window.reviewDrafts?.preservedComment(comment);
+    if (preserved) return preserved;
     const escapeHtml = window.prManager?.escapeHtml?.bind(window.prManager) || ((s) => s);
 
     const lineInfo = comment.line_end && comment.line_end !== comment.line_start
@@ -2118,6 +2120,10 @@ class PierreBridge {
       textarea.value = data.initialValue;
     }
     container.appendChild(textarea);
+    window.reviewDrafts?.bind(textarea, {
+      anchor: { file: fileName, line_start: data.lineStart, line_end: data.lineEnd || data.lineStart, side: data.side || 'RIGHT', diff_position: data.diffPosition ?? null },
+      included: !data.customSubmit, parentId: data.parentId
+    });
 
     // Actions — order matches legacy: Save, Chat, Cancel
     const actions = document.createElement('div');
@@ -2125,7 +2131,7 @@ class PierreBridge {
 
     const saveBtn = document.createElement('button');
     saveBtn.className = 'btn btn-sm btn-primary save-comment-btn';
-    saveBtn.textContent = 'Save';
+    saveBtn.textContent = data.customSubmit ? 'Include edited draft' : 'Done';
     // Sync disabled state with initial textarea content — when `initialValue`
     // is set programmatically above, the `input` event does not fire, so we
     // must compute this here rather than relying on the listener.
@@ -2163,7 +2169,7 @@ class PierreBridge {
       window.chatPanel.open({
         commentContext: {
           type: 'line',
-          body: textarea.value.trim() || null,
+          body: textarea.value || null,
           file: fileName || '',
           line_start: parseInt(textarea.dataset.line) || null,
           line_end: parseInt(textarea.dataset.lineEnd) || parseInt(textarea.dataset.line) || null,
@@ -2176,7 +2182,7 @@ class PierreBridge {
 
     const cancelBtn = document.createElement('button');
     cancelBtn.className = 'btn btn-sm btn-secondary cancel-comment-btn';
-    cancelBtn.textContent = 'Cancel';
+    cancelBtn.textContent = 'Close';
     cancelBtn.addEventListener('click', () => {
       if (this.options.onCommentFormCancel) {
         this.options.onCommentFormCancel(fileName, id, data);

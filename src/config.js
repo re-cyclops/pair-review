@@ -540,7 +540,7 @@ function _runTokenCommand(command, repository, logContext) {
     logger.debug(`Using token from ${logContext} (cached)`);
     return _cachedRepoTokens.get(cacheKey);
   }
-  logger.debug(`Attempting token from ${logContext}: ${command}`);
+  logger.debug(`Attempting token from ${logContext}`);
   try {
     const result = childProcess.execSync(command, {
       encoding: 'utf8',
@@ -548,14 +548,14 @@ function _runTokenCommand(command, repository, logContext) {
       stdio: ['pipe', 'pipe', 'ignore']
     }).trim();
     if (!result) {
-      logger.warn(`${logContext} did not produce a token (command: ${command})`);
+      logger.warn(`${logContext} did not produce a token`);
       return '';
     }
     logger.debug(`Using token from ${logContext}`);
     _cachedRepoTokens.set(cacheKey, result);
     return result;
   } catch (error) {
-    logger.warn(`${logContext} failed (command: ${command}): ${error.message}`);
+    logger.warn(`${logContext} ${error.killed || error.code === 'ETIMEDOUT' ? 'timed out' : 'failed'}`);
     return '';
   }
 }
@@ -671,7 +671,7 @@ function isExclusiveAltHost(repoConfig) {
  *
  * @param {string|null|undefined} repository - "owner/repo" identifier, or null/undefined for no-repo fallback
  * @param {Object} config - Configuration object from loadConfig()
- * @param {{ host?: string|null }} [options] - Per-PR host override (see above)
+ * @param {{ host?: string|null, cachedOnly?: boolean }} [options] - Host override; cachedOnly never executes credential commands
  * @returns {{ apiHost: string|null, host: string|null, token: string, features: Object, cloneUrl: string|null, source: string, refresh: (function(): string)|null }}
  */
 function resolveHostBinding(repository, config, options = {}) {
@@ -753,6 +753,9 @@ function resolveHostBinding(repository, config, options = {}) {
 
   // 3. Repo-level token_command
   if (useRepoScopedToken && repoConfig && typeof repoConfig.token_command === 'string' && repoConfig.token_command) {
+    if (options.cachedOnly && !_cachedRepoTokens.has(`${repository ?? ''}|${repoConfig.token_command}`)) {
+      return { apiHost, host: apiHost, token: '', features, cloneUrl, source: 'repo:token_command', refresh: null };
+    }
     const result = _runTokenCommand(repoConfig.token_command, repository, 'repo:token_command');
     if (result) {
       return {
@@ -783,6 +786,9 @@ function resolveHostBinding(repository, config, options = {}) {
   // slow) command per repo per session. Repo-level `token_command`
   // above keeps its per-(repo, command) cache key.
   if (useGithubChain && typeof safeConfig.github_token_command === 'string' && safeConfig.github_token_command) {
+    if (options.cachedOnly && !_cachedRepoTokens.has(`|${safeConfig.github_token_command}`)) {
+      return { apiHost, host: apiHost, token: '', features, cloneUrl, source: 'config:github_token_command', refresh: null };
+    }
     const result = _runTokenCommand(safeConfig.github_token_command, null, 'config:github_token_command');
     if (result) {
       return {
@@ -825,7 +831,7 @@ function _makeRefresh(repository, config, source, options = {}) {
     invalidateTokenCache(repository, config, source);
     // Re-resolve after invalidation so _runTokenCommand re-executes the
     // command. Returns '' if the command now fails or yields nothing.
-    return resolveHostBinding(repository, config, options).token;
+    return resolveHostBinding(repository, config, { ...options, cachedOnly: false }).token;
   };
 }
 
@@ -884,11 +890,12 @@ function invalidateTokenCache(repository, config, source) {
  *
  * @param {Object} config - Configuration object from loadConfig()
  * @param {string} [repository] - Optional "owner/repo" identifier
+ * @param {{ cachedOnly?: boolean }} [options] - Inspect resolved credentials without executing a command
  * @returns {string} - GitHub token or empty string if not configured
  */
-function getGitHubToken(config, repository) {
+function getGitHubToken(config, repository, options = {}) {
   if (repository) {
-    return resolveHostBinding(repository, config).token;
+    return resolveHostBinding(repository, config, options).token;
   }
   // No-repo fallback path. Preserves previous behaviour (and previous
   // single-slot cache via _cachedCommandToken) for callers that have no
@@ -906,7 +913,8 @@ function getGitHubToken(config, repository) {
       logger.debug('Using GitHub token from github_token_command (cached)');
       return _cachedCommandToken;
     }
-    logger.debug(`Attempting GitHub token from command: ${config.github_token_command}`);
+    if (options.cachedOnly) return '';
+    logger.debug('Attempting GitHub token from github_token_command');
     try {
       const result = childProcess.execSync(config.github_token_command, {
         encoding: 'utf8',
@@ -914,14 +922,14 @@ function getGitHubToken(config, repository) {
         stdio: ['pipe', 'pipe', 'ignore']
       }).trim();
       if (!result) {
-        logger.warn(`github_token_command did not produce a token (command: ${config.github_token_command})`);
+        logger.warn('github_token_command did not produce a token');
         return '';
       }
       logger.debug('Using GitHub token from github_token_command');
       _cachedCommandToken = result;
       return result;
     } catch (error) {
-      logger.warn(`github_token_command failed (command: ${config.github_token_command}): ${error.message}`);
+      logger.warn(`github_token_command ${error.killed || error.code === 'ETIMEDOUT' ? 'timed out' : 'failed'}`);
       return '';
     }
   }

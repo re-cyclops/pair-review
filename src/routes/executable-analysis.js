@@ -30,6 +30,8 @@ const { buildFileLineCountMap, validateSuggestionLineNumbers } = require('../uti
 const { GIT_DIFF_FLAGS } = require('../git/diff-flags');
 const { generateScopedDiff, findMergeBase } = require('../local-review');
 const { scopeIncludes } = require('../local-scope');
+const { baselineInstructions } = require('../review-progress');
+const { safeParseJson } = require('../utils/safe-parse-json');
 
 /**
  * Generate a diff for the executable provider and write it to a file.
@@ -350,6 +352,8 @@ async function runExecutableAnalysis(req, res, params, shared, callbacks) {
         // Use resolved CLI model (cli_model || id) instead of raw model ID; null suppresses model
         model: provider.resolvedModel !== undefined ? provider.resolvedModel : (provider.model || null)
       };
+      executableContext.customInstructions = [executableContext.customInstructions,
+        baselineInstructions(safeParseJson((await analysisRunRepo.getById(runId))?.review_baseline))].filter(Boolean).join('\n\n') || null;
       const cwd = executableContext.cwd || process.cwd();
 
       // Only generate a diff file when the provider's context_args maps diff_path to a CLI flag

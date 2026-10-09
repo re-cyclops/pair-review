@@ -80,68 +80,6 @@ test.describe('Comment Creation', () => {
   });
 });
 
-test.describe('Review Modal', () => {
-  test('should show review button in toolbar', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await waitForDiffToRender(page);
-
-    // Should have a submit review button (SplitButton with Review text)
-    const reviewBtn = page.locator('button:has-text("Review"), .split-button-main:has-text("Submit"), #submit-review-btn');
-    const count = await reviewBtn.count();
-    expect(count).toBeGreaterThan(0);
-  });
-
-  test('should open review modal when clicking review button', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await waitForDiffToRender(page);
-
-    // Click the submit review button
-    const reviewBtn = page.locator('button:has-text("Review"), .split-button-main, #submit-review-btn').first();
-    await reviewBtn.click();
-
-    // Modal should appear (review modal specifically, not progress modal)
-    const modal = page.locator('.review-modal-overlay, .review-modal-container');
-    await expect(modal.first()).toBeVisible({ timeout: 5000 });
-  });
-
-  test('should have review event options (Approve, Comment, Request Changes)', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await waitForDiffToRender(page);
-
-    // Open review modal
-    await page.locator('button:has-text("Review"), .split-button-main, #submit-review-btn').first().click();
-
-    // Wait for review modal specifically
-    await page.waitForSelector('.review-modal-overlay, .review-modal-container', { timeout: 5000 });
-
-    // Should have review type options (radio buttons with APPROVE, COMMENT, REQUEST_CHANGES values)
-    const approveRadio = page.locator('input[value="APPROVE"]');
-    const commentRadio = page.locator('input[value="COMMENT"]');
-    const requestChangesRadio = page.locator('input[value="REQUEST_CHANGES"]');
-
-    // All three review event options should be visible
-    await expect(approveRadio).toBeVisible();
-    await expect(commentRadio).toBeVisible();
-    await expect(requestChangesRadio).toBeVisible();
-  });
-
-  test('should close review modal on cancel', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await waitForDiffToRender(page);
-
-    // Open review modal
-    await page.locator('.split-button-main').click();
-
-    const modal = page.locator('.review-modal-overlay');
-    await expect(modal).toBeVisible({ timeout: 5000 });
-
-    // Click cancel
-    await page.locator('#cancel-review-btn').click();
-
-    // Wait for modal to be hidden (handles animations)
-    await modal.waitFor({ state: 'hidden', timeout: 5000 });
-  });
-});
 
 test.describe('API Integration', () => {
   test('should fetch PR data from API on page load', async ({ page }) => {

@@ -4,7 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const { loadConfig, getConfigDir, showWelcomeMessage, resolveDbName, resolveRepoOptions, resolvePoolConfig, getRepoResetScript, getRepoSkipBulkFetch, getRepoFetchTimeout, resolveLoadSkills, buildCouncilProviderOverrides, resolveBindingRepositoryFromPR } = require('./config');
-const { initializeDatabase, run, queryOne, query, migrateExistingWorktrees, WorktreeRepository, ReviewRepository, RepoSettingsRepository, GitHubReviewRepository, WorktreePoolRepository, CouncilRepository, CommentRepository, AnalysisRunRepository, PRMetadataRepository } = require('./database');
+const { initializeDatabase, run, queryOne, query, migrateExistingWorktrees, WorktreeRepository, ReviewRepository, RepoSettingsRepository, WorktreePoolRepository, CouncilRepository, CommentRepository, AnalysisRunRepository, PRMetadataRepository } = require('./database');
 const { PRArgumentParser } = require('./github/parser');
 const { GitHubClient } = require('./github/client');
 const { GitWorktreeManager } = require('./git/worktree');
@@ -34,7 +34,7 @@ const logger = require('./utils/logger');
 const simpleGit = require('simple-git');
 const { getGeneratedFilePatterns } = require('./git/gitattributes');
 const { GIT_DIFF_FLAGS_ARRAY, GIT_DIFF_SUMMARY_FLAGS_ARRAY } = require('./git/diff-flags');
-const { getEmoji: getCategoryEmoji } = require('./utils/category-emoji');
+const { buildSubmissionManifest, publishSubmission } = require('./review-submission');
 const open = (...args) => process.env.PAIR_REVIEW_NO_OPEN ? Promise.resolve() : import('open').then(({default: open}) => open(...args));
 const { registerProtocolHandler, unregisterProtocolHandler } = require('./protocol-handler');
 const { attemptDelegation } = require('./single-port');
@@ -1323,24 +1323,6 @@ async function startServerOnly(config, poolLifecycle = null, flags = {}) {
 }
 
 
-/**
- * Format AI suggestion with emoji and category prefix
- * @param {string} text - The suggestion text
- * @param {string} category - The suggestion category
- * @returns {string} Formatted comment text
- */
-function formatAISuggestion(text, category) {
-  if (!category) {
-    return text;
-  }
-  const emoji = getCategoryEmoji(category);
-  // Properly capitalize hyphenated categories (e.g., "code-style" -> "Code Style")
-  const capitalizedCategory = category
-    .split('-')
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(' ');
-  return `${emoji} **${capitalizedCategory}**: ${text}`;
-}
 
 /**
  * Shared implementation for headless (non-interactive) review modes.
@@ -1610,8 +1592,6 @@ async function performHeadlessReview(args, config, db, flags, options, externalP
       throw new Error('Failed to retrieve stored PR metadata');
     }
 
-    // The raw blob is still needed for fields that live only in pr_data (node_id).
-    const storedPRData = prMetadata.pr_data_parsed;
 
     // Get or create a review record for this PR
     // The review.id is passed to the analyzer so comments use review.id, not prMetadata.id
@@ -1652,12 +1632,13 @@ async function performHeadlessReview(args, config, db, flags, options, externalP
     const providerOverrides = { load_skills: loadSkills };
 
     let analysisSummary = null;
+    let analysisRunId;
     try {
       // Pass all instruction levels to ensure they're captured in the analysis run.
       // githubClient is forwarded so the analyzer can pre-fetch existing PR review
       // comments when callers opt in via excludePrevious.github.
       logger.debug(`analyzer githubClient wired for ${prInfo.owner}/${prInfo.repo}#${prInfo.number}`);
-      const { result: analysisResult } = await runHeadlessAnalysis(db, config, {
+      const { runId, result: analysisResult } = await runHeadlessAnalysis(db, config, {
         reviewId: review.id,
         worktreePath,
         prMetadata,
@@ -1670,6 +1651,7 @@ async function performHeadlessReview(args, config, db, flags, options, externalP
         githubClient
       });
       analysisSummary = analysisResult.summary;
+      analysisRunId = runId;
       console.log('AI analysis completed successfully');
     } catch (analysisError) {
       console.error(`AI analysis failed: ${analysisError.message}`);
@@ -1678,21 +1660,11 @@ async function performHeadlessReview(args, config, db, flags, options, externalP
       throw new Error(`AI analysis failed: ${analysisError.message}`);
     }
 
-    // Query for final AI suggestions (orchestrated, not per-level)
-    // Use review.id (not prMetadata.id) to match how comments are stored
-    const aiSuggestions = await query(db, `
-      SELECT
-        id,
-        file,
-        line_start,
-        body,
-        diff_position,
-        title,
-        type
-      FROM comments
-      WHERE review_id = ? AND source = 'ai' AND ai_level IS NULL AND (is_raw = 0 OR is_raw IS NULL) AND status = 'active'
-      ORDER BY file, line_start
-    `, [review.id]);
+    // Explicit headless publishing selects this run only, never unrelated
+    // human drafts or active findings from an older analysis.
+    const aiSuggestions = await query(db, `SELECT id FROM comments WHERE review_id = ? AND ai_run_id = ?
+      AND source = 'ai' AND ai_level IS NULL AND COALESCE(is_raw, 0) = 0 AND status = 'active'
+      ORDER BY file, line_start, side, id`, [review.id, analysisRunId]);
 
     console.log(`Found ${aiSuggestions.length} AI suggestions to submit`);
 
@@ -1701,175 +1673,22 @@ async function performHeadlessReview(args, config, db, flags, options, externalP
       return; // Exit gracefully without creating a review
     }
 
-    // Filter out suggestions without valid line information
-    // Note: diff positions will be recalculated fresh by GitHub client
-    const validSuggestions = aiSuggestions.filter(suggestion => {
-      const hasValidLine = suggestion.line_start && suggestion.line_start > 0;
-      const hasValidPath = suggestion.file && suggestion.file.trim() !== '';
-
-      if (!hasValidLine || !hasValidPath) {
-        console.warn(`Skipping suggestion for ${suggestion.file || 'unknown file'}:${suggestion.line_start || 'unknown line'} - missing valid line or path information`);
-        return false;
-      }
-
-      return true;
-    });
-
-    console.log(`Filtered to ${validSuggestions.length} suggestions with valid line information`);
-
-    if (validSuggestions.length === 0) {
-      console.log('No suggestions with valid line information. Exiting without creating review.');
-      return; // Exit gracefully without creating a review
-    }
-
-    // Format AI suggestions for GitHub
-    const githubComments = validSuggestions.map(suggestion => {
-      // Format with emoji and category prefix, same as adopted suggestions
-      const formattedBody = formatAISuggestion(suggestion.body, suggestion.type);
-
-      return {
-        path: suggestion.file,
-        line: suggestion.line_start,
-        body: formattedBody,
-        side: 'RIGHT',    // AI suggestions always target added/modified code
-        isFileLevel: false // AI suggestions always target specific lines
-      };
-    });
-
-    // Build review body with AI-generated summary
-    const footerFlag = options.mode === 'draft' ? '--ai-draft' : '--ai-review';
-    const reviewBody = analysisSummary
-      ? `## AI Analysis Summary
-
-${analysisSummary}
-
-> Generated by [pair-review](https://github.com/in-the-loop-labs/pair-review) with \`${footerFlag}\` mode`
-      : `## AI Analysis Summary
-
-Found ${validSuggestions.length} suggestion${validSuggestions.length === 1 ? '' : 's'} from automated analysis.
-
-> Generated by [pair-review](https://github.com/in-the-loop-labs/pair-review) with \`${footerFlag}\` mode`;
-
-    // Submit review to GitHub via GraphQL (same path as web UI)
-    console.log(`Submitting review with ${githubComments.length} comments...`);
-
-    // Check for existing pending draft (GitHub only allows one per user per PR)
-    const existingDraft = await githubClient.getPendingReviewForUser(
-      prInfo.owner, prInfo.repo, prInfo.number
-    );
-
-    // GraphQL PR node id is only required when we'll be creating a NEW
-    // GraphQL review (no existing draft to reuse) OR adding GraphQL
-    // review comments. REST and host-impl configurations address the
-    // PR by (owner, repo, prNumber) + numeric review id and ignore
-    // prNodeId; reusing an existing GraphQL draft also doesn't need
-    // the PR node id because the review node id is sufficient.
-    const willCreateNewGraphQLReview =
-      headlessBinding.features.review_lifecycle === 'graphql' && !existingDraft;
-    const willAddGraphQLComments =
-      githubComments.length > 0 && headlessBinding.features.pending_review_comments === 'graphql';
-    const needsGraphQLNodeId = willCreateNewGraphQLReview || willAddGraphQLComments;
-
-    if (needsGraphQLNodeId && !storedPRData.node_id) {
-      throw new Error(
-        `GraphQL PR node id required for ${prInfo.owner}/${prInfo.repo}#${prInfo.number} ` +
-        `(features.review_lifecycle = "${headlessBinding.features.review_lifecycle}", ` +
-        `pending_review_comments = "${headlessBinding.features.pending_review_comments}"). ` +
-        `PR record is missing node_id — refresh the PR data and try again.`
-      );
-    }
-
-    const prNodeId = storedPRData.node_id ?? null;
-
-    const submitPrContext = {
-      owner: prInfo.owner,
-      repo: prInfo.repo,
-      prNumber: prInfo.number,
-      reviewId: existingDraft?.databaseId
+    const submissionOptions = {
+      db, config, reviewId: review.id, client: githubClient,
+      target: { owner: prInfo.owner, repo: prInfo.repo, prNumber: prInfo.number },
+      mode: options.reviewEvent === 'DRAFT' ? 'draft' : 'submit',
+      event: options.reviewEvent === 'DRAFT' ? 'COMMENT' : options.reviewEvent,
+      body: analysisSummary || '',
+      selection: { kind: 'analysis', analysisId: analysisRunId, ids: aiSuggestions.map(suggestion => suggestion.id),
+        commentFormat: config.comment_format || 'legacy' }
     };
-
-    let githubReview;
-    if (options.reviewEvent === 'DRAFT') {
-      githubReview = await githubClient.createDraftReviewGraphQL(
-        prNodeId, reviewBody, githubComments, existingDraft?.id, submitPrContext
-      );
-    } else {
-      githubReview = await githubClient.createReviewGraphQL(
-        prNodeId, options.reviewEvent, reviewBody, githubComments, existingDraft?.id, submitPrContext
-      );
-    }
-
-    // When adding to an existing draft, use the existing URL and include prior comments in total count
-    if (existingDraft) {
-      githubReview.html_url = githubReview.html_url || existingDraft.url;
-      githubReview.comments_count = existingDraft.comments.totalCount + githubReview.comments_count;
-    }
-
-    // ID storage strategy (matches pr.js convention):
-    // - github_reviews.github_review_id -> numeric database ID
-    // - github_reviews.github_node_id -> GraphQL node ID (e.g., "PRR_kwDOM...")
-    // - reviewData JSON -> uses 'github_node_id' key for the GraphQL node ID
-    const githubNodeId = String(githubReview.id); // GraphQL methods return node IDs
-    const githubDatabaseId = githubReview.databaseId
-      ? String(githubReview.databaseId)
-      : existingDraft ? String(existingDraft.databaseId) : null;
-
-    const githubReviewState = options.reviewEvent === 'DRAFT' ? 'pending' : 'submitted';
-
-    // Update database to track the review
-    await run(db, 'BEGIN TRANSACTION');
-
-    try {
-      const now = new Date().toISOString();
-      const reviewData = {
-        github_node_id: githubNodeId,
-        github_url: githubReview.html_url,
-        event: options.reviewEvent,
-        body: reviewBody || '',
-        comments_count: githubReview.comments_count,
-        created_at: now
-      };
-
-      // Update review record via repository method
-      // Uses UPDATE (not INSERT OR REPLACE) to avoid cascade deletion of comments/analysis_runs
-      await reviewRepo.updateAfterSubmission(review.id, {
-        event: options.reviewEvent,
-        reviewData: reviewData
-      });
-
-      // Create a github_reviews record to track this submission (matches pr.js)
-      const githubReviewRepo = new GitHubReviewRepository(db);
-      await githubReviewRepo.create(review.id, {
-        github_review_id: githubDatabaseId,
-        github_node_id: githubNodeId,
-        state: githubReviewState,
-        body: reviewBody || '',
-        github_url: githubReview.html_url
-      });
-
-      // Update AI suggestions to appropriate status (batch update for performance)
-      // Use validSuggestions (not aiSuggestions) to only update those that were actually submitted
-      if (validSuggestions.length > 0) {
-        const suggestionIds = validSuggestions.map(s => s.id);
-        const placeholders = suggestionIds.map(() => '?').join(',');
-        await run(db, `
-          UPDATE comments
-          SET status = ?, updated_at = ?
-          WHERE id IN (${placeholders})
-        `, [options.commentStatus, now, ...suggestionIds]);
-      }
-
-      await run(db, 'COMMIT');
-
-      const successLabel = options.reviewEvent === 'DRAFT' ? 'Draft review created' : 'Review submitted';
-      console.log(`\n✅ ${successLabel} successfully!`);
-      console.log(`   Review URL: ${githubReview.html_url}`);
-      console.log(`   Comments submitted: ${githubReview.comments_count}\n`);
-
-    } catch (dbError) {
-      await run(db, 'ROLLBACK');
-      throw dbError;
-    }
+    const manifest = await buildSubmissionManifest(submissionOptions);
+    if (manifest.blockers.length) throw new Error(manifest.blockers.join(' '));
+    console.log(`Explicit --ai-${options.mode} authorization: ${manifest.target.account.login} on ${manifest.target.host}, ${repository}#${prInfo.number}, head ${manifest.target.head}, ${manifest.count} comments, manifest ${manifest.digest}`);
+    const receipt = await publishSubmission(submissionOptions, manifest.digest);
+    console.log(`Submission receipt ${receipt.id}: ${receipt.state}`);
+    console.log(`Review URL: ${receipt.url}`);
+    if (!['submitted', 'draft_saved'].includes(receipt.state)) throw new Error(`${receipt.error || 'Publication did not finish'}. The durable receipt and drafts are preserved; inspect them in pair-review before retrying.`);
 
   } catch (error) {
     // Provide cleaner error messages for common issues

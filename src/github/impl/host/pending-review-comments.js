@@ -1,64 +1,11 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
-const logger = require('../../../utils/logger');
 
 /**
- * Host-extension implementation of the `pending_review_comments` area.
- *
- * GitHub's REST API does not support adding inline comments to a *pending*
- * draft review (the `addPullRequestReviewThread` GraphQL mutation has no
- * REST equivalent). Alt-hosts that advertise a compatible extension expose
- * this via a single HTTP POST that accepts a batch of comments.
- *
- * Documented generic contract:
- *
- *   POST {api_host}/repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}/comments
- *
- *   Request body:
- *     {
- *       "comments": [
- *         { "path": "...", "body": "...", "side": "RIGHT",
- *           "line": 42, "start_line": 40, "start_side": "RIGHT",
- *           "subject_type": "line" | "file",
- *           "commit_id": "<PR head SHA>" },
- *         ...
- *       ]
- *     }
- *
- *   `commit_id` is the PR head SHA. It is required by GitHub-compatible
- *   hosts that validate each comment like `pulls.createReviewComment`
- *   (which rejects a missing `commit_id` with a 422). It is sourced from
- *   `prContext.headSha` and omitted entirely when that value is absent.
- *
- *   Response (HTTP 200, partial-success body):
- *     {
- *       "added": <number>,
- *       "failed": [ { "index": <number>, "error_message": "..." }, ... ]
- *     }
- *
- *   Authorization: standard `Authorization: Bearer <token>` (attached by
- *   Octokit from the binding token).
- *
- * The host returns HTTP 200 with a partial-success body even when some
- * comments fail. A non-empty `failed` array is treated as a partial
- * failure: the returned shape matches the GraphQL impl so the caller
- * cannot tell which transport ran.
- *
- * Endpoint override: hosts that diverge from the default may set
- * `features.pending_review_comments_endpoint` to a template string
- * containing `{owner}`, `{repo}`, `{pull_number}`, `{review_id}`
- * placeholders. The template must be a relative path (starting with
- * `/repos/` or similar) — absolute URLs are rejected at config validation.
- *
- * Note on `reviewId`: this argument is the *host's* review identifier
- * (e.g. a numeric REST id), not a GraphQL node id. The REST/host
- * `review_lifecycle` impl (Phase 4) returns this id when it creates the
- * pending review; the caller passes it through unchanged.
- *
- * Note on `batchSize`: the original parameter is kept in the signature
- * for API compatibility with the GraphQL impl, but the host endpoint
- * accepts arbitrary batch sizes in a single call. We send all comments
- * in one POST and let the server enforce its own limits. The argument
- * is otherwise ignored.
+ * Configured host extension: POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}/comments
+ * accepts { comments: [...] } and returns { added, failed: [{ index, error_message }] }.
+ * The count contract acknowledges individual successes only when every index
+ * is accounted for. It does not provide comment IDs or idempotency. A lost or
+ * inconsistent response remains unknown; the publisher must not replay it.
  */
 
 const DEFAULT_ENDPOINT_TEMPLATE =
@@ -153,30 +100,9 @@ function toWireComment(comment, commitId) {
   return wire;
 }
 
-/**
- * Add a list of comments to a pending review via the host extension.
- *
- * @param {Object} octokit - Octokit instance bound to the host's baseUrl.
- *   `octokit.request()` will attach `Authorization: Bearer <token>` from
- *   the binding token automatically.
- * @param {Object} features - Feature-flag object from the host binding.
- *   May include `pending_review_comments_endpoint` to override the
- *   default endpoint path.
- * @param {Object} prContext - `{ owner, repo, prNumber, headSha? }`.
- *   Required — the host endpoint is path-shaped, so the GraphQL node IDs
- *   are not sufficient on their own. `headSha` (the PR head SHA) is
- *   forwarded as each comment's `commit_id`, required by
- *   GitHub-compatible hosts; omitted when absent.
- * @param {string} reviewId - The *host's* review identifier (returned
- *   by the host's M2 `review_lifecycle` impl, not a GraphQL node id).
- * @param {Array} comments - Comments with `{ path, line?, start_line?,
- *   side?, body, isFileLevel? }`. Same shape the GraphQL impl accepts.
- * @param {number} [_batchSize] - Ignored; kept for signature parity.
- * @returns {Promise<{successCount: number, failed: boolean, failedDetails: string[]}>}
- */
-async function addCommentsInBatches(octokit, features, prContext, reviewId, comments, _batchSize) {
+async function addCommentBatch(octokit, features, prContext, reviewId, comments) {
   if (!comments || comments.length === 0) {
-    return { successCount: 0, failed: false, failedDetails: [] };
+    return { receipts: [] };
   }
 
   if (!prContext || typeof prContext !== 'object') {
@@ -195,8 +121,8 @@ async function addCommentsInBatches(octokit, features, prContext, reviewId, comm
 
   // Resolve the *numeric* review id. The host endpoint is REST-shaped:
   // it identifies a review by its numeric database id, not its GraphQL
-  // node id. Prefer `prContext.reviewId` (set by the orchestration in
-  // `client.js` from the `databaseId` returned by addPullRequestReview)
+  // node id. Prefer `prContext.reviewId` (set by the durable publisher
+  // from the `databaseId` returned by review creation)
   // and fall back to the positional `reviewId` argument only when it is
   // itself numeric. If only a node id was supplied, fail fast with a
   // clear message so regressions surface immediately rather than as a
@@ -217,8 +143,8 @@ async function addCommentsInBatches(octokit, features, prContext, reviewId, comm
       throw new Error('Host pending_review_comments: reviewId is required.');
     } else {
       throw new Error(
-        `Host extension addCommentsInBatches requires a numeric review id; received "${reviewId}". ` +
-        'Set prContext.reviewId or ensure the upstream addPullRequestReview returned a numeric databaseId.'
+        `Host comment batches require a numeric review id; received "${reviewId}". ` +
+        'Set prContext.reviewId or ensure review creation returned a numeric databaseId.'
       );
     }
   }
@@ -231,105 +157,42 @@ async function addCommentsInBatches(octokit, features, prContext, reviewId, comm
     review_id: resolvedReviewId
   });
 
-  // The PR head SHA is threaded through `prContext.headSha` from the
-  // submit site (see src/routes/pr.js). GitHub-compatible hosts require
-  // each comment to carry `commit_id`; when the SHA is absent we omit the
-  // field and let the host surface its own validation error.
+  // Pin every inline/file comment to the publisher's confirmed revision.
   const commitId = prContext.headSha;
   const wireComments = comments.map((c) => toWireComment(c, commitId));
-  logger.info(
-    `Posting ${wireComments.length} comment(s) to host endpoint ${endpoint}`
-  );
 
-  let response;
+  let result;
   try {
-    response = await octokit.request(`POST ${endpoint}`, {
-      headers: {
-        'content-type': 'application/json',
-        accept: 'application/json'
-      },
+    result = (await octokit.request(`POST ${endpoint}`, {
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
       data: { comments: wireComments }
-    });
+    })).data;
   } catch (error) {
-    const status = error && (error.status || error.statusCode);
-    const message = (error && error.message) || 'Unknown error';
-    logger.error(
-      `Host pending_review_comments request failed (${status || 'no status'}): ${message}`
-    );
-    // Normalise host request failures to the same partial-failure shape
-    // the GraphQL impl returns, so callers can branch uniformly on
-    // `batchResult.failed` without needing a try/catch. The orchestration
-    // in `src/github/client.js` remains defensive against throws as the
-    // primary safety guarantee — this is a secondary tidy-up so the
-    // failure surface matches across transports.
-    const failedDetails = comments.map((c) => {
-      const location = c.line ? `${c.path}:${c.line}` : `${c.path}:file-level`;
-      return `${location} - ${status || 'network error'}: ${message}`;
-    });
-    return {
-      successCount: 0,
-      failed: true,
-      failedDetails
-    };
+    return { receipts: comments.map((_comment, index) => ({
+      index, state: 'unknown', error: error.message || 'Host response unavailable'
+    })) };
   }
-
-  const body = response && response.data ? response.data : {};
-  // Distinguish "host explicitly reported a count (including 0)" from
-  // "host omitted the field". An explicit `added: 0` with no `failed[]`
-  // must NOT be treated as "all succeeded" — it means the host accepted
-  // none. Only fall back to `comments.length` when the field is absent.
-  const hasExplicitAdded = typeof body.added === 'number';
-  const added = hasExplicitAdded ? body.added : 0;
-  const failedList = Array.isArray(body.failed) ? body.failed : [];
-
-  const failedDetails = [];
-  for (const entry of failedList) {
-    const idx = typeof entry.index === 'number' ? entry.index : null;
-    const errMsg = (entry && (entry.error_message || entry.message)) || 'Unknown error';
-    const source = idx !== null && idx >= 0 && idx < comments.length ? comments[idx] : null;
-    const location = source
-      ? `${source.path}:${source.line || 'file-level'}`
-      : idx !== null ? `comment[${idx}]` : 'comment[?]';
-    failedDetails.push(`${location} - ${errMsg}`);
-    logger.warn(`Host comment failed: ${location} - ${errMsg}`);
+  const failures = Array.isArray(result?.failed) ? result.failed : [];
+  const failed = new Map();
+  for (const item of failures) {
+    if (item && typeof item === 'object') {
+      const error = item.error_message || item.message;
+      failed.set(item.index, typeof error === 'string' ? error : 'Rejected by host');
+    }
   }
-
-  // Sanity check: if the host reported an explicit count, the accounted-
-  // for items (added + failed) should equal the total submitted. If they
-  // don't, the host response is internally inconsistent — log a warning
-  // but still trust the explicit counts.
-  if (hasExplicitAdded && added + failedList.length !== comments.length) {
-    logger.warn(
-      `Host pending_review_comments inconsistent counts: added=${added}, ` +
-      `failed=${failedList.length}, submitted=${comments.length}`
-    );
-  }
-
-  if (failedList.length > 0) {
-    logger.error(
-      `Host pending_review_comments partial failure: ${added} added, ${failedList.length} failed`
-    );
-    return {
-      successCount: added,
-      failed: true,
-      failedDetails
-    };
-  }
-
-  // No partial failures. Trust an explicit `added` value (including 0).
-  // Only fall back to `comments.length` when the host omitted the field
-  // entirely — some hosts that don't report counts rely on this.
-  const successCount = hasExplicitAdded ? added : comments.length;
-  logger.info(`Host pending_review_comments complete: ${successCount} comment(s) added`);
-  return {
-    successCount,
-    failed: false,
-    failedDetails: []
-  };
+  const complete = Array.isArray(result?.failed) && Number.isInteger(result?.added) && result.added >= 0 &&
+    failed.size === failures.length && [...failed.keys()].every(index => Number.isInteger(index) && index >= 0 && index < comments.length) &&
+    result.added + failed.size === comments.length;
+  return { receipts: comments.map((_comment, index) => ({
+    index,
+    state: complete ? failed.has(index) ? 'rejected' : 'accepted' : 'unknown',
+    remoteId: null,
+    error: complete ? failed.get(index) || null : 'The host did not account for every submitted comment'
+  })) };
 }
 
 module.exports = {
-  addCommentsInBatches,
+  addCommentBatch,
   DEFAULT_ENDPOINT_TEMPLATE,
   REQUIRED_PLACEHOLDERS,
   // Exported for direct unit testing.

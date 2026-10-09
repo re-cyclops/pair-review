@@ -529,8 +529,7 @@ test.describe('Analysis History - Dropdown', () => {
     await secondItem.click();
 
     await page.waitForFunction(
-      (runId) => window.prManager?.selectedRunId === runId
-        && window.prManager?.analysisHistoryManager?.selectedRunId === runId,
+      (runId) => window.prManager?.analysisHistoryManager?.getSelectedRunId() === runId,
       olderRunId
     );
 
@@ -542,8 +541,7 @@ test.describe('Analysis History - Dropdown', () => {
     await page.evaluate((id) => window.prManager?.adoptSuggestion(parseInt(id, 10)), suggestionId);
 
     await page.waitForFunction(
-      (runId) => window.prManager?.selectedRunId === runId
-        && window.prManager?.analysisHistoryManager?.selectedRunId === runId,
+      (runId) => window.prManager?.analysisHistoryManager?.getSelectedRunId() === runId,
       olderRunId
     );
 
@@ -554,11 +552,7 @@ test.describe('Analysis History - Dropdown', () => {
     });
 
     await page.waitForFunction(
-      (runId) => {
-        const manager = window.prManager;
-        return manager?.selectedRunId === runId
-          && manager?.analysisHistoryManager?.selectedRunId === runId;
-      },
+      (runId) => window.prManager?.analysisHistoryManager?.getSelectedRunId() === runId,
       olderRunId
     );
 

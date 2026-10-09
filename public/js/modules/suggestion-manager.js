@@ -8,8 +8,8 @@ class SuggestionManager {
   constructor(prManagerRef) {
     // Reference to parent PRManager for API calls and state access
     this.prManager = prManagerRef;
-    // Concurrency guard for displayAISuggestions
-    this._isDisplayingSuggestions = false;
+    // Only the newest render may install findings after asynchronous diff expansion.
+    this._activeSuggestionRender = null;
 
     // Event delegation for "Ask about this" chat button on suggestions
     document.addEventListener('click', (e) => {
@@ -211,13 +211,14 @@ class SuggestionManager {
    * @param {Array} suggestions - Array of suggestions to display
    */
   async displayAISuggestions(suggestions) {
-    // Concurrency guard: prevent multiple simultaneous executions
-    // This avoids duplicated/interleaved suggestions when called rapidly
-    if (this._isDisplayingSuggestions) {
-      console.log('[UI] displayAISuggestions already in progress, skipping');
-      return;
-    }
-    this._isDisplayingSuggestions = true;
+    const render = {
+      reviewId: this.prManager.currentPR?.id,
+      requestId: this.prManager._aiSuggestionsRequestId
+    };
+    this._activeSuggestionRender = render;
+    const isCurrent = () => this._activeSuggestionRender === render
+      && this.prManager.currentPR?.id === render.reviewId
+      && this.prManager._aiSuggestionsRequestId === render.requestId;
 
     try {
       this._closeReasoningPopover();
@@ -247,6 +248,7 @@ class SuggestionManager {
         const targetFiles = new Set(inlineSuggestions.map(s => s.file));
         for (const file of targetFiles) {
           await this.prManager.ensureFileBodyRendered(file);
+          if (!isCurrent()) return;
         }
       }
 
@@ -274,6 +276,7 @@ class SuggestionManager {
         }));
       if (lineTargets.length > 0 && this.prManager?.ensureLinesVisible) {
         await this.prManager.ensureLinesVisible(lineTargets);
+        if (!isCurrent()) return;
       }
 
       // For files rendered by @pierre/diffs, use annotation-based display.
@@ -469,8 +472,7 @@ class SuggestionManager {
         window.aiPanel.addFindings(suggestions);
       }
     } finally {
-      // Always clear the guard, even if an error occurred
-      this._isDisplayingSuggestions = false;
+      if (this._activeSuggestionRender === render) this._activeSuggestionRender = null;
     }
   }
 
@@ -568,6 +570,7 @@ class SuggestionManager {
               : `<span class="ai-suggestion-badge" data-type="${suggestion.type}" title="${this.getTypeDescription(suggestion.type)}"><svg viewBox="0 0 16 16" fill="currentColor" width="12" height="12"><path d="M9.6 2.279a.426.426 0 0 1 .8 0l.407 1.112a6.386 6.386 0 0 0 3.802 3.802l1.112.407a.426.426 0 0 1 0 .8l-1.112.407a6.386 6.386 0 0 0-3.802 3.802l-.407 1.112a.426.426 0 0 1-.8 0l-.407-1.112a6.386 6.386 0 0 0-3.802-3.802L4.279 8.4a.426.426 0 0 1 0-.8l1.112-.407a6.386 6.386 0 0 0 3.802-3.802L9.6 2.279Zm-4.267 8.837a.178.178 0 0 1 .334 0l.169.464a2.662 2.662 0 0 0 1.584 1.584l.464.169a.178.178 0 0 1 0 .334l-.464.169a2.662 2.662 0 0 0-1.584 1.584l-.169.464a.178.178 0 0 1-.334 0l-.169-.464a2.662 2.662 0 0 0-1.584-1.584l-.464-.169a.178.178 0 0 1 0-.334l.464-.169a2.662 2.662 0 0 0 1.584-1.584l.169-.464ZM2.8.14a.213.213 0 0 1 .4 0l.203.556a3.2 3.2 0 0 0 1.901 1.901l.556.203a.213.213 0 0 1 0 .4l-.556.203a3.2 3.2 0 0 0-1.901 1.901L3.2 5.86a.213.213 0 0 1-.4 0l-.203-.556A3.2 3.2 0 0 0 .696 3.403L.14 3.2a.213.213 0 0 1 0-.4l.556-.203A3.2 3.2 0 0 0 2.597.696L2.8.14Z"/></svg>AI Suggestion</span>`}
             ${suggestion.severity ? `<span class="severity-badge severity-${suggestion.severity}">${escapeHtml(suggestion.severity.toUpperCase())}</span>` : ''}
             ${categoryLabel ? `<span class="ai-suggestion-category">${escapeHtml(categoryLabel)}</span>` : ''}
+            ${window.SuggestionUI?.buildRevisionWarningHtml?.(suggestion.revision) || ''}
             <span class="ai-title">${escapeHtml(suggestion.title || '')}</span>
           </div>
           <div class="ai-suggestion-header-right">
@@ -583,6 +586,7 @@ class SuggestionManager {
             ? `<span class="praise-badge" title="Nice Work"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25z"/></svg>Nice Work</span>`
             : `<span class="ai-suggestion-badge collapsed" data-type="${suggestion.type}" title="${this.getTypeDescription(suggestion.type)}"><svg viewBox="0 0 16 16" fill="currentColor" width="10" height="10"><path d="M9.6 2.279a.426.426 0 0 1 .8 0l.407 1.112a6.386 6.386 0 0 0 3.802 3.802l1.112.407a.426.426 0 0 1 0 .8l-1.112.407a6.386 6.386 0 0 0-3.802 3.802l-.407 1.112a.426.426 0 0 1-.8 0l-.407-1.112a6.386 6.386 0 0 0-3.802-3.802L4.279 8.4a.426.426 0 0 1 0-.8l1.112-.407a6.386 6.386 0 0 0 3.802-3.802L9.6 2.279Zm-4.267 8.837a.178.178 0 0 1 .334 0l.169.464a2.662 2.662 0 0 0 1.584 1.584l.464.169a.178.178 0 0 1 0 .334l-.464.169a2.662 2.662 0 0 0-1.584 1.584l-.169.464a.178.178 0 0 1-.334 0l-.169-.464a2.662 2.662 0 0 0-1.584-1.584l-.464-.169a.178.178 0 0 1 0-.334l.464-.169a2.662 2.662 0 0 0 1.584-1.584l.169-.464ZM2.8.14a.213.213 0 0 1 .4 0l.203.556a3.2 3.2 0 0 0 1.901 1.901l.556.203a.213.213 0 0 1 0 .4l-.556.203a3.2 3.2 0 0 0-1.901 1.901L3.2 5.86a.213.213 0 0 1-.4 0l-.203-.556A3.2 3.2 0 0 0 .696 3.403L.14 3.2a.213.213 0 0 1 0-.4l.556-.203A3.2 3.2 0 0 0 2.597.696L2.8.14Z"/></svg>AI Suggestion</span>`}
           ${suggestion.severity ? `<span class="severity-badge severity-${suggestion.severity}">${escapeHtml(suggestion.severity.toUpperCase())}</span>` : ''}
+          ${window.SuggestionUI?.buildRevisionWarningHtml?.(suggestion.revision) || ''}
           <span class="collapsed-title">${escapeHtml(suggestion.title || '')}</span>
           <div class="ai-suggestion-header-right">
             ${showReasoningBtn ? `

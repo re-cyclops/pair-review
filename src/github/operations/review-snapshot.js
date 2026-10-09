@@ -44,6 +44,22 @@ const effectiveReviews = reviews => {
   return [...byReviewer.values()];
 };
 
+const readReviewHistory = (client, identity, login) => section(async () => {
+  const result = await pages(client.octokit.rest.pulls.listReviews, {
+    owner: identity.owner, repo: identity.repo, pull_number: identity.number
+  });
+  const effective = effectiveReviews(result.items);
+  const unattributed = result.items.some(review => !review.user?.login && ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(review.state));
+  const viewerLogin = login?.toLowerCase();
+  return {
+    availability: result.complete && !unattributed ? 'known' : 'partial',
+    complete: result.complete, unattributed, effective,
+    approving: effective.filter(review => review.state === 'APPROVED'),
+    viewerReview: result.complete && viewerLogin ? effective.find(review => review.reviewer.login.toLowerCase() === viewerLogin) || null : null,
+    pending: result.complete && viewerLogin ? result.items.some(review => review.state === 'PENDING' && review.user?.login?.toLowerCase() === viewerLogin) : null
+  };
+});
+
 const readThreads = async (client, identity) => {
   // The GitHub review-thread connection is not assumed on compatible REST hosts.
   if (client.apiHost) return { availability: 'unavailable', reason: 'host-capability-unavailable', unresolved: null };
@@ -124,15 +140,7 @@ const collect = async (client, identity, accountKey) => {
     if (accounts.size > 32) accounts.delete(accounts.keys().next().value);
   }
   const viewerIdentity = await account.promise;
-  const reviews = await section(async () => {
-    const result = await pages(client.octokit.rest.pulls.listReviews, params);
-    const effective = effectiveReviews(result.items);
-    const viewerLogin = viewerIdentity.login?.toLowerCase();
-    return { availability: result.complete ? 'known' : 'partial', complete: result.complete, effective,
-      approving: effective.filter(r => r.state === 'APPROVED'),
-      viewerReview: effective.find(r => r.reviewer.login.toLowerCase() === viewerLogin) || null,
-      pending: result.items.some(r => r.state === 'PENDING' && r.user?.login?.toLowerCase() === viewerLogin) };
-  });
+  const reviews = await readReviewHistory(client, identity, viewerIdentity.login);
   const requests = await section(async () => {
     const users = [];
     const teams = [];
@@ -173,15 +181,20 @@ const collect = async (client, identity, accountKey) => {
     return { ...rule, presentOnHead: matching.length > 0,
       presentOnTestMerge: !!testMerge?.items.some(c => c.name === rule.name && (rule.appId == null || c.appId === rule.appId)) };
   }) ?? null;
-  const own = viewerIdentity.login && pr.user?.login?.toLowerCase() === viewerIdentity.login.toLowerCase();
-  const direct = requests.users ? requests.users.some(u => u.login.toLowerCase() === viewerIdentity.login?.toLowerCase()) : null;
+  const own = viewerIdentity.login && pr.user?.login ? pr.user.login.toLowerCase() === viewerIdentity.login.toLowerCase() : null;
+  const direct = requests.users && viewerIdentity.login
+    ? requests.users.some(user => user.login.toLowerCase() === viewerIdentity.login.toLowerCase()) ? true : requests.availability === 'known' ? false : null
+    : null;
   const viewerReview = reviews.viewerReview;
   const changeRequested = viewerReview?.state === 'CHANGES_REQUESTED';
   const newRevision = viewerReview?.commitSha ? viewerReview.commitSha !== pr.head.sha : null;
-  const viaTeam = requests.teams?.some(team => viewerIdentity.teams?.ids?.includes(team.id)) || false;
+  const viaTeam = requests.teams?.some(team => viewerIdentity.teams?.ids?.includes(team.id)) ? true
+    : requests.availability === 'known' && (!requests.teams?.length || viewerIdentity.teams?.availability === 'known') ? false : null;
   const responsibilityKnown = viewerIdentity.availability === 'known' && requests.availability === 'known'
-    && reviews.availability === 'known' && (!requests.teams?.length || viewerIdentity.teams?.availability === 'known');
-  const reason = own ? 'Your pull request' : direct ? 'Requested from you personally'
+    && reviews.complete === true && (!requests.teams?.length || viewerIdentity.teams?.availability === 'known');
+  const closed = pr.state === 'closed' || pr.merged === true;
+  const reason = closed ? pr.merged ? 'Pull request already merged' : 'Pull request closed'
+    : own ? 'Your pull request' : direct ? 'Requested from you personally'
     : viaTeam ? 'Requested from one of your teams'
       : changeRequested ? (newRevision ? 'New commits since your request for changes' : 'Your request for changes is still outstanding')
         : reviews.pending ? 'You have an unpublished remote draft' : viewerReview?.state === 'APPROVED' ? 'You already approved; other requirements may remain'
@@ -190,30 +203,37 @@ const collect = async (client, identity, accountKey) => {
     identity: { host: client.apiHost || 'github.com', repository: `${identity.owner}/${identity.repo}`, number: identity.number, url: safeUrl(pr.html_url) },
     fetchedAt: now(), headSha: pr.head.sha, baseSha: pr.base.sha, baseBranch: pr.base.ref,
     state: pr.state, draft: !!pr.draft, merged: !!pr.merged, title: pr.title, author: person(pr.user),
-    approvals: { ...reviews, observedCount: reviews.approving?.length ?? null, requiredCount: policy.requiredApprovalCount ?? null },
-    viewer: { identity: viewerIdentity, self: !!own, requestedDirectly: direct, requestedTeams: requests.teams ?? null,
+    approvals: { ...reviews, observedCount: reviews.availability === 'known' ? reviews.approving.length : null,
+      requiredCount: policy.availability === 'known' ? policy.requiredApprovalCount : null },
+    viewer: { identity: viewerIdentity, self: own, requestedDirectly: direct, requestedTeams: requests.teams ?? null,
       effectiveReview: viewerReview || null, pendingReview: reviews.pending ?? null, newRevision,
-      reason, requestedViaTeam: viaTeam, needsYou: own ? false : direct || viaTeam || changeRequested || reviews.pending ? true : responsibilityKnown ? false : null, soleBlocker: null },
+      reason, requestedViaTeam: viaTeam, needsYou: closed || own ? false : direct || viaTeam || changeRequested || reviews.pending ? true : responsibilityKnown ? false : null, soleBlocker: null },
     requests, threads, checks, testMerge, policy: { ...policy, requiredChecks: required },
     merge: { conflict: pr.mergeable == null ? null : !pr.mergeable, providerDecision: threads.providerDecision ?? null,
       providerMergeState: threads.mergeState ?? null, requirementKnowledge: policy.requirementKnowledge || 'unavailable' }
   };
 };
 
-const fetchReviewSnapshot = async (client, identity, { refresh = false } = {}) => {
+const fetchReviewSnapshot = async (client, identity, { refresh = false, headSha = null } = {}) => {
   const accountKey = createHash('sha256').update(`${client.apiHost || 'github.com'}\0${client.token}`).digest('hex');
   const key = `${accountKey}:${identity.owner.toLowerCase()}/${identity.repo.toLowerCase()}#${identity.number}`;
   const cached = cache.get(key);
   const age = cached ? Date.now() - cached.at : Infinity;
   if (cached?.retryAt > Date.now()) return cached.value;
-  if (cached && age < (refresh ? 5000 : 30000)) return cached.value;
-  if (pending.has(key)) return pending.get(key);
+  if (cached?.value && age < (refresh ? 5000 : 30000) && (!headSha || cached.value.headSha === headSha)) return cached.value;
+  const requestKey = `${key}:${headSha || 'current'}`;
+  if (pending.has(requestKey)) return pending.get(requestKey);
+  // Different revision hints may collect concurrently. Only the newest request
+  // for this account/target may publish cache data or a retry backoff.
+  const owner = { ...cached };
+  cache.set(key, owner);
+  if (cache.size > 512) cache.delete(cache.keys().next().value);
   const promise = (async () => {
     if (active >= 3) await new Promise(resolve => waiters.push(resolve));
     active++;
     try {
       const value = await collect(client, identity, accountKey);
-      cache.set(key, { at: Date.now(), value });
+      if (cache.get(key) === owner) cache.set(key, { at: Date.now(), value });
       if (cache.size > 512) cache.delete(cache.keys().next().value);
       return value;
     } catch (error) {
@@ -222,13 +242,13 @@ const fetchReviewSnapshot = async (client, identity, { refresh = false } = {}) =
         availability: cached?.value?.headSha ? 'stale' : 'unavailable', error: failure.reason,
         lastSuccessAt: cached?.value?.lastSuccessAt || cached?.value?.fetchedAt || null,
         retryAfterSeconds: Math.max(30, Math.min(3600, Number(error.response?.headers?.['retry-after']) || 60)) };
-      cache.set(key, { at: Date.now(), value, retryAt: Date.now() + value.retryAfterSeconds * 1000 });
+      if (cache.get(key) === owner) cache.set(key, { at: Date.now(), value, retryAt: Date.now() + value.retryAfterSeconds * 1000 });
       if (cache.size > 512) cache.delete(cache.keys().next().value);
       return value;
     } finally { active--; waiters.shift()?.(); }
   })();
-  pending.set(key, promise);
-  try { return await promise; } finally { pending.delete(key); }
+  pending.set(requestKey, promise);
+  try { return await promise; } finally { pending.delete(requestKey); }
 };
 
-module.exports = { effectiveReviews, fetchReviewSnapshot };
+module.exports = { effectiveReviews, readReviewHistory, fetchReviewSnapshot };

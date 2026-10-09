@@ -26,6 +26,12 @@ async function waitForDiffToRender(page, timeout = 10000) {
   }, null, { timeout });
 }
 
+async function openReviewAuthoring(page) {
+  await waitForDiffToRender(page);
+  await page.getByRole('button', { name: /^Preview review/ }).click();
+  await page.locator('#review-body-modal').waitFor({ state: 'visible' });
+}
+
 /**
  * Hover the Nth line-number cell in the diff to reveal the gutter buttons.
  * @param {import('@playwright/test').Page} page
@@ -343,6 +349,7 @@ async function seedAISuggestions(page, {
   // Reload suggestions and wait for them to appear in the DOM
   await page.evaluate(async () => {
     if (window.prManager?.loadAISuggestions) {
+      await window.prManager.analysisHistoryManager?.refresh({ switchToNew: true });
       await window.prManager.loadAISuggestions();
     }
   });
@@ -360,6 +367,7 @@ async function seedAISuggestions(page, {
 
 module.exports = {
   waitForDiffToRender,
+  openReviewAuthoring,
   hoverDiffLine,
   openCommentFormOnLine,
   dragResizeHandle,

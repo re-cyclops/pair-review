@@ -71,9 +71,10 @@
 
         /* On the dedicated PR page, always show the pr-container */
         #pr-container {
-            display: block !important;
+            display: flex !important;
         }
     </style>
+    <link rel="stylesheet" href="/css/workspace.css">
 </head>
 <body>
     <!-- App wrapper -->
@@ -473,6 +474,10 @@
 
     <!-- PR JavaScript -->
     <script src="/js/theme.js"></script>
+    <script src="/js/modules/draft-store.js"></script>
+    <script src="/js/components/ReviewProgress.js"></script>
     <script src="/js/pr.js"></script>
+    <script src="/js/components/ReviewEvidence.js"></script>
+    <script src="/js/components/Workspace.js"></script>
 </body>
 </html>

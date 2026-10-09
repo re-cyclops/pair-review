@@ -1,239 +1,114 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
-/**
- * E2E Tests: Review Submission Flow
- *
- * Tests the complete review submission flow including:
- * - Selecting review types (Approve, Comment, Request Changes)
- * - Entering review summary/body
- * - Submitting reviews and verifying success toast
- * - Error handling for submission failures
- */
+import { publicationTest as test, expect } from './fixtures.js';
+import { openReviewAuthoring } from './helpers.js';
 
-import { test, expect } from './fixtures.js';
-import { waitForDiffToRender } from './helpers.js';
+const url = '/pr/test-owner/test-repo/1';
+const body = 'The guard must remain intact\n\n    preserveIndentation();\n';
 
-// Helper to open the review modal
-async function openReviewModal(page) {
-  await waitForDiffToRender(page);
-  const reviewBtn = page.locator('.split-button-main').first();
-  await reviewBtn.click();
-  await page.waitForSelector('.review-modal-overlay', { timeout: 5000 });
+for (const [decision, event] of [['COMMENT', 'COMMENT'], ['APPROVE_WITH_COMMENT', 'APPROVE'], ['REQUEST_CHANGES', 'REQUEST_CHANGES']]) {
+  test(`publishes only the explicitly confirmed ${decision} body, without a hidden rewrite`, async ({ page, testServer }) => {
+    await page.goto(url);
+    await openReviewAuthoring(page);
+    await page.locator('#review-body-modal').fill(body);
+    await expect(page.locator(`#review-decision option[value="${decision}"]`)).toBeEnabled();
+    await page.locator('#review-decision').selectOption(decision);
+    await page.getByRole('button', { name: 'Prepare exact final preview', exact: true }).click();
+    const confirm = page.getByRole('checkbox', { name: 'Confirm this exact submission manifest' });
+    await expect(confirm).toBeEnabled();
+    expect(testServer.reviewHost.state.calls).toEqual([]);
+    await confirm.check();
+    await page.keyboard.press('ControlOrMeta+Enter');
+    expect(testServer.reviewHost.state.calls).toEqual([]);
+    await page.getByRole('button', { name: /^Publish .* · 0 comments$/ }).click();
+    await expect.poll(() => testServer.db.prepare("SELECT state FROM submission_attempts").all()).toEqual([{ state: 'submitted' }]);
+    expect(testServer.reviewHost.state.calls.map(call => call.operation)).toEqual(['create', 'submit']);
+    expect(testServer.reviewHost.state.calls.at(-1)).toMatchObject({ event, body });
+    await expect(page.locator('#review-body-modal')).toHaveValue(body);
+  });
 }
 
-test.describe('Review Type Selection', () => {
-  test('should have Comment selected by default', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Check that COMMENT is selected by default
-    const commentRadio = page.locator('input[value="COMMENT"]');
-    await expect(commentRadio).toBeChecked();
-  });
-
-  test('should be able to select Approve review type', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Select APPROVE
-    const approveRadio = page.locator('input[value="APPROVE"]');
-    await approveRadio.click();
-    await expect(approveRadio).toBeChecked();
-
-    // Verify other options are not checked
-    const commentRadio = page.locator('input[value="COMMENT"]');
-    const requestChangesRadio = page.locator('input[value="REQUEST_CHANGES"]');
-    await expect(commentRadio).not.toBeChecked();
-    await expect(requestChangesRadio).not.toBeChecked();
-  });
-
-  test('should be able to select Request Changes review type', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Select REQUEST_CHANGES
-    const requestChangesRadio = page.locator('input[value="REQUEST_CHANGES"]');
-    await requestChangesRadio.click();
-    await expect(requestChangesRadio).toBeChecked();
-
-    // Verify other options are not checked
-    const commentRadio = page.locator('input[value="COMMENT"]');
-    const approveRadio = page.locator('input[value="APPROVE"]');
-    await expect(commentRadio).not.toBeChecked();
-    await expect(approveRadio).not.toBeChecked();
-  });
-
-  test('should display all three main review type options', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // All three main review types should be visible
-    await expect(page.locator('input[value="APPROVE"]')).toBeVisible();
-    await expect(page.locator('input[value="COMMENT"]')).toBeVisible();
-    await expect(page.locator('input[value="REQUEST_CHANGES"]')).toBeVisible();
-  });
-
-  test('should also have Draft option available', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Draft option should also be present
-    await expect(page.locator('input[value="DRAFT"]')).toBeVisible();
-  });
+test('keeps the exact body in a host draft without submitting its decision', async ({ page, testServer }) => {
+  await page.goto(url);
+  await openReviewAuthoring(page);
+  await page.locator('#review-body-modal').fill(body);
+  await page.locator('#review-publication-mode').selectOption('draft');
+  await page.getByRole('button', { name: 'Prepare exact final preview', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Confirm this exact submission manifest' }).check();
+  await page.getByRole('button', { name: /^Save host draft · 0 comments$/ }).click();
+  await expect.poll(() => testServer.db.prepare('SELECT state FROM submission_attempts').all()).toEqual([{ state: 'draft_saved' }]);
+  expect(testServer.reviewHost.state.calls.map(call => call.operation)).toEqual(['create']);
+  expect([...testServer.reviewHost.state.reviews.values()][0]).toMatchObject({ body, state: 'PENDING' });
 });
 
-test.describe('Review Summary Input', () => {
-  test('should have a textarea for review body', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    const textarea = page.locator('#review-body-modal');
-    await expect(textarea).toBeVisible();
-    await expect(textarea).toHaveAttribute('placeholder', /leave a comment/i);
-  });
-
-  test('should be able to enter review summary text', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    const textarea = page.locator('#review-body-modal');
-    const testText = 'This is a test review summary for the PR.';
-    await textarea.fill(testText);
-
-    await expect(textarea).toHaveValue(testText);
-  });
-
-  test('should clear textarea when modal is reopened', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Enter some text
-    const textarea = page.locator('#review-body-modal');
-    await textarea.fill('Some test text');
-
-    // Close modal
-    await page.locator('#cancel-review-btn').click();
-    await page.waitForSelector('.review-modal-overlay', { state: 'hidden', timeout: 5000 });
-
-    // Reopen modal
-    await openReviewModal(page);
-
-    // Textarea should be empty
-    await expect(textarea).toHaveValue('');
-  });
+test('retires only published editors while keeping excluded text local', async ({ page, testServer }) => {
+  await page.goto(url);
+  const create = async (body, included) => {
+    const response = await page.request.post('/api/reviews/1/comments', { data: {
+      file: 'src/utils.js', body, included, commit_sha: testServer.reviewHost.state.head
+    } });
+    expect(response.ok()).toBe(true);
+    return (await response.json()).commentId;
+  };
+  const selected = await create('Selected file invariant', true);
+  const excluded = await create('Unfinished alternative', false);
+  await openReviewAuthoring(page);
+  await page.getByRole('textbox', { name: `Draft ${selected} exact Markdown`, exact: true }).fill('The exact revised file invariant');
+  await page.getByRole('button', { name: 'Prepare exact final preview', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Confirm this exact submission manifest' }).check();
+  await page.getByRole('button', { name: /^Publish .* · 1 comments$/ }).click();
+  await expect.poll(() => testServer.db.prepare('SELECT state FROM submission_attempts').all()).toEqual([{ state: 'submitted' }]);
+  await expect(page.getByRole('textbox', { name: `Draft ${excluded} exact Markdown`, exact: true })).toHaveValue('Unfinished alternative');
+  await page.getByRole('button', { name: 'Skip — keep drafts local', exact: true }).click();
+  await expect(page.locator('.workspace-draft-recovery')).toBeHidden();
+  expect([...testServer.reviewHost.state.reviews.values()][0].comments.map(comment => comment.body)).toEqual(['The exact revised file invariant']);
+  expect(testServer.db.prepare('SELECT status, included, body FROM comments WHERE id = ?').get(excluded))
+    .toEqual({ status: 'active', included: 0, body: 'Unfinished alternative' });
 });
 
-test.describe('Review Submission Success', () => {
-  test('should submit Comment review successfully', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Enter review body
-    const textarea = page.locator('#review-body-modal');
-    await textarea.fill('Great changes, looks good!');
-
-    // COMMENT is already selected by default, just submit
-    const submitBtn = page.locator('#submit-review-btn-modal');
-    await submitBtn.click();
-
-    // Wait for success toast
-    const toast = page.locator('.toast-success');
-    await expect(toast).toBeVisible({ timeout: 10000 });
-    await expect(toast).toContainText(/review submitted/i);
-  });
-
-  test('should submit Approve review successfully', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Select APPROVE
-    await page.locator('input[value="APPROVE"]').click();
-
-    // Enter review body
-    await page.locator('#review-body-modal').fill('LGTM!');
-
-    // Submit
-    await page.locator('#submit-review-btn-modal').click();
-
-    // Wait for success toast
-    const toast = page.locator('.toast-success');
-    await expect(toast).toBeVisible({ timeout: 10000 });
-    await expect(toast).toContainText(/review submitted/i);
-  });
-
-  test('should submit Request Changes review with comment', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Select REQUEST_CHANGES
-    await page.locator('input[value="REQUEST_CHANGES"]').click();
-
-    // Enter review body (required for request changes)
-    await page.locator('#review-body-modal').fill('Please fix the formatting issues.');
-
-    // Submit
-    await page.locator('#submit-review-btn-modal').click();
-
-    // Wait for success toast
-    const toast = page.locator('.toast-success');
-    await expect(toast).toBeVisible({ timeout: 10000 });
-    await expect(toast).toContainText(/review submitted/i);
-  });
-
-  test('should close modal after successful submission', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Enter review and submit
-    await page.locator('#review-body-modal').fill('Test review');
-    await page.locator('#submit-review-btn-modal').click();
-
-    // Modal should close
-    const modal = page.locator('.review-modal-overlay');
-    await modal.waitFor({ state: 'hidden', timeout: 10000 });
-  });
-
-  test('should show View on GitHub link in success toast', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Submit a review
-    await page.locator('#review-body-modal').fill('Test review');
-    await page.locator('#submit-review-btn-modal').click();
-
-    // Wait for success toast with link
-    const toast = page.locator('.toast-success');
-    await expect(toast).toBeVisible({ timeout: 10000 });
-
-    // Should have a link to GitHub
-    const link = toast.locator('.toast-link');
-    await expect(link).toBeVisible();
-    await expect(link).toContainText(/view on github/i);
-  });
+test('blocks an empty comment-only review but permits an explicitly confirmed empty approval', async ({ page, testServer }) => {
+  await page.goto(url);
+  await openReviewAuthoring(page);
+  await page.getByRole('button', { name: 'Prepare exact final preview', exact: true }).click();
+  await expect(page.getByRole('checkbox', { name: 'Confirm this exact submission manifest' })).toBeDisabled();
+  expect(testServer.reviewHost.state.calls).toEqual([]);
+  await page.locator('#review-decision').selectOption('APPROVE');
+  await page.getByRole('button', { name: 'Prepare exact final preview', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Confirm this exact submission manifest' }).check();
+  await page.getByRole('button', { name: /^Publish approve · 0 comments$/ }).click();
+  await expect.poll(() => testServer.reviewHost.state.calls.at(-1)?.operation).toBe('submit');
+  expect(testServer.reviewHost.state.calls.at(-1)).toMatchObject({ event: 'APPROVE', body: '' });
 });
 
-test.describe('Review Submission Validation', () => {
-  test('should allow Comment submission without body', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
+test('does not authorize newer text or a newer head with an earlier final preview', async ({ page, testServer }) => {
+  await page.goto(url);
+  await openReviewAuthoring(page);
+  await page.locator('#review-body-modal').fill(body);
+  await page.getByRole('button', { name: 'Prepare exact final preview', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Confirm this exact submission manifest' }).check();
+  const changed = `${body}\nA newer observation`;
+  await page.locator('#review-body-modal').fill(changed);
+  await expect(page.getByRole('button', { name: /^Publish .* · 0 comments$/ })).toBeDisabled();
+  await page.getByRole('button', { name: 'Prepare exact final preview', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Confirm this exact submission manifest' }).check();
+  testServer.reviewHost.state.head = 'c'.repeat(40);
+  await page.getByRole('button', { name: /^Publish .* · 0 comments$/ }).click();
+  await expect(page.locator('.workspace-review-error')).toContainText(/changed|new preview/i);
+  expect(testServer.reviewHost.state.calls).toEqual([]);
+  await expect(page.locator('#review-body-modal')).toHaveValue(changed);
+});
 
-    // COMMENT is default, submit without body
-    await page.locator('#submit-review-btn-modal').click();
-
-    // Should succeed (toast visible means no validation error blocked it)
-    const toast = page.locator('.toast-success');
-    await expect(toast).toBeVisible({ timeout: 10000 });
-  });
-
-  test('should allow Approve submission without body', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Select APPROVE and submit without body
-    await page.locator('input[value="APPROVE"]').click();
-    await page.locator('#submit-review-btn-modal').click();
-
-    // Should succeed
-    const toast = page.locator('.toast-success');
-    await expect(toast).toBeVisible({ timeout: 10000 });
-  });
+test('reconciles a lost final response without replaying the host write', async ({ page, testServer }) => {
+  testServer.reviewHost.state.loseSubmit = true;
+  await page.goto(url);
+  await openReviewAuthoring(page);
+  await page.locator('#review-body-modal').fill(body);
+  await page.getByRole('button', { name: 'Prepare exact final preview', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Confirm this exact submission manifest' }).check();
+  await page.getByRole('button', { name: /^Publish .* · 0 comments$/ }).click();
+  await expect.poll(() => testServer.db.prepare('SELECT state FROM submission_attempts').all()).toEqual([{ state: 'outcome_unknown' }]);
+  const writes = structuredClone(testServer.reviewHost.state.calls);
+  await page.getByRole('button', { name: /Reconcile.*read.only/i }).click();
+  await expect.poll(() => testServer.db.prepare('SELECT state FROM submission_attempts').all()).toEqual([{ state: 'submitted' }]);
+  expect(testServer.reviewHost.state.calls).toEqual(writes);
+  expect([...testServer.reviewHost.state.reviews.values()][0]).toMatchObject({ body, state: 'COMMENTED' });
 });

@@ -151,8 +151,6 @@ class PRManager {
     this._deferredDiffRenderPromises = new Map();
     // Analysis history manager - for switching between analysis runs
     this.analysisHistoryManager = null;
-    // Currently selected analysis run ID (null = latest)
-    this.selectedRunId = null;
     // Keyboard shortcuts manager
     this.keyboardShortcuts = null;
     // Hide whitespace toggle state — must be set before DiffOptionsDropdown
@@ -355,9 +353,11 @@ class PRManager {
         }
       },
       onCommentFormSubmit: (fileName, annotationId, data, body) => {
-        this._handleCommentFormSubmit(fileName, annotationId, data, body);
+        return this._handleCommentFormSubmit(fileName, annotationId, data, body);
       },
       onCommentFormCancel: (fileName, annotationId, data) => {
+        const form = this.pierreBridge.files.get(fileName)?.formElements?.get(annotationId);
+        window.reviewDrafts?.close(form?.querySelector('textarea'));
         this.pierreBridge.removeAnnotation(fileName, annotationId);
       },
       onSuggestionInsert: (textarea, button) => {
@@ -1007,7 +1007,6 @@ class PRManager {
           mode: 'pr',
           shaAbbrevLength: this.currentPR.shaAbbrevLength || 7,
           onSelectionChange: (runId, _run) => {
-            this.selectedRunId = runId;
             this.loadAISuggestions(null, runId);
           }
         });
@@ -1068,7 +1067,6 @@ class PRManager {
    * disappeared after refresh".
    *
    * @param {Object} [options]
-   * @param {string} [options.analysisRunId] - Optional run id to pin AI suggestions to.
    * @param {boolean} [options.syncExternal=false] - When true, fire the
    *   external-comments sync POST before re-rendering. Used by `refreshPR`
    *   where the diff was just fetched fresh from GitHub and cached anchors
@@ -1076,10 +1074,10 @@ class PRManager {
    *   analysis rebuilds, post-analysis reload) pass the default and reuse
    *   the existing mirror.
    */
-  async _rerenderAllOverlays({ analysisRunId, syncExternal = false } = {}) {
+  async _rerenderAllOverlays({ syncExternal = false } = {}) {
     const includeDismissed = window.aiPanel?.showDismissedComments || false;
     await this.loadUserComments(includeDismissed);
-    await this.loadAISuggestions(null, analysisRunId);
+    await this.loadAISuggestions();
     // Skip external-comment re-rendering entirely when the feature is off.
     // The manager is never populated with rows in that case, so there's
     // nothing to re-anchor.
@@ -2723,6 +2721,7 @@ class PRManager {
         const data = await response.json();
         const files = data.changed_files || [];
         const fullDiff = data.diff || '';
+        this.displayedProgressContext = data.progress_context || null;
 
         // Build map of generated files for quick lookup
         this.generatedFiles.clear();
@@ -2809,7 +2808,7 @@ class PRManager {
     // comments) via the shared helper so the three renderers can't drift.
     // The diff DOM was just rebuilt, so external-comment rows are gone
     // until loadAndRender re-inserts them.
-    await this._rerenderAllOverlays({ analysisRunId: this.selectedRunId });
+    await this._rerenderAllOverlays();
 
     // Restore scroll position after the DOM settles
     requestAnimationFrame(() => {
@@ -4130,7 +4129,7 @@ class PRManager {
     try {
       const includeDismissed = window.aiPanel?.showDismissedComments || false;
       await this.loadUserComments(includeDismissed);
-      await this.loadAISuggestions(null, this.selectedRunId);
+      await this.loadAISuggestions();
     } catch (err) {
       console.error('Failed to re-anchor inline feedback after deferred diff render:', err);
     }
@@ -5313,59 +5312,21 @@ class PRManager {
     }
   }
 
-  /**
-   * Save viewed files state to storage
-   * Persists per PR for later retrieval
-   */
+  /** Persist content-bound marks through the shared PR/local review identity. */
   async saveViewedState() {
-    if (!this.currentPR) return;
-
-    const { owner, repo, number } = this.currentPR;
-    const viewedArray = Array.from(this.viewedFiles);
-
-    try {
-      await fetch(`/api/pr/${owner}/${repo}/${number}/files/viewed`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ files: viewedArray })
-      });
-    } catch (error) {
-      console.error('Failed to save viewed state:', error);
-      // Fallback to localStorage
-      const key = PRManager.getRepoStorageKey('pair-review-viewed', owner, repo) + `:${number}`;
-      localStorage.setItem(key, JSON.stringify(viewedArray));
-    }
+    if (!this.reviewProgress) return;
+    try { await this.reviewProgress.saveViewed([...this.viewedFiles]); }
+    catch (error) { console.warn('Viewed marks were not saved:', error.message); }
   }
 
-  /**
-   * Load viewed files state from storage
-   * Retrieves per-PR viewed state
-   */
+  /** Loading and opening never advance the explicitly reviewed baseline. */
   async loadViewedState() {
-    if (!this.currentPR) return;
-
-    const { owner, repo, number } = this.currentPR;
-
-    try {
-      const response = await fetch(`/api/pr/${owner}/${repo}/${number}/files/viewed`);
-      if (response.ok) {
-        const data = await response.json();
-        this.viewedFiles = new Set(data.files || []);
-        return;
-      }
-    } catch (error) {
-      console.error('Failed to load viewed state from API:', error);
-    }
-
-    // Fallback to localStorage
-    const key = PRManager.getRepoStorageKey('pair-review-viewed', owner, repo) + `:${number}`;
-    const stored = localStorage.getItem(key);
-    if (stored) {
-      try {
-        this.viewedFiles = new Set(JSON.parse(stored));
-      } catch (e) {
-        this.viewedFiles = new Set();
-      }
+    if (!this.currentPR?.id) return;
+    this.reviewProgress ||= new window.ReviewProgress(this);
+    try { await this.reviewProgress.load(); }
+    catch (error) {
+      this.viewedFiles = new Set();
+      this.reviewProgress.showError(error);
     }
   }
 
@@ -6049,7 +6010,10 @@ class PRManager {
     // removing the form annotation.
     if (typeof data.customSubmit === 'function') {
       try {
-        await data.customSubmit(body.trim(), fileName, annotationId);
+        const textarea = this.pierreBridge.files.get(fileName)?.formElements?.get(annotationId)?.querySelector('textarea');
+        const draft = await window.reviewDrafts.saveTextarea(textarea);
+        await data.customSubmit(draft.body, fileName, annotationId, draft);
+        window.reviewDrafts.close(textarea);
       } catch (error) {
         console.error('Error running custom comment form submit:', error);
         alert(`Failed to save: ${error.message}`);
@@ -6058,29 +6022,11 @@ class PRManager {
     }
 
     try {
-      const commentData = {
-        file: data.fileName,
-        line_start: data.lineStart,
-        line_end: data.lineEnd,
-        body: body.trim(),
-        side: data.side || 'RIGHT',
-        diff_position: data.diffPosition,
-        // Anchor to the PR head commit so repositioning works if the PR is
-        // updated later. Parity with CommentManager.saveComment.
-        commit_sha: this.currentPR?.head_sha,
-      };
-
-      const response = await fetch(`/api/reviews/${this.currentPR.id}/comments`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Client-Id': this._clientId,
-        },
-        body: JSON.stringify(commentData),
-      });
-
-      if (response.ok) {
-        const result = await response.json().catch(() => ({}));
+      const textarea = this.pierreBridge.files.get(fileName)?.formElements?.get(annotationId)?.querySelector('textarea');
+      const comment = await window.reviewDrafts.saveTextarea(textarea);
+      const result = { commentId: comment.id };
+      if (comment) {
+        window.reviewDrafts.close(textarea);
         // Remove form annotation
         this.pierreBridge.removeAnnotation(fileName, annotationId);
         // Reload comments to show the new one
@@ -6103,6 +6049,7 @@ class PRManager {
       }
     } catch (error) {
       console.error('Error saving comment:', error);
+      window.reviewDrafts?.showRecovery();
     }
   }
 
@@ -6142,24 +6089,18 @@ class PRManager {
    * Edit user comment
    * NOTE: similar edit form in comment-manager.js _buildEditFormRow — keep in sync
    */
-  async editUserComment(commentId) {
+  async editUserComment(commentId, { focus = true } = {}) {
     try {
       const commentRow = document.querySelector(`[data-comment-id="${commentId}"]`);
       if (!commentRow) return;
 
       const commentDiv = commentRow.querySelector('.user-comment');
       const bodyDiv = commentDiv.querySelector('.user-comment-body');
-      let currentText = bodyDiv.dataset.originalMarkdown || '';
-
-      if (!currentText) {
-        const response = await fetch(`/api/reviews/${this.currentPR.id}/comments/${commentId}`);
-        if (response.ok) {
-          const data = await response.json();
-          currentText = data.body || bodyDiv.textContent.trim();
-        } else {
-          currentText = bodyDiv.textContent.trim();
-        }
-      }
+      const response = await fetch(`/api/reviews/${this.currentPR.id}/comments/${commentId}`);
+      if (!response.ok) throw new Error('Comment could not be loaded');
+      const comment = await response.json();
+      const currentText = comment.body;
+      if (!commentRow.isConnected) return;
 
       if (commentDiv.classList.contains('editing-mode')) return;
 
@@ -6181,14 +6122,14 @@ class PRManager {
             id="edit-comment-${commentId}"
             class="comment-edit-textarea"
             placeholder="Enter your comment..."
-            data-file="${fileName}"
+            data-file="${window.escapeHtmlAttribute(fileName)}"
             data-line="${lineStart}"
             data-line-end="${lineEnd}"
             data-side="${side || 'RIGHT'}"
           >${this.escapeHtml(currentText)}</textarea>
           <div class="comment-edit-actions">
             <button class="btn btn-sm btn-primary save-edit-btn">Save</button>
-            <button class="btn btn-sm btn-secondary cancel-edit-btn">Cancel</button>
+            <button class="btn btn-sm btn-secondary cancel-edit-btn">Close</button>
           </div>
         </div>
       `;
@@ -6201,10 +6142,11 @@ class PRManager {
       const suggestionBtn = editForm.querySelector('.suggestion-btn');
       const saveBtn = editForm.querySelector('.save-edit-btn');
       const cancelBtn = editForm.querySelector('.cancel-edit-btn');
+      window.reviewDrafts?.bind(textarea, { comment, mode: 'edit' });
 
       if (textarea) {
         this.autoResizeTextarea(textarea);
-        textarea.focus();
+        if (focus) textarea.focus();
         textarea.setSelectionRange(textarea.value.length, textarea.value.length);
         this.updateSuggestionButtonState(textarea, suggestionBtn);
 
@@ -6243,9 +6185,9 @@ class PRManager {
 
     try {
       const textarea = document.getElementById(`edit-comment-${commentId}`);
-      const editedText = textarea.value.trim();
+      const editedText = textarea.value;
 
-      if (!editedText) {
+      if (!editedText.trim()) {
         alert('Comment cannot be empty');
         textarea.focus();
         if (saveBtn) {
@@ -6255,13 +6197,8 @@ class PRManager {
         return;
       }
 
-      const response = await fetch(`/api/reviews/${this.currentPR.id}/comments/${commentId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ body: editedText })
-      });
-
-      if (!response.ok) throw new Error('Failed to update comment');
+      await window.reviewDrafts.saveTextarea(textarea);
+      window.reviewDrafts.close(textarea);
 
       const commentRow = document.querySelector(`[data-comment-id="${commentId}"]`);
       const commentDiv = commentRow.querySelector('.user-comment');
@@ -6288,7 +6225,7 @@ class PRManager {
 
     } catch (error) {
       console.error('Error saving comment:', error);
-      alert('Failed to save comment');
+      window.reviewDrafts?.showRecovery();
       // Re-enable save button on failure so the user can retry
       if (saveBtn) {
         saveBtn.dataset.saving = 'false';
@@ -6307,6 +6244,7 @@ class PRManager {
     const commentDiv = commentRow.querySelector('.user-comment');
     const bodyDiv = commentDiv.querySelector('.user-comment-body');
     const editForm = commentDiv.querySelector('.user-comment-edit-form');
+    window.reviewDrafts?.close(editForm?.querySelector('textarea'));
 
     bodyDiv.style.display = '';
     if (editForm) editForm.remove();
@@ -6531,6 +6469,7 @@ class PRManager {
    */
   async loadUserComments(includeDismissed = false) {
     if (!this.currentPR) return;
+    const generation = this._commentLoadGeneration = (this._commentLoadGeneration || 0) + 1;
 
     try {
       const queryParam = includeDismissed ? '?includeDismissed=true' : '';
@@ -6538,7 +6477,10 @@ class PRManager {
       if (!response.ok) return;
 
       const data = await response.json();
+      if (generation !== this._commentLoadGeneration) return;
+      window.reviewDrafts?.captureEditors();
       this.userComments = data.comments || [];
+      window.reviewDrafts?.ingest(this.userComments);
 
       // Separate file-level and line-level comments for diff view rendering
       // DESIGN DECISION: Dismissed comments are NEVER shown in the diff panel.
@@ -6584,6 +6526,7 @@ class PRManager {
           side: c.side || 'RIGHT',
         })));
       }
+      if (generation !== this._commentLoadGeneration) return;
 
       // Partition line-level comments by rendering engine
       const pierreComments = [];
@@ -6648,6 +6591,7 @@ class PRManager {
       if (this.commentMinimizer) {
         this.commentMinimizer.refreshIndicators();
       }
+      await window.reviewDrafts?.restoreEditors();
     } catch (error) {
       console.error('Error loading user comments:', error);
     }
@@ -6656,30 +6600,31 @@ class PRManager {
   /**
    * Load AI suggestions from API
    * @param {string} level - Optional level filter ('final', '1', '2', '3')
-   * @param {string} runId - Optional analysis run ID (defaults to latest)
+   * @param {string|null} runId - Selected history run by default; null explicitly requests latest
    */
-  async loadAISuggestions(level = null, runId = null) {
+  async loadAISuggestions(level = null, runId) {
     if (!this.currentPR) return;
+    const reviewId = this.currentPR.id;
+    const requestId = this._aiSuggestionsRequestId = (this._aiSuggestionsRequestId || 0) + 1;
+    const isCurrent = () => this._aiSuggestionsRequestId === requestId && this.currentPR?.id === reviewId;
 
     try {
-      const { owner, repo, number } = this.currentPR;
-
       // Use provided level, or fall back to current selectedLevel
       const filterLevel = level || this.selectedLevel || 'final';
-      // Use provided runId, or fall back to selectedRunId (which may be null for latest)
-      const filterRunId = runId !== undefined ? runId : this.selectedRunId;
+      // The history selector owns the current run; explicit null requests latest.
+      const filterRunId = runId !== undefined ? runId : this.analysisHistoryManager?.getSelectedRunId() || null;
 
       // First, check if analysis has been run for this PR and get summary for the selected run
       let analysisHasRun = false;
       try {
-        const id = this.currentPR.id;
-        let checkUrl = `/api/reviews/${id}/suggestions/check`;
+        let checkUrl = `/api/reviews/${reviewId}/suggestions/check`;
         if (filterRunId) {
-          checkUrl += `?runId=${filterRunId}`;
+          checkUrl += `?runId=${encodeURIComponent(filterRunId)}`;
         }
         const checkResponse = await fetch(checkUrl);
         if (checkResponse.ok) {
           const checkData = await checkResponse.json();
+          if (!isCurrent()) return;
           analysisHasRun = checkData.analysisHasRun;
 
           // Store summary data in the AI panel for the AI Summary modal
@@ -6693,6 +6638,7 @@ class PRManager {
       } catch (checkError) {
         console.warn('Error checking analysis status:', checkError);
       }
+      if (!isCurrent()) return;
 
       // Set the analysis state on the AI panel BEFORE loading suggestions
       // This ensures the correct empty state is shown
@@ -6700,21 +6646,17 @@ class PRManager {
         window.aiPanel.setAnalysisState(analysisHasRun ? 'complete' : 'unknown');
       }
 
-      let url = `/api/reviews/${this.currentPR.id}/suggestions?levels=${filterLevel}`;
+      let url = `/api/reviews/${reviewId}/suggestions?levels=${encodeURIComponent(filterLevel)}`;
       if (filterRunId) {
-        url += `&runId=${filterRunId}`;
+        url += `&runId=${encodeURIComponent(filterRunId)}`;
       }
 
       const response = await fetch(url);
       if (!response.ok) return;
 
       const data = await response.json();
-      if (data.suggestions && data.suggestions.length > 0) {
-        await this.displayAISuggestions(data.suggestions);
-      } else {
-        // Clear existing suggestions if none returned for this level
-        await this.displayAISuggestions([]);
-      }
+      if (!isCurrent()) return;
+      await this.displayAISuggestions(data.suggestions || []);
     } catch (error) {
       console.error('Error loading AI suggestions:', error);
     }
@@ -6954,12 +6896,12 @@ class PRManager {
       // and wire a custom submit that runs the adopt-edited flow.
       if (this.pierreBridge && this.pierreBridge.files.has(fileName)) {
         const formId = `edit-suggestion-${suggestionId}`;
-        const onAdoptEdited = async (editedText, _fileName, annotationId) => {
+        const onAdoptEdited = async (editedText, _fileName, annotationId, draft) => {
           const reviewId = this.currentPR?.id;
           const editResponse = await fetch(`/api/reviews/${reviewId}/suggestions/${suggestionId}/edit`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'adopt_edited', editedText })
+            body: JSON.stringify({ action: 'adopt_edited', editedText, draft })
           });
           if (!editResponse.ok) throw new Error('Failed to adopt suggestion with edits');
           const editResult = await editResponse.json();
@@ -6993,6 +6935,7 @@ class PRManager {
             side: side || 'RIGHT',
             showSuggestionBtn: true,
             initialValue: formattedBody || suggestionText,
+            parentId: suggestionId,
             customSubmit: onAdoptEdited,
           },
         });
@@ -7002,14 +6945,14 @@ class PRManager {
       this.commentManager.displaySuggestionEditForm(
         suggestion,
         suggestionRow,
-        async (editedText) => {
+        async (editedText, draft) => {
           // User clicked Save — now adopt via /edit endpoint
           try {
             const reviewId = this.currentPR?.id;
             const editResponse = await fetch(`/api/reviews/${reviewId}/suggestions/${suggestionId}/edit`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ action: 'adopt_edited', editedText })
+              body: JSON.stringify({ action: 'adopt_edited', editedText, draft })
             });
 
             if (!editResponse.ok) throw new Error('Failed to adopt suggestion with edits');
@@ -7276,6 +7219,11 @@ class PRManager {
         const buttonElement = this.splitButton.render();
         placeholder.appendChild(buttonElement);
         this.updateCommentCount();
+        if (!this._draftCountListener) {
+          this._draftCountListener = event => { if (event.detail.reviewId === this.currentPR?.id) this.updateCommentCount(); };
+          window.addEventListener('reviewDraftChanged', this._draftCountListener);
+          window.addEventListener('reviewDraftSaved', this._draftCountListener);
+        }
 
         // Handle late config arrival — update share config when config fetch resolves
         window.addEventListener('chat-state-changed', () => {
@@ -7292,9 +7240,7 @@ class PRManager {
    * Open review modal
    */
   openReviewModal() {
-    if (!this.reviewModal) {
-      this.reviewModal = new ReviewModal();
-    }
+    if (!this.reviewModal) this.reviewModal = window.reviewModal;
     this.reviewModal.show();
   }
 
@@ -7332,9 +7278,9 @@ class PRManager {
     // Build the callback URL for the share endpoint
     let callbackUrl = `${window.location.origin}/api/pr/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/${pr.number}/share`;
 
-    // Include selected run ID if one is explicitly selected
-    if (this.selectedRunId) {
-      callbackUrl += `?runId=${encodeURIComponent(this.selectedRunId)}`;
+    const selectedRunId = this.analysisHistoryManager?.getSelectedRunId();
+    if (selectedRunId) {
+      callbackUrl += `?runId=${encodeURIComponent(selectedRunId)}`;
     }
 
     // Check that there is analysis data to share before opening the page
@@ -7371,87 +7317,29 @@ class PRManager {
     window.open(shareUrl.toString(), '_blank');
   }
 
-  /**
-   * Update comment count display
-   * Note: Dismissed comments are never in the diff DOM (design decision), so we simply count all visible elements.
-   */
+  /** Counts use the same server selection as the final preview, never diff DOM. */
   updateCommentCount() {
-    // Count both line-level comments (.user-comment-row) and file-level comments (.file-comment-card.user-comment)
-    const lineComments = document.querySelectorAll('.user-comment-row:not(.suggestion-edit-pending)').length;
-    const fileComments = document.querySelectorAll('.file-comment-card.user-comment').length;
-    const userComments = lineComments + fileComments;
-
-    if (this.splitButton) {
-      this.splitButton.updateCommentCount(userComments);
-    }
-
-    const reviewButton = document.getElementById('review-button');
-    if (reviewButton) {
-      const buttonText = reviewButton.querySelector('.review-button-text');
-      if (buttonText) {
-        buttonText.textContent = `${userComments} ${userComments === 1 ? 'comment' : 'comments'}`;
+    clearTimeout(this._commentCountTimer);
+    const generation = this._commentCountGeneration = (this._commentCountGeneration || 0) + 1;
+    const reviewId = this.currentPR?.id;
+    this.splitButton?.updateCommentCount(null, { state: window.reviewDrafts?.hasPending(reviewId) ? 'unsaved' : 'loading' });
+    if (!reviewId) return;
+    this._commentCountTimer = setTimeout(async () => {
+      if (window.reviewDrafts?.hasPending(reviewId)) return;
+      try {
+        const response = await fetch(`/api/reviews/${reviewId}/manifest?local=true`);
+        if (!response.ok) throw new Error('Saved selection unavailable');
+        const manifest = await response.json();
+        if (generation !== this._commentCountGeneration || reviewId !== this.currentPR?.id) return;
+        this.splitButton?.updateCommentCount(manifest.count, { totalDrafts: manifest.drafts.length });
+        const clearButton = document.getElementById('clear-comments-btn');
+        if (clearButton) clearButton.disabled = manifest.drafts.length === 0;
+      } catch {
+        if (generation === this._commentCountGeneration) this.splitButton?.updateCommentCount(null, { state: 'count unavailable' });
       }
-
-      if (userComments > 0) {
-        reviewButton.classList.add('has-comments');
-      } else {
-        reviewButton.classList.remove('has-comments');
-      }
-    }
-
-    const clearButton = document.getElementById('clear-comments-btn');
-    if (clearButton) {
-      clearButton.disabled = userComments === 0;
-    }
+    }, 100);
   }
 
-  /**
-   * Submit review to GitHub
-   */
-  async submitReview() {
-    const reviewEvent = document.getElementById('review-event').value;
-    const reviewBody = document.getElementById('review-body').value.trim();
-    const submitBtn = document.getElementById('submit-review-btn');
-
-    // Count BOTH line-level and file-level comments for validation
-    const lineComments = document.querySelectorAll('.user-comment-row:not(.suggestion-edit-pending)').length;
-    const fileComments = document.querySelectorAll('.file-comment-card.user-comment').length;
-    const totalComments = lineComments + fileComments;
-    if (reviewEvent === 'REQUEST_CHANGES' && !reviewBody && totalComments === 0) {
-      alert('Please add comments or a review summary when requesting changes.');
-      return;
-    }
-
-    const originalText = submitBtn.textContent;
-    submitBtn.textContent = 'Submitting...';
-    submitBtn.disabled = true;
-
-    try {
-      const response = await fetch(`/api/pr/${this.currentPR.owner}/${this.currentPR.repo}/${this.currentPR.number}/submit-review`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ event: reviewEvent, body: reviewBody })
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to submit review');
-      }
-
-      const result = await response.json();
-      alert(`Review submitted successfully! ${result.message}`);
-
-      document.getElementById('review-body').value = '';
-      document.getElementById('review-event').value = 'COMMENT';
-
-    } catch (error) {
-      console.error('Error submitting review:', error);
-      alert(`Failed to submit review: ${error.message}`);
-    } finally {
-      submitBtn.textContent = originalText;
-      submitBtn.disabled = false;
-    }
-  }
 
   /**
    * Escape HTML characters
@@ -7550,17 +7438,16 @@ class PRManager {
         return;
       }
 
-      // Use unified review comments API (works for both PR and local mode)
       const reviewId = pr.id;
-      let response;
-      response = await fetch(`/api/reviews/${reviewId}/comments`);
+      await window.reviewDrafts.flushAll(reviewId);
+      const response = await fetch(`/api/reviews/${reviewId}/manifest?local=true`);
 
       if (!response.ok) {
         throw new Error('Failed to load comments');
       }
 
-      const data = await response.json();
-      const comments = data.comments || [];
+      const manifest = await response.json();
+      const comments = manifest.comments;
 
       if (comments.length === 0) {
         if (window.toast) {
@@ -7570,13 +7457,13 @@ class PRManager {
       }
 
       // Format comments using PreviewModal's static method
-      if (!window.PreviewModal?.formatComments) {
+      if (!window.PreviewModal?.formatManifest) {
         if (window.toast) {
           window.toast.showError('PreviewModal not available');
         }
         return;
       }
-      const formattedText = window.PreviewModal.formatComments(comments);
+      const formattedText = window.PreviewModal.formatManifest(manifest);
 
       await navigator.clipboard.writeText(formattedText);
 
@@ -7825,6 +7712,10 @@ class PRManager {
     // Helper to toggle sidebar with batched updates to prevent flicker
     // Batches class change and CSS variable update in a single frame
     const toggleSidebar = (collapse) => {
+      if (!collapse && window.innerWidth <= 1200 && window.reviewWorkspace) {
+        window.reviewWorkspace.showPalette('Files');
+        return;
+      }
       const widthValue = collapse
         ? '0px'
         : `${window.PanelResizer?.getSavedWidth('sidebar')
@@ -7865,6 +7756,7 @@ class PRManager {
   async scrollToFile(filePath) {
     const fileWrapper = this.findFileElement(filePath);
     if (fileWrapper) {
+      this.reviewProgress?.visit(filePath);
       // Render the body so the scroll target has its real height (an empty
       // lazy body would land the scroll at the wrong offset for expanded
       // files). Skip it for collapsed files: their body is display:none
@@ -8700,7 +8592,6 @@ class PRManager {
         // onSelectionChange on init), refresh must call unconditionally
         // since the manager won't re-fire its callback.
         await this._rerenderAllOverlays({
-          analysisRunId: this.selectedRunId,
           syncExternal: true,
         });
 

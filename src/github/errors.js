@@ -17,39 +17,4 @@ class GitHubApiError extends Error {
   }
 }
 
-/**
- * Detect whether a GraphQL error is a complexity/cost limit error from GitHub.
- * These errors mean the mutation was too large and can be retried with fewer items.
- *
- * @param {Error} error - The error thrown by octokit.graphql
- * @returns {boolean} True if the error is a complexity/cost limit error
- */
-function isComplexityError(error) {
-  const patterns = [
-    /complexity/i,
-    /MAX_NODE_LIMIT/,
-    /cost exceeds/i,
-    /too large/i,
-    /query size exceeds/i,
-  ];
-
-  if (error.message) {
-    for (const pattern of patterns) {
-      if (pattern.test(error.message)) return true;
-    }
-  }
-
-  if (error.errors && Array.isArray(error.errors)) {
-    for (const err of error.errors) {
-      if (err.message) {
-        for (const pattern of patterns) {
-          if (pattern.test(err.message)) return true;
-        }
-      }
-    }
-  }
-
-  return false;
-}
-
-module.exports = { GitHubApiError, isComplexityError };
+module.exports = { GitHubApiError };

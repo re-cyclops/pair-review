@@ -67,6 +67,7 @@
 
   /** localStorage key for persisting the active tab */
   const TAB_STORAGE_KEY = 'pair-review-active-tab';
+  const VIEW_STORAGE_KEY = 'pair-review-primary-view';
   const BULK_ANALYSIS_TAB_STORAGE_KEY = 'pair-review-bulk-analysis-tab';
   const BULK_ANALYSIS_INSTRUCTIONS_STORAGE_KEY = 'pair-review-bulk-analysis-instructions';
 
@@ -296,8 +297,13 @@
     if (!tabId) return;
 
     // Deactivate all tabs in this bar
-    tabBar.querySelectorAll('.tab-btn').forEach(function (btn) { btn.classList.remove('active'); });
+    tabBar.querySelectorAll('.tab-btn').forEach(function (btn) {
+      btn.classList.remove('active');
+      btn.removeAttribute('aria-current');
+    });
     clickedBtn.classList.add('active');
+    clickedBtn.setAttribute('aria-current', 'page');
+    window.dispatchEvent(new CustomEvent('workspaceViewChanged', { detail: clickedBtn.dataset.workspaceView || 'all' }));
 
     // Find the parent container that holds the tab panes
     const container = tabBar.closest('.recent-reviews-section');
@@ -607,35 +613,36 @@
    */
   function renderCollectionTable(container, state, collection) {
     var sel = collectionSelections[collection];
-    if (sel) sel.exit();
+    var notice = document.getElementById(collection + '-availability');
+    if (!notice) {
+      notice = document.createElement('p');
+      notice.id = collection + '-availability';
+      notice.className = 'workspace-collection-status';
+      notice.setAttribute('role', 'status');
+      container.before(notice);
+    }
+    notice.textContent = state.error ? 'Queue unavailable or partial: ' + state.error + (state.prs.length ? '. Last successful cached rows are retained.' : '.') : '';
+    notice.hidden = !state.error;
 
     var fetchedAtEl = document.getElementById(collection + '-fetched-at');
     if (fetchedAtEl) {
-      // Note: this key is intentionally NOT per-team — unlike the DB cache key
-      // in src/routes/github-collections.js (which uses cacheKey()), the
-      // fetched-at timestamp is informational only. We accept a brief label
-      // mismatch when the user switches the team-reviews filter; the label
-      // updates once that view's next refresh completes. See the write site in
-      // refreshCollectionPrs.
-      var lsKey = 'github-collection-fetched-at:' + collection;
-      var displayTs = localStorage.getItem(lsKey) || state.fetchedAt;
-      fetchedAtEl.textContent = displayTs
-        ? 'Updated ' + formatRelativeTime(displayTs)
+      fetchedAtEl.textContent = state.fetchedAt
+        ? 'Updated ' + formatRelativeTime(state.fetchedAt)
         : '';
     }
 
     if (state.prs.length === 0) {
-      var emptyLsKey = 'github-collection-fetched-at:' + collection;
-      var hasFetched = state.fetchedAt || localStorage.getItem(emptyLsKey);
-      var emptyMsg = hasFetched
-        ? (COLLECTION_EMPTY_MESSAGES[collection] || 'No pull requests found.')
-        : 'Click refresh to fetch from GitHub.';
+      var emptyMsg = state.error ? 'No reliable current queue is available. Refresh when access is restored.'
+        : state.fetchedAt ? (COLLECTION_EMPTY_MESSAGES[collection] || 'No pull requests found.')
+          : 'Click refresh to fetch from GitHub.';
 
       container.innerHTML =
         '<div class="recent-reviews-empty">' +
           '<p>' + emptyMsg + '</p>' +
         '</div>';
       container.classList.remove('recent-reviews-loading');
+      if (sel) sel._updateInlineActions();
+      window.dispatchEvent(new CustomEvent('workspaceCollectionObserved', { detail: { collection, sources: state.sources } }));
       return;
     }
 
@@ -660,6 +667,9 @@
         '</tbody>' +
       '</table>';
     container.classList.remove('recent-reviews-loading');
+    if (sel?.active) sel._injectCheckboxes();
+    sel?._updateInlineActions();
+    window.dispatchEvent(new CustomEvent('workspaceCollectionObserved', { detail: { collection, sources: state.sources } }));
   }
 
   /**
@@ -675,6 +685,9 @@
    */
   async function loadCollectionPrs(collection, containerId, state, team, requestId) {
     var container = document.getElementById(containerId);
+    const context = window.reviewWorkspace?.contextVersion || 0;
+    if (requestId == null) requestId = state.activeRequest = (state.activeRequest || 0) + 1;
+    else if (requestId !== state.activeRequest) return;
 
     try {
       var url = '/api/github/' + collection + (team ? '?team=' + encodeURIComponent(team) : '');
@@ -682,24 +695,22 @@
       if (!response.ok) throw new Error('Failed to fetch');
       var data = await response.json();
 
-      // Discard a response a newer team-reviews request has superseded, so a
-      // slow earlier load can't repaint the table with a stale team's PRs.
-      if (requestId != null && requestId !== state.activeRequest) return;
+      // A newer request or connection owns the collection now.
+      if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== state.activeRequest) return;
 
       state.loaded = true;
       state.prs = data.prs || [];
       state.fetchedAt = data.fetched_at;
+      state.sources = data.hosts;
+      state.error = data.error || null;
 
       renderCollectionTable(container, state, collection);
     } catch (error) {
       console.error('Error loading ' + collection + ':', error);
       // Don't paint the error over a view a newer request now owns.
-      if (requestId != null && requestId !== state.activeRequest) return;
-      container.innerHTML =
-        '<div class="recent-reviews-empty">' +
-          '<p>Failed to load. Click refresh to try again.</p>' +
-        '</div>';
-      container.classList.remove('recent-reviews-loading');
+      if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== state.activeRequest) return;
+      state.error = error.message;
+      renderCollectionTable(container, state, collection);
     }
   }
 
@@ -717,6 +728,9 @@
   async function refreshCollectionPrs(collection, containerId, state, team, requestId) {
     var container = document.getElementById(containerId);
     var btn = document.getElementById('refresh-' + collection);
+    const context = window.reviewWorkspace?.contextVersion || 0;
+    if (requestId == null) requestId = state.activeRequest = (state.activeRequest || 0) + 1;
+    else if (requestId !== state.activeRequest) return;
 
     if (btn) btn.classList.add('refreshing');
 
@@ -731,56 +745,41 @@
 
       // A newer team-reviews request has superseded this one; drop it before
       // touching the 401 message, shared state, or the table.
-      if (requestId != null && requestId !== state.activeRequest) return;
+      if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== state.activeRequest) return;
 
       if (!response.ok) {
         var errData = await response.json().catch(function() { return {}; });
-        if (response.status === 401) {
-          container.innerHTML =
-            '<div class="recent-reviews-empty">' +
-              '<p>Configure a GitHub token to see ' +
-              (COLLECTION_TOKEN_LABELS[collection] || 'pull requests') +
-              '.</p>' +
-            '</div>';
-          container.classList.remove('recent-reviews-loading');
-          return;
+        if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== state.activeRequest) return;
+        if (Array.isArray(errData.prs)) {
+          state.prs = errData.prs;
+          state.fetchedAt = errData.fetched_at;
+          state.sources = errData.hosts;
+          state.loaded = true;
         }
-        throw new Error(errData.error || 'Refresh failed');
+        throw new Error(errData.error || (response.status === 401 ? 'Authentication unavailable' : 'Refresh failed'));
       }
 
       var data = await response.json();
 
       // Re-check after the body parse: a newer request may have started while
       // the response was streaming.
-      if (requestId != null && requestId !== state.activeRequest) return;
+      if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== state.activeRequest) return;
 
       state.prs = data.prs || [];
       state.fetchedAt = data.fetched_at;
+      state.sources = data.hosts;
       state.loaded = true;
-      // Note: this key is intentionally NOT per-team — unlike the DB cache key
-      // in src/routes/github-collections.js (which uses cacheKey()), the
-      // fetched-at timestamp is informational only. We accept a brief label
-      // mismatch when the user switches the team-reviews filter; the label
-      // updates once the next refresh completes (read site: renderCollectionTable).
-      localStorage.setItem('github-collection-fetched-at:' + collection, new Date().toISOString());
+      state.error = data.error || null;
 
       renderCollectionTable(container, state, collection);
     } catch (error) {
       console.error('Error refreshing ' + collection + ':', error);
       // Don't repaint a view a newer request now owns.
-      if (requestId != null && requestId !== state.activeRequest) return;
-      // If we had existing data, keep showing it
-      if (state.prs.length > 0) {
-        renderCollectionTable(container, state, collection);
-      } else {
-        container.innerHTML =
-          '<div class="recent-reviews-empty">' +
-            '<p>Failed to fetch from GitHub. Check your token and try again.</p>' +
-          '</div>';
-        container.classList.remove('recent-reviews-loading');
-      }
+      if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== state.activeRequest) return;
+      state.error = error.message;
+      renderCollectionTable(container, state, collection);
     } finally {
-      if (btn) btn.classList.remove('refreshing');
+      if (btn && context === (window.reviewWorkspace?.contextVersion || 0) && requestId === state.activeRequest) btn.classList.remove('refreshing');
     }
   }
 
@@ -844,10 +843,11 @@
    * Fetch and display local review sessions (initial load).
    */
   async function loadLocalReviews() {
-    localSelection.exit();
 
     const container = document.getElementById('local-reviews-container');
     if (!container) return;
+    const context = window.reviewWorkspace?.contextVersion || 0;
+    const requestId = localReviewsPagination.requestId = (localReviewsPagination.requestId || 0) + 1;
 
     // Reset pagination
     localReviewsPagination.lastTimestamp = null;
@@ -858,6 +858,7 @@
       if (!response.ok) throw new Error('Failed to fetch local sessions');
 
       const data = await response.json();
+      if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== localReviewsPagination.requestId) return;
 
       if (!data.success || !data.sessions || data.sessions.length === 0) {
         container.innerHTML =
@@ -898,11 +899,14 @@
           : '');
       container.classList.remove('recent-reviews-loading');
       localReviewsPagination.loaded = true;
+      if (localSelection.active) localSelection._injectCheckboxes();
+      localSelection._updateInlineActions();
 
       // Apply analysis-in-progress spinners to any rows with active analyses
       fetchAndApplyActiveAnalyses();
 
     } catch (error) {
+      if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== localReviewsPagination.requestId) return;
       console.error('Error loading local reviews:', error);
       container.innerHTML =
         '<div class="recent-reviews-empty">' +
@@ -982,7 +986,6 @@
     if (row.classList.contains('delete-confirm-row')) return;
 
     // Remember original HTML so we can restore on cancel.
-    // Note: restoring innerHTML is safe because all click handlers use event delegation.
     const originalHTML = row.innerHTML;
     const colCount = row.children.length;
 
@@ -1018,12 +1021,14 @@
         // Restore row on failure
         row.classList.remove('delete-confirm-row');
         row.innerHTML = originalHTML;
+        row.querySelector('.btn-delete-session')?.focus({ preventScroll: true });
       }
     });
 
     row.querySelector('.btn-confirm-no').addEventListener('click', function () {
       row.classList.remove('delete-confirm-row');
       row.innerHTML = originalHTML;
+      row.querySelector('.btn-delete-session')?.focus({ preventScroll: true });
     });
   }
 
@@ -1212,7 +1217,6 @@
     if (row.classList.contains('delete-confirm-row')) return;
 
     // Remember original HTML so we can restore on cancel.
-    // Note: restoring innerHTML is safe because all click handlers use event delegation.
     const originalHTML = row.innerHTML;
     const colCount = row.children.length;
 
@@ -1246,12 +1250,14 @@
         // Restore row on failure
         row.classList.remove('delete-confirm-row');
         row.innerHTML = originalHTML;
+        row.querySelector('.btn-delete-review')?.focus({ preventScroll: true });
       }
     });
 
     row.querySelector('.btn-confirm-no').addEventListener('click', function () {
       row.classList.remove('delete-confirm-row');
       row.innerHTML = originalHTML;
+      row.querySelector('.btn-delete-review')?.focus({ preventScroll: true });
     });
   }
 
@@ -1270,10 +1276,11 @@
    * Resets pagination state and renders the full table from scratch.
    */
   async function loadRecentReviews() {
-    prSelection.exit();
 
     const container = document.getElementById('recent-reviews-container');
     const section = document.getElementById('recent-reviews-section');
+    const context = window.reviewWorkspace?.contextVersion || 0;
+    const requestId = recentReviewsPagination.requestId = (recentReviewsPagination.requestId || 0) + 1;
     // Reset pagination state
     recentReviewsPagination.lastTimestamp = null;
     recentReviewsPagination.hasMore = false;
@@ -1286,6 +1293,7 @@
       }
 
       const data = await response.json();
+      if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== recentReviewsPagination.requestId) return;
 
       if (!data.success || !data.reviews || data.reviews.length === 0) {
         // Show friendly empty state
@@ -1323,11 +1331,14 @@
         renderShowMoreButton(data.hasMore);
       container.innerHTML = html;
       container.classList.remove('recent-reviews-loading');
+      if (prSelection.active) prSelection._injectCheckboxes();
+      prSelection._updateInlineActions();
 
       // Apply analysis-in-progress spinners to any rows with active analyses
       fetchAndApplyActiveAnalyses();
 
     } catch (error) {
+      if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== recentReviewsPagination.requestId) return;
       console.error('Error loading recent reviews:', error);
       container.innerHTML =
         '<div class="recent-reviews-empty">' +
@@ -1610,6 +1621,7 @@
     this.config = config;
     this.active = false;
     this.selectedIds = new Set();
+    this.selectedRows = new Map();
     this._actionBar = null;
     this._toggleBtn = null;
     this._confirming = false;
@@ -1645,6 +1657,7 @@
     if (!this.active) return;
     this.active = false;
     this.selectedIds.clear();
+    this.selectedRows.clear();
     this._confirming = false;
 
     if (activeSelection === this) activeSelection = null;
@@ -1684,10 +1697,10 @@
 
     // Add select-all checkbox to thead
     var thead = table.querySelector('thead tr');
-    if (thead) {
+    if (thead && !thead.querySelector('.col-select')) {
       var th = document.createElement('th');
       th.className = 'col-select';
-      th.innerHTML = '<input type="checkbox" class="select-all-checkbox" title="Select all">';
+      th.innerHTML = '<input type="checkbox" class="select-all-checkbox" title="Select all visible" aria-label="Select all visible reviews">';
       thead.insertBefore(th, thead.firstChild);
 
       var self = this;
@@ -1716,6 +1729,9 @@
     var td = document.createElement('td');
     td.className = 'col-select';
     td.innerHTML = '<input type="checkbox" data-select-id="' + (rowId || '') + '">';
+    td.querySelector('input').checked = this.selectedIds.has(rowId);
+    td.querySelector('input').setAttribute('aria-label', 'Select review ' + rowId);
+    tr.classList.toggle('bulk-selected', this.selectedIds.has(rowId));
     tr.insertBefore(td, tr.firstChild);
 
     var self = this;
@@ -1748,6 +1764,7 @@
     var checkboxes = tbody.querySelectorAll('.col-select input[type="checkbox"]');
     for (var i = 0; i < checkboxes.length; i++) {
       var cb = checkboxes[i];
+      if (!cb.closest('tr').getClientRects().length) continue;
       cb.checked = checked;
       var id = cb.dataset.selectId;
       var row = cb.closest('tr');
@@ -1788,6 +1805,7 @@
 
   SelectionMode.prototype.onRowsAdded = function () {
     if (!this.active) return;
+    this._injectCheckboxes();
     var tbody = this._getTbody();
     if (!tbody) return;
 
@@ -1807,6 +1825,7 @@
         selectAllCb.indeterminate = this.selectedIds.size > 0;
       }
     }
+    this._updateInlineActions();
   };
 
   /**
@@ -1890,6 +1909,16 @@
   };
 
   SelectionMode.prototype._updateInlineActions = function () {
+    var tbody = this._getTbody();
+    var visibleSelected = 0;
+    if (tbody) tbody.querySelectorAll('tr').forEach((row) => {
+      var id = row.dataset[this.config.rowIdAttr];
+      if (this.selectedIds.has(id)) {
+        this.selectedRows.set(id, { ...row.dataset });
+        if (row.getClientRects().length) visibleSelected++;
+      }
+    });
+    for (var id of this.selectedRows.keys()) if (!this.selectedIds.has(id)) this.selectedRows.delete(id);
     if (!this._inlineEl) return;
 
     var count = this.selectedIds.size;
@@ -1897,7 +1926,7 @@
     // Update count label
     // Clear count text when not confirming (only used for confirm message)
     if (this._countEl && !this._confirming) {
-      this._countEl.textContent = '';
+      this._countEl.textContent = count + ' selected' + (count > visibleSelected ? ' · ' + (count - visibleSelected) + ' hidden' : '');
     }
 
     // Enable/disable action buttons
@@ -2009,6 +2038,29 @@
     'team-reviews': teamReviewsSelection,
     'my-prs': myPrsSelection
   };
+  window.addEventListener('workspaceFilterChanged', function () {
+    [prSelection, localSelection, ...Object.values(collectionSelections)].forEach(selection => selection._updateInlineActions());
+  });
+
+  window.addEventListener('workspaceContextChanged', function (event) {
+    if (event.detail.databaseChanged) {
+      [prSelection, localSelection, ...Object.values(collectionSelections)].forEach(selection => selection.exit());
+    }
+    for (const id of ['recent-reviews-container', 'local-reviews-container', 'review-requests-container', 'team-reviews-container', 'my-prs-container']) {
+      const container = document.getElementById(id);
+      if (container) container.textContent = 'Connection changed. Loading this server’s saved reviews…';
+    }
+    loadConfigAndUpdateUI();
+    loadRecentReviews();
+    loadLocalReviews();
+    for (const [collection, state] of [['review-requests', reviewRequestsState], ['team-reviews', teamReviewsState], ['my-prs', myPrsState]]) {
+      state.loaded = false;
+      state.prs = [];
+      state.fetchedAt = null;
+      state.activeRequest = (state.activeRequest || 0) + 1;
+      loadCollectionPrs(collection, `${collection}-container`, state, collection === 'team-reviews' ? getStoredTeamFilter() : undefined, state.activeRequest);
+    }
+  });
 
   async function handleBulkDeletePR(selectedIds, selectionInstance) {
     var count = selectedIds.size;
@@ -2075,29 +2127,10 @@
    * @returns {Array<{owner: string, repo: string, number: string, prUrl: string, host: string|undefined}>}
    */
   function getSelectedCollectionRows(selectedIds, tbodyId) {
-    var tbody = document.getElementById(tbodyId);
-    if (!tbody) return [];
-
-    var rows = [];
-    var trs = tbody.querySelectorAll('tr[data-pr-url]');
-    for (var i = 0; i < trs.length; i++) {
-      var tr = trs[i];
-      var prUrl = tr.dataset.prUrl;
-      if (!selectedIds.has(prUrl)) continue;
-      if (tr.dataset.owner && tr.dataset.repo && tr.dataset.number) {
-        rows.push({
-          owner: tr.dataset.owner,
-          repo: tr.dataset.repo,
-          number: tr.dataset.number,
-          prUrl: prUrl,
-          // Known rows carry either the "github" sentinel or an alternate
-          // api_host; unknown rows leave it undefined. The single-row click
-          // path threads the same value so bulk and individual routing agree.
-          host: tr.dataset.host
-        });
-      }
-    }
-    return rows;
+    var selection = Object.values(collectionSelections).find(value => value.config.tbodyId === tbodyId);
+    const visibleRows = new Map([...document.querySelectorAll(`#${tbodyId} tr[data-pr-url]`)].map(row => [row.dataset.prUrl, row.dataset]));
+    return [...selectedIds].map(id => visibleRows.get(id) || selection?.selectedRows.get(id)).filter(row => row?.owner && row?.repo && row?.number)
+      .map(row => ({ owner: row.owner, repo: row.repo, number: row.number, prUrl: row.prUrl, host: row.host }));
   }
 
   function buildReviewUrlsFromRows(rows, query) {
@@ -2419,10 +2452,11 @@
     if (unifiedTabBtn) {
       const tabBar = document.getElementById('unified-tab-bar');
       switchTab(tabBar, unifiedTabBtn, async function (tabId) {
-        // Exit any active selection mode when switching tabs
-        if (activeSelection) activeSelection.exit();
+        // A primary filter can reuse the same table; its selection remains intact.
+        if (activeSelection && activeSelection.config.tabId !== tabId) activeSelection.exit();
         // Persist tab choice
         localStorage.setItem(TAB_STORAGE_KEY, tabId);
+        localStorage.setItem(VIEW_STORAGE_KEY, unifiedTabBtn.dataset.workspaceView || 'all');
         // Lazy-load local reviews on first switch
         if (tabId === 'local-tab' && !localReviewsPagination.loaded) {
           loadLocalReviews();
@@ -2466,12 +2500,20 @@
     await loadConfigAndUpdateUI();
 
     // Restore saved tab from localStorage (default: 'pr-tab')
-    const savedTab = localStorage.getItem(TAB_STORAGE_KEY) || 'pr-tab';
+    const initialParams = new URLSearchParams(window.location.search);
+    const savedTab = (initialParams.has('view') || initialParams.has('reviewUrl') ? 'pr-tab' : initialParams.get('tab') || localStorage.getItem(TAB_STORAGE_KEY)) || 'pr-tab';
+    const savedView = initialParams.get('view') || (!initialParams.has('tab') && !initialParams.has('reviewUrl') ? localStorage.getItem(VIEW_STORAGE_KEY) : 'all');
+    if (initialParams.has('reviewUrl')) {
+      const input = document.querySelector('#start-review-form input[type="url"], #start-review-form input[type="text"]');
+      if (input) { input.value = initialParams.get('reviewUrl'); input.focus(); }
+    }
     const tabBar = document.getElementById('unified-tab-bar');
     if (tabBar) {
-      const targetBtn = tabBar.querySelector('[data-tab="' + savedTab + '"]');
-      if (targetBtn && savedTab !== 'pr-tab') {
-        // Switch to saved tab (pr-tab is already active by default in HTML)
+      const targetBtn = savedTab === 'pr-tab' && savedView === 'drafts'
+        ? tabBar.querySelector('[data-workspace-view="drafts"]')
+        : tabBar.querySelector('[data-tab="' + savedTab + '"]');
+      if (targetBtn && (savedTab !== 'pr-tab' || savedView === 'drafts')) {
+        // Restore both the data source and the primary filter.
         switchTab(tabBar, targetBtn);
       }
     }
@@ -2680,6 +2722,7 @@
     var spinner = document.createElement('span');
     spinner.className = 'index-analysis-spinner';
     spinner.title = 'Analysis in progress';
+    spinner.setAttribute('aria-hidden', 'true');
 
     // PR rows: prepend in .col-title; local rows: prepend in .col-local-name
     var cell = row.querySelector('.col-title') || row.querySelector('.col-local-name');
@@ -2704,52 +2747,23 @@
    * Fetch active analyses and apply/remove spinners to matching rows.
    */
   function fetchAndApplyActiveAnalyses() {
-    fetch('/api/analyses/active')
-      .then(function (res) { return res.json(); })
-      .then(function (data) {
-        if (!data.active) return;
-
-        var activeReviewIds = new Set();
-        data.active.forEach(function (entry) {
-          var rid = entry.reviewId;
-          if (rid == null) return;
-          activeReviewIds.add(rid);
-          var row = findRowByReviewId(rid);
-          if (row) addSpinnerToRow(row, rid);
-        });
-
-        // Remove spinners for analyses that are no longer active
-        activeSpinnerReviewIds.forEach(function (rid) {
-          if (!activeReviewIds.has(rid)) {
-            var row = findRowByReviewId(rid);
-            if (row) removeSpinnerFromRow(row, rid);
-            else activeSpinnerReviewIds.delete(rid);
-          }
-        });
-      })
-      .catch(function () { /* ignore — spinners are best-effort */ });
+    window.reviewWorkspace?.refresh();
   }
 
-  // Subscribe to real-time analysis events via WebSocket
-  if (window.wsClient) {
-    window.wsClient.connect();
-    window.wsClient.subscribe('index:analyses', function (msg) {
-      var reviewId = msg.reviewId;
-      if (reviewId == null) return;
-
-      if (msg.type === 'analysis_started') {
-        var row = findRowByReviewId(reviewId);
-        if (row) addSpinnerToRow(row, reviewId);
-      } else if (msg.type === 'analysis_ended') {
-        var endRow = findRowByReviewId(reviewId);
-        if (endRow) removeSpinnerFromRow(endRow, reviewId);
-        else activeSpinnerReviewIds.delete(reviewId);
-      }
-    });
-
-    // On reconnect, re-fetch active analyses to catch anything missed
-    window.addEventListener('wsReconnected', fetchAndApplyActiveAnalyses);
-  }
+  // Project the shared per-run snapshot rather than clearing a review's spinner
+  // whenever any one of its concurrent analyses ends.
+  window.addEventListener('workspaceActivity', function (event) {
+    const ids = new Set(event.detail.available ? event.detail.runs.filter(run => run.observation === 'live' && ['running', 'cancellation_requested'].includes(run.status)).map(run => run.reviewId) : []);
+    for (const id of activeSpinnerReviewIds) if (!ids.has(id)) {
+      const row = findRowByReviewId(id);
+      if (row) removeSpinnerFromRow(row, id);
+      else activeSpinnerReviewIds.delete(id);
+    }
+    for (const id of ids) {
+      const row = findRowByReviewId(id);
+      if (row) addSpinnerToRow(row, id);
+    }
+  });
 
   // Expose for use after data loads (loadRecentReviews / loadLocalReviews)
   window.__pairReview = window.__pairReview || {};

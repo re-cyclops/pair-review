@@ -3,6 +3,7 @@ const { AsyncLocalStorage } = require('node:async_hooks');
 const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 const { computeDbId } = require('./utils/db-identity');
+const { getDraftStateQuery } = require('./utils/stats-calculator');
 const ws = require('./ws');
 const { version } = require('../package.json');
 
@@ -27,16 +28,27 @@ const hasFailure = value => {
 
 const read = (db, id) => parse(db.prepare('SELECT activity_state FROM analysis_runs WHERE id = ?').get(id)?.activity_state);
 
-const save = (db, state) => {
-  db.prepare('UPDATE analysis_runs SET activity_state = ? WHERE id = ?').run(JSON.stringify(state), state.analysisId);
-  // One topic and immutable per-run sequence cover snapshot/event races and concurrent runs.
-  ws.broadcast('index:analyses', { type: 'activity', ...identity(db), run: state });
+const publish = (db, state) => {
+  if (state) ws.broadcast('index:analyses', { type: 'activity', ...identity(db), run: state });
   return state;
 };
 
+const save = (db, state) => {
+  // Another process may acknowledge a result after the executor reads it.
+  // Preserve those receipts and allocate the sequence from the current row.
+  const row = db.prepare(`UPDATE analysis_runs SET activity_state = json_set(?,
+    '$.seenAt', json_extract(activity_state, '$.seenAt'),
+    '$.notificationClaimedAt', json_extract(activity_state, '$.notificationClaimedAt'),
+    '$.sequence', COALESCE(json_extract(activity_state, '$.sequence'), 0) + 1)
+    WHERE id = ? RETURNING activity_state`).get(JSON.stringify(state), state.analysisId);
+  return publish(db, parse(row?.activity_state));
+};
+
 const begin = (db, id) => {
-  const row = db.prepare(`SELECT a.*, r.repository, r.pr_number, r.review_type, r.name AS review_name
-    FROM analysis_runs a JOIN reviews r ON r.id = a.review_id WHERE a.id = ?`).get(id);
+  const row = db.prepare(`SELECT a.*, r.repository, r.pr_number, r.review_type, r.name AS review_name, pm.host
+    FROM analysis_runs a JOIN reviews r ON r.id = a.review_id
+    LEFT JOIN pr_metadata pm ON pm.repository = r.repository COLLATE NOCASE AND pm.pr_number = r.pr_number
+    WHERE a.id = ?`).get(id);
   if (!row) return null;
   const existing = parse(row.activity_state);
   if (existing) return existing;
@@ -45,7 +57,7 @@ const begin = (db, id) => {
   const state = {
     analysisId: id, runId: id, parentRunId: row.parent_run_id, reviewId: row.review_id,
     reviewType: row.review_type, repository: row.review_type === 'local' ? path.basename(row.repository) : row.repository,
-    prNumber: row.pr_number, name: row.review_name || null, headSha: row.head_sha,
+    prNumber: row.pr_number, host: row.host || null, name: row.review_name || null, headSha: row.head_sha,
     provider: row.provider, model: row.model, instanceId: imported ? null : instanceId,
     entryPoint: imported ? 'result-import' : (context.getStore()?.entryPoint || 'standalone'),
     status: row.status, stage: imported ? 'Results imported; execution was not observed' : 'Starting analysis',
@@ -117,16 +129,20 @@ const snapshot = db => {
     return { ...stored, observation: terminal.has(stored.status) ? 'recorded' : owned ? 'live' : 'unavailable',
       ...(terminal.has(stored.status) || owned ? {} : { status: 'unknown', stage: 'Owning executor is not observed on this instance' }) };
   });
-  const draftCount = db.prepare("SELECT COUNT(DISTINCT review_id) AS count FROM comments WHERE source = 'user' AND status IN ('active', 'inactive')").get().count;
+  const draftCount = db.prepare(`SELECT COUNT(*) AS count FROM (${getDraftStateQuery()}) WHERE draft_count > 0 OR has_summary`).get().count;
   return { ...identity(db), observedAt: new Date().toISOString(), runs, draftCount,
     scope: 'connected-instance', limitation: 'Other processes and machines are not live-instrumented by this connection' };
 };
 
 const markSeen = (db, id, sequence) => {
   const state = read(db, id);
-  if (!state || state.sequence !== sequence || !terminal.has(state.status)) return false;
-  save(db, { ...state, seenAt: new Date().toISOString(), sequence: state.sequence + 1 });
-  return true;
+  if (!state || state.seenAt || state.sequence !== sequence || !terminal.has(state.status)) return false;
+  const row = db.prepare(`UPDATE analysis_runs SET activity_state = json_set(activity_state,
+    '$.seenAt', ?, '$.sequence', json_extract(activity_state, '$.sequence') + 1)
+    WHERE id = ? AND json_extract(activity_state, '$.sequence') = ?
+    AND json_extract(activity_state, '$.status') = ? AND json_extract(activity_state, '$.seenAt') IS NULL
+    RETURNING activity_state`).get(new Date().toISOString(), id, sequence, state.status);
+  return Boolean(publish(db, parse(row?.activity_state)));
 };
 
 const claimNotification = (db, id) => {

@@ -1,5 +1,5 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
-import { beforeEach, afterEach, describe, expect, it } from 'vitest';
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 const { createTestDatabase, seedTestReview } = require('../utils/schema');
 const { AnalysisRunRepository } = require('../../src/database');
@@ -15,6 +15,7 @@ beforeEach(() => {
   repo = new AnalysisRunRepository(db);
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   shared.activeAnalyses.clear();
   shared.activeProcesses.clear();
   db.close();
@@ -79,6 +80,35 @@ describe('durable activity', () => {
     const finished = activity.snapshot(db).runs[0];
     expect(activity.markSeen(db, 'notify', finished.sequence)).toBe(true);
     expect(activity.snapshot(db).runs[0].seenAt).toEqual(expect.any(String));
+  });
+
+  it('preserves a notification claim and seen receipt recorded during a late completion write', async () => {
+    await start('ack-race');
+    await repo.update('ack-race', { status: 'completed' });
+    const prepare = db.prepare.bind(db);
+    let acknowledged;
+    // Interleave real SQLite observer writes after the executor reads its old snapshot.
+    const intercepted = vi.spyOn(db, 'prepare').mockImplementation(sql => {
+      const statement = prepare(sql);
+      const get = statement.get.bind(statement);
+      statement.get = (...args) => {
+        const row = get(...args);
+        if (row?.activity_state) {
+          intercepted.mockRestore();
+          expect(activity.claimNotification(db, 'ack-race')).toBe(true);
+          expect(activity.markSeen(db, 'ack-race', JSON.parse(row.activity_state).sequence)).toBe(true);
+          acknowledged = activity.snapshot(db).runs[0];
+        }
+        return row;
+      };
+      return statement;
+    });
+    activity.update(db, 'ack-race', { status: 'completed' });
+    const current = activity.snapshot(db).runs[0];
+    expect(current.notificationClaimedAt).toBe(acknowledged.notificationClaimedAt);
+    expect(current.seenAt).toBe(acknowledged.seenAt);
+    expect(current.sequence).toBeGreaterThan(acknowledged.sequence);
+    expect(activity.claimNotification(db, 'ack-race')).toBe(false);
   });
 
   it('does not misrepresent imported findings as an observed AI execution', async () => {

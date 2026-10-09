@@ -63,7 +63,7 @@
 
         /* On the dedicated local page, always show the pr-container */
         #pr-container {
-            display: block !important;
+            display: flex !important;
         }
 
         /* Local Mode Badge Styles */
@@ -254,6 +254,7 @@
         }
 
     </style>
+    <link rel="stylesheet" href="/css/workspace.css">
 </head>
 <body>
     <!-- App wrapper -->
@@ -670,9 +671,13 @@
 
     <!-- PR JavaScript (shared with local mode) -->
     <script src="/js/theme.js"></script>
+    <script src="/js/modules/draft-store.js"></script>
+    <script src="/js/components/ReviewProgress.js"></script>
     <script src="/js/pr.js"></script>
 
     <!-- Local Mode JavaScript -->
     <script src="/js/local.js"></script>
+    <script src="/js/components/ReviewEvidence.js"></script>
+    <script src="/js/components/Workspace.js"></script>
 </body>
 </html>
