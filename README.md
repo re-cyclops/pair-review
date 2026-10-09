@@ -535,6 +535,34 @@ Nested objects (like `chat`, `providers`, `chat_providers`, `monorepos`) are dee
 
 **`config.local.json`** files are intended for personal overrides that should not be committed to version control. Add `config.local.json` to your `.gitignore`.
 
+### Instruction sources and protocol receipts
+
+`~/.pair-review/global-instructions.md` remains the global instruction file.
+To include existing policy without copying it, add trusted `instruction_files`
+entries to your configuration. An entry is a file path, or an object with a
+`path` and exact Markdown heading names in `sections`:
+
+```json
+{
+  "instruction_files": [
+    { "path": "~/policy/review.md", "sections": ["Review comments"] }
+  ]
+}
+```
+
+The loader reads these files once at startup and appends the selected content
+to the global instructions. Missing files or sections fail configuration
+loading rather than silently omitting policy. Use repository configuration for
+repository-specific policy; do not put private work guidance in global config.
+Provider and model overrides retain their existing precedence.
+
+`GET /api/protocol` reports the loaded server defaults, instruction hashes,
+configuration-source drift and actual enforcement limits. Add `?runId=<id>`
+to inspect the instructions and provider/model captured for a run. Private file
+paths and instruction text are not returned. `restartRequired` means the
+on-disk source differs from this server's loaded copy; it does not reload
+configuration or affect a running analysis.
+
 ### Global Settings Page
 
 Most global settings can also be viewed and edited in the app: open the gear icon on the landing page or navigate to `/settings`. Repo-specific settings remain on each repository's settings page, and the global settings page lists every configured repository with a link to its settings.
@@ -785,6 +813,38 @@ The CLI command used for a provider follows this precedence (highest to lowest):
 3. Built-in default
 
 ## Features
+
+### Durable activity and read-only review evidence
+
+`GET /api/analyses/activity` returns a connected-instance snapshot using the
+existing analysis-run IDs. Subscribe to `index:analyses` and reconcile the
+snapshot after subscription acknowledgement or reconnection. Events have a
+monotonic per-run sequence. The receipt records entry point, revision,
+configured provider/model, current stage and terminal outcome. A configured
+default is not a claim about which model the provider actually served.
+
+The server and MCP `get_server_info` expose instance identity and a database
+digest, not the database path. Persisted runs owned by another process are
+unobserved, not live. Imported results do not claim observed execution.
+Cancellation returns `202` with `cancellation_requested`; owned process
+termination is acknowledged separately. Completion can report partial results.
+Record a result as seen with `POST /api/analyses/:id/seen` and its exact
+`sequence`; stale acknowledgements return `409`.
+
+`GET /api/pr/:owner/:repo/:number/snapshot` reads approvals, requests, policy,
+threads, and head/test-merge checks through the existing host binding. It does
+not prepare a worktree. Missing permissions and truncated pagination remain
+explicitly unavailable or partial. Approval count, personal responsibility,
+checks and merge conflicts are independent facts, not a merge-ready verdict.
+Enrichment is coalesced, concurrency-bounded, cached by host/account/PR, and
+backed off after failures. `?refresh=true` requests fresh evidence subject to
+that backoff. `GET /api/reviews/recent` pages cached review metadata without
+GitHub calls or worktree setup.
+
+HTTP and WebSocket listeners bind to loopback. For a remote instance, use an
+authenticated tunnel and its browser-reachable URL; a server-local URL alone
+does not establish that the browser is observing the same process.
+
 
 ### Three-Level AI Analysis
 

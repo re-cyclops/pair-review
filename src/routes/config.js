@@ -43,8 +43,25 @@ const { version } = require('../../package.json');
 const semver = require('semver');
 const { getAllChatProviders, getAllCachedChatAvailability } = require('../chat/chat-providers');
 const logger = require('../utils/logger');
+const { runReceipt, serverReceipt } = require('../utils/review-protocol');
 
 const router = express.Router();
+
+router.get('/api/protocol', async (req, res) => {
+  try {
+    const config = req.app.get('config') || {};
+    const receipt = await serverReceipt(config, req.app.get('protocolSources') || [], resolveDefaultProviderModel(config));
+    if (req.query.runId) {
+      const row = await queryOne(req.app.get('db'), 'SELECT * FROM analysis_runs WHERE id = ?', [req.query.runId]);
+      if (!row) return res.status(404).json({ error: 'Analysis run not found' });
+      receipt['Selected run (captured configuration)'] = runReceipt(row);
+    }
+    res.set('Cache-Control', 'no-store').json(receipt);
+  } catch {
+    res.status(503).json({ error: 'Protocol receipt could not be read' });
+  }
+});
+
 
 // Module-level state: the most recent version we've been told about that's
 // newer than the running server. Plain string, not an object. `null` means

@@ -391,7 +391,7 @@ async function runExecutableAnalysis(req, res, params, shared, callbacks) {
         cwd,
         timeout: provider.timeout || 600000,
         analysisId,
-        registerProcess: (id, proc) => registerProcessForCancellation(id, proc),
+        registerProcess: registerProcessForCancellation,
         onStreamEvent
       });
 

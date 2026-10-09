@@ -27,6 +27,7 @@ const { v4: uuidv4 } = require('uuid');
 const fs = require('fs').promises;
 const path = require('path');
 const { resolveHostBinding, getWorktreeDisplayName, resolveLoadSkills, buildCouncilProviderOverrides, getSummaryEnabled, getTourEnabled, resolveBindingRepositoryFromPR } = require('../config');
+const { fetchReviewSnapshot } = require('../github/operations/review-snapshot');
 const { storedHostToOption, resolveRecordedHost, resolveBindingRepositoryForHost, setupHostParam } = require('../utils/host-resolution');
 const { resolveHostName } = require('../links/repo-links');
 const { resolveHostListText } = require('../links/host-names');
@@ -202,6 +203,26 @@ async function resolveBindingForRequest(req, repository) {
   }
   return null;
 }
+
+// Read-only enrichment: unlike the review bootstrap this never creates a checkout.
+router.get('/api/pr/:owner/:repo/:number/snapshot', async (req, res) => {
+  const { owner, repo, number } = req.params;
+  if (!/^[\w.-]+$/.test(owner) || !/^[\w.-]+$/.test(repo) || !/^[1-9]\d*$/.test(number)) {
+    return res.status(400).json({ error: 'Invalid pull request identity' });
+  }
+  try {
+    const resolved = await resolveBindingForRequest(req, `${owner}/${repo}`);
+    if (!resolved) return res.status(401).json({ error: 'Authentication unavailable', availability: 'unavailable' });
+    const snapshot = await fetchReviewSnapshot(new GitHubClient(resolved.binding),
+      { owner, repo, number: Number(number) }, { refresh: req.query.refresh === 'true' });
+    const review = await queryOne(req.app.get('db'), "SELECT id FROM reviews WHERE repository = ? AND pr_number = ? AND review_type = 'pr'", [`${owner}/${repo}`.toLowerCase(), Number(number)]);
+    const drafts = review ? await queryOne(req.app.get('db'), "SELECT COUNT(*) AS count FROM comments WHERE review_id = ? AND source = 'user' AND status IN ('active', 'inactive')", [review.id]) : null;
+    res.json({ ...snapshot, local: { reviewId: review?.id ?? null, draftCount: drafts?.count ?? 0 } });
+  } catch {
+    res.status(503).json({ error: 'Review metadata unavailable; check the configured host and authentication', availability: 'unavailable' });
+  }
+});
+
 
 /**
  * Sync pending draft review from GitHub with local database

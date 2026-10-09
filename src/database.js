@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const { getConfigDir } = require('./config');
+const activity = require('./analysis-activity');
 
 let dbPath = null;
 
@@ -21,7 +22,7 @@ function getDbPath() {
 /**
  * Current schema version - increment this when adding new migrations
  */
-const CURRENT_SCHEMA_VERSION = 55;
+const CURRENT_SCHEMA_VERSION = 56;
 
 /**
  * Database schema SQL statements
@@ -188,6 +189,7 @@ const SCHEMA_SQL = {
       config_type TEXT DEFAULT 'single',
       levels_config TEXT,
       level_outcomes TEXT,
+      activity_state TEXT,
       scope_start TEXT,
       scope_end TEXT,
       FOREIGN KEY (review_id) REFERENCES reviews(id) ON DELETE CASCADE
@@ -2363,6 +2365,13 @@ const MIGRATIONS = {
       console.log('  pool_fetch_owner column already present; nothing to do');
     }
     console.log('Migration to schema version 55 complete');
+  },
+  56: (db) => {
+    db.transaction(() => {
+      if (tableExists(db, 'analysis_runs') && !columnExists(db, 'analysis_runs', 'activity_state')) {
+        db.exec('ALTER TABLE analysis_runs ADD COLUMN activity_state TEXT');
+      }
+    })();
   }
 };
 
@@ -5435,6 +5444,7 @@ class AnalysisRunRepository {
       INSERT INTO analysis_runs (id, review_id, provider, model, tier, custom_instructions, global_instructions, repo_instructions, request_instructions, head_sha, diff, status, completed_at, parent_run_id, config_type, levels_config, scope_start, scope_end)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${completedAt}, ?, ?, ?, ?, ?)
     `, [id, reviewId, provider, model, tier, customInstructions, globalInstructions, repoInstructions, requestInstructions, headSha, diff, status, parentRunId, configType, levelsConfigJson, scopeStart, scopeEnd]);
+    activity.begin(this.db, id);
 
     // Query back the inserted row to return actual database values (including timestamps)
     return await this.getById(id);
@@ -5509,6 +5519,7 @@ class AnalysisRunRepository {
       SET ${setClauses.join(', ')}
       ${whereClause}
     `, params);
+    if (result.changes) activity.update(this.db, id, { status: updates.status, levels: updates.levelOutcomes });
 
     return result.changes > 0;
   }

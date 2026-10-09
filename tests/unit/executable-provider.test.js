@@ -528,36 +528,18 @@ describe('createExecutableProviderClass', () => {
       );
     });
 
-    it('registers process for cancellation when analysisId provided', async () => {
-      const child = createMockChild();
-      mockSpawn.mockReturnValue(child);
-      actualMockGlob.mockResolvedValue(['result.json']);
-      actualMockReadFile.mockResolvedValue('{}');
-
-      const registerProcess = vi.fn();
-      const p = instance.execute(null, {
-        executableContext: { outputDir: '/tmp/out', cwd: '/tmp/repo' },
-        analysisId: 'a-123', registerProcess
-      });
-      child.emit('close', 0);
-      await p;
-      expect(registerProcess).toHaveBeenCalledWith('a-123', child);
-    });
 
     it('rejects with isCancellation when process is killed via cancellation', async () => {
       const child = createMockChild();
       mockSpawn.mockReturnValue(child);
       actualMockGlob.mockResolvedValue([]);
 
-      const registerProcess = vi.fn();
+      const { registerProcess, killProcesses } = require('../../src/routes/shared');
       const p = instance.execute(null, {
         executableContext: { outputDir: '/tmp/out', cwd: '/tmp/repo' },
         analysisId: 'a-cancel', registerProcess
       });
-      // Simulate external cancellation: call kill on the wrapped child
-      // (which is the same object registerProcess received)
-      const registeredChild = registerProcess.mock.calls[0][1];
-      registeredChild.kill('SIGTERM');
+      killProcesses('a-cancel');
       child.emit('close', null);
 
       await expect(p).rejects.toThrow('cancelled by user');

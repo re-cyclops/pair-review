@@ -4736,7 +4736,7 @@ describe('Analysis Status Endpoints', () => {
       expect(response.body.error).toContain('not found');
     });
 
-    it('should cancel a running analysis', async () => {
+    it('accepts cancellation without claiming an executor has already stopped', async () => {
       // Import the shared module to set up an active analysis
       const { activeAnalyses, reviewToAnalysisId } = require('../../src/routes/shared');
 
@@ -4765,25 +4765,15 @@ describe('Analysis Status Endpoints', () => {
         const response = await request(server)
           .post(`/api/analyses/${analysisId}/cancel`);
 
-        expect(response.status).toBe(200);
-        expect(response.body.success).toBe(true);
-        expect(response.body.status).toBe('cancelled');
-
-        // Verify the analysis status was updated
-        const updatedAnalysis = activeAnalyses.get(analysisId);
-        expect(updatedAnalysis.status).toBe('cancelled');
-        expect(updatedAnalysis.progress).toBe('Analysis cancelled by user');
-
-        // Verify running levels were marked as cancelled
-        expect(updatedAnalysis.levels[1].status).toBe('cancelled');
-        expect(updatedAnalysis.levels[2].status).toBe('cancelled');
-        expect(updatedAnalysis.levels[3].status).toBe('cancelled');
-
-        // Verify reviewToAnalysisId mapping was cleaned up
-        expect(reviewToAnalysisId.has(reviewId)).toBe(false);
+        expect(response.status).toBe(202);
+        expect(response.body).toMatchObject({ success: true, status: 'cancellation_requested' });
+        const status = await request(server).get(`/api/analyses/${analysisId}/status`);
+        expect(status.body.status).toBe('cancellation_requested');
+        expect(reviewToAnalysisId.get(reviewId)).toBe(analysisId);
       } finally {
         // Cleanup always runs
         activeAnalyses.delete(analysisId);
+        reviewToAnalysisId.delete(reviewId);
       }
     });
 
@@ -4841,54 +4831,8 @@ describe('Analysis Status Endpoints', () => {
       }
     });
 
-    it('should cancel a running local mode analysis', async () => {
-      // Import the shared module to set up an active analysis
-      const { activeAnalyses } = require('../../src/routes/shared');
 
-      const analysisId = 'test-local-cancel-analysis-id';
-
-      // Set up an active LOCAL mode analysis
-      activeAnalyses.set(analysisId, {
-        id: analysisId,
-        reviewId: 123,
-        repository: 'owner/repo',
-        reviewType: 'local',  // Key difference: local mode
-        status: 'running',
-        startedAt: new Date().toISOString(),
-        progress: 'Analyzing...',
-        levels: {
-          1: { status: 'running', progress: 'In progress...' },
-          2: { status: 'running', progress: 'In progress...' },
-          3: { status: 'running', progress: 'In progress...' },
-          4: { status: 'pending', progress: 'Pending' }
-        }
-      });
-
-      try {
-        const response = await request(server)
-          .post(`/api/analyses/${analysisId}/cancel`);
-
-        expect(response.status).toBe(200);
-        expect(response.body.success).toBe(true);
-        expect(response.body.status).toBe('cancelled');
-
-        // Verify the analysis status was updated
-        const updatedAnalysis = activeAnalyses.get(analysisId);
-        expect(updatedAnalysis.status).toBe('cancelled');
-        expect(updatedAnalysis.progress).toBe('Analysis cancelled by user');
-        expect(updatedAnalysis.reviewType).toBe('local');
-
-        // Verify running levels were marked as cancelled
-        expect(updatedAnalysis.levels[1].status).toBe('cancelled');
-        expect(updatedAnalysis.levels[2].status).toBe('cancelled');
-        expect(updatedAnalysis.levels[3].status).toBe('cancelled');
-      } finally {
-        // Cleanup always runs
-        activeAnalyses.delete(analysisId);
-      }
-    });
-
-    it('should update database analysis_run record to cancelled when runId is present', async () => {
+    it('does not falsely mark an unacknowledged database run cancelled', async () => {
       const { activeAnalyses } = require('../../src/routes/shared');
 
       const analysisId = 'test-cancel-db-update-id';
@@ -4928,86 +4872,16 @@ describe('Analysis Status Endpoints', () => {
         const response = await request(server)
           .post(`/api/analyses/${analysisId}/cancel`);
 
-        expect(response.status).toBe(200);
-        expect(response.body.success).toBe(true);
-        expect(response.body.status).toBe('cancelled');
-
-        // Verify the database record was updated to 'cancelled'
+        expect(response.status).toBe(202);
+        expect(response.body.status).toBe('cancellation_requested');
         const dbRecord = await queryOne(db, 'SELECT status, completed_at FROM analysis_runs WHERE id = ?', [runId]);
-        expect(dbRecord).toBeTruthy();
-        expect(dbRecord.status).toBe('cancelled');
-        // completed_at should be set for terminal statuses
-        expect(dbRecord.completed_at).toBeTruthy();
+        expect(dbRecord.status).toBe('running');
+        expect(dbRecord.completed_at).toBeNull();
       } finally {
         activeAnalyses.delete(analysisId);
       }
     });
 
-    it('should not overwrite cancelled status when analysis promise resolves after cancellation (race condition)', async () => {
-      const { activeAnalyses, isAnalysisCancelled } = require('../../src/routes/shared');
-
-      // This test verifies the race condition fix where the .then() handler
-      // (analysis.js lines 265-275) checks the in-memory status before updating.
-      // When a cancel sets status to 'cancelled' in activeAnalyses, the .then()
-      // handler's guard (which uses the same isAnalysisCancelled check) must
-      // detect it and skip overwriting the status to 'completed'.
-
-      const analysisId = 'race-condition-cancel-test';
-
-      // Step 1: Set up a running analysis in activeAnalyses
-      activeAnalyses.set(analysisId, {
-        id: analysisId,
-        runId: 'race-run-id',
-        prNumber: 1,
-        repository: 'owner/repo',
-        status: 'running',
-        startedAt: new Date().toISOString(),
-        progress: 'Running analysis...',
-        levels: {
-          1: { status: 'running', progress: 'Running...' },
-          2: { status: 'running', progress: 'Running...' },
-          3: { status: 'running', progress: 'Running...' },
-          4: { status: 'pending', progress: 'Pending' }
-        },
-        filesAnalyzed: 0,
-        filesRemaining: 0
-      });
-
-      try {
-        // Verify analysis is running and not cancelled
-        expect(isAnalysisCancelled(analysisId)).toBe(false);
-        expect(activeAnalyses.get(analysisId).status).toBe('running');
-
-        // Step 2: Cancel the analysis via the cancel endpoint
-        const cancelResponse = await request(server)
-          .post(`/api/analyses/${analysisId}/cancel`);
-
-        expect(cancelResponse.status).toBe(200);
-        expect(cancelResponse.body.status).toBe('cancelled');
-
-        // Step 3: Verify that isAnalysisCancelled now returns true - this is the
-        // same check the .then() handler uses to decide whether to skip completion.
-        // The production code at analysis.js line 272 does:
-        //   if (currentStatus.status === 'cancelled') { return; }
-        // which is equivalent to isAnalysisCancelled(analysisId)
-        expect(isAnalysisCancelled(analysisId)).toBe(true);
-
-        // Verify the full cancelled state is preserved
-        const finalStatus = activeAnalyses.get(analysisId);
-        expect(finalStatus.status).toBe('cancelled');
-        expect(finalStatus.progress).toBe('Analysis cancelled by user');
-        expect(finalStatus.cancelledAt).toBeTruthy();
-
-        // Verify levels were marked as cancelled (running levels should be cancelled)
-        expect(finalStatus.levels[1].status).toBe('cancelled');
-        expect(finalStatus.levels[2].status).toBe('cancelled');
-        expect(finalStatus.levels[3].status).toBe('cancelled');
-        // Non-running level 4 (pending) should remain unchanged
-        expect(finalStatus.levels[4].status).toBe('pending');
-      } finally {
-        activeAnalyses.delete(analysisId);
-      }
-    });
   });
 
   describe('GET /api/reviews/:reviewId/analyses/status (local mode)', () => {

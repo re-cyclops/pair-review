@@ -38,6 +38,7 @@ const { generateScopedDiff, computeScopedDigest, getCurrentBranch } = require('.
 const { reviewScope } = require('../local-scope');
 const { validateCouncilConfig, normalizeCouncilConfig } = require('./councils');
 const { TIERS, TIER_ALIASES, VALID_TIERS, resolveTier } = require('../ai/prompts/config');
+const activity = require('../analysis-activity');
 
 
 const router = express.Router();
@@ -59,6 +60,19 @@ function enrichRun(run) {
 // ==========================================================================
 // Static path routes — registered BEFORE :id param routes to avoid clashes
 // ==========================================================================
+
+router.get('/api/analyses/activity', (req, res) => {
+  res.json(activity.snapshot(req.app.get('db')));
+});
+
+router.post('/api/analyses/:id/seen', (req, res) => {
+  const accepted = activity.markSeen(req.app.get('db'), req.params.id, req.body.sequence);
+  res.status(accepted ? 200 : 409).json({ accepted });
+});
+
+router.post('/api/analyses/:id/notification', (req, res) => {
+  res.json({ claimed: activity.claimNotification(req.app.get('db'), req.params.id) });
+});
 
 /**
  * Get all analysis runs for a review
@@ -332,7 +346,7 @@ router.post('/api/analyses/results', async (req, res) => {
 router.get('/api/analyses/active', (req, res) => {
   const active = [];
   for (const status of activeAnalyses.values()) {
-    if (status.status !== 'running') continue;
+    if (!['running', 'cancellation_requested'].includes(status.status)) continue;
     active.push({
       analysisId: status.id,
       reviewId: status.reviewId,
@@ -405,69 +419,17 @@ router.post('/api/analyses/:id/cancel', async (req, res) => {
       logger.log('API', `PR #${analysis.prNumber} in ${analysis.repository}`, 'yellow');
     }
 
-    // Kill all running child processes for this analysis
-    const killedCount = killProcesses(id);
-    logger.info(`Killed ${killedCount} running process(es)`);
-
-    // Update database record to cancelled
-    if (analysis.runId) {
-      try {
-        const db = req.app.get('db');
-        const analysisRunRepo = new AnalysisRunRepository(db);
-        await analysisRunRepo.update(analysis.runId, { status: 'cancelled' });
-        logger.info(`Updated analysis_run DB record to cancelled: ${analysis.runId}`);
-      } catch (dbError) {
-        logger.warn(`Failed to update analysis_run DB record: ${dbError.message}`);
-      }
-    }
-
-    // Update analysis status to cancelled
-    const cancelledStatus = {
-      ...analysis,
-      status: 'cancelled',
-      cancelledAt: new Date().toISOString(),
-      progress: 'Analysis cancelled by user',
-      levels: {
-        ...analysis.levels,
-        1: analysis.levels?.[1]?.status === 'running'
-          ? { status: 'cancelled', progress: 'Cancelled' }
-          : analysis.levels?.[1],
-        2: analysis.levels?.[2]?.status === 'running'
-          ? { status: 'cancelled', progress: 'Cancelled' }
-          : analysis.levels?.[2],
-        3: analysis.levels?.[3]?.status === 'running'
-          ? { status: 'cancelled', progress: 'Cancelled' }
-          : analysis.levels?.[3],
-        4: analysis.levels?.[4]?.status === 'running'
-          ? { status: 'cancelled', progress: 'Cancelled' }
-          : analysis.levels?.[4],
-        exec: analysis.levels?.exec?.status === 'running'
-          ? { status: 'cancelled', progress: 'Cancelled' }
-          : analysis.levels?.exec
-      }
-    };
-
-    activeAnalyses.set(id, cancelledStatus);
-
-    // Broadcast cancelled status to WebSocket clients
-    broadcastProgress(id, cancelledStatus);
-
-    // Hook firing removed — the .catch(isCancellation) handlers in
-    // pr.js, local.js, and launchCouncilAnalysis already fire
-    // analysis.completed with full context when the process exits.
-
-    // Clean up review to analysis ID mapping
-    if (analysis.reviewId) {
-      reviewToAnalysisId.delete(analysis.reviewId);
-    }
-
-    logger.success(`Analysis ${id} cancelled successfully`);
-
-    res.json({
+    const requested = { ...analysis, status: 'cancellation_requested', progress: 'Cancellation requested' };
+    activeAnalyses.set(id, requested);
+    activity.requestCancellation(req.app.get('db'), id);
+    broadcastProgress(id, requested);
+    const signalled = killProcesses(id);
+    // The child close event or executor catch acknowledges cancellation, not this HTTP request.
+    res.status(202).json({
       success: true,
-      message: 'Analysis cancelled',
-      processesKilled: killedCount,
-      status: 'cancelled'
+      message: 'Cancellation requested; waiting for the executor',
+      processesSignalled: signalled,
+      status: 'cancellation_requested'
     });
 
   } catch (error) {

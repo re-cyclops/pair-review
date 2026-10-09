@@ -106,7 +106,7 @@ class PiStyleProvider extends AIProvider {
 
       // Register process for cancellation tracking if analysisId provided
       if (analysisId && registerProcess) {
-        registerProcess(analysisId, child);
+        registerProcess(analysisId, child, () => killChildSafely(child, { shell: this.useShell }));
         logger.info(`${levelPrefix} Registered process ${pid} for analysis ${analysisId}`);
       }
 

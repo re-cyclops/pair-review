@@ -258,7 +258,7 @@ class CopilotProvider extends AIProvider {
 
       // Register process for cancellation tracking if analysisId provided
       if (analysisId && registerProcess) {
-        registerProcess(analysisId, copilot);
+        registerProcess(analysisId, copilot, () => killChildSafely(copilot, { shell: this.useShell }));
         logger.info(`${levelPrefix} Registered process ${pid} for analysis ${analysisId}`);
       }
 

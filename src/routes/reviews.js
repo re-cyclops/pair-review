@@ -29,6 +29,33 @@ const { findMergeBase } = require('../local-review');
 
 const router = express.Router();
 
+// Cached metadata only: opening the inbox or command palette never prepares a worktree.
+router.get('/api/reviews/recent', (req, res) => {
+  const db = req.app.get('db');
+  const before = req.query.before ? safeParseJson(Buffer.from(String(req.query.before), 'base64url').toString()) : { at: Number.MAX_SAFE_INTEGER, id: Number.MAX_SAFE_INTEGER };
+  if (!before || !Number.isFinite(before.at) || !Number.isInteger(before.id)) return res.status(400).json({ error: 'Invalid review cursor' });
+  const limit = Math.min(200, Math.max(1, Math.floor(Number(req.query.limit) || 200)));
+  const rows = db.prepare(`SELECT r.id, r.repository, r.pr_number, r.review_type, r.name, r.updated_at, r.local_head_sha,
+      p.title, p.host, p.pr_data, MAX(COALESCE(julianday(p.last_accessed_at), 0), julianday(r.updated_at)) AS touched,
+      (SELECT COUNT(*) FROM comments c WHERE c.review_id = r.id AND c.source = 'user' AND c.status IN ('active','inactive')) AS draft_count,
+      (SELECT activity_state FROM analysis_runs a WHERE a.review_id = r.id AND a.parent_run_id IS NULL ORDER BY julianday(a.started_at) DESC, a.rowid DESC LIMIT 1) AS activity
+    FROM reviews r LEFT JOIN pr_metadata p ON p.repository = r.repository COLLATE NOCASE AND p.pr_number = r.pr_number
+    WHERE touched < ? OR (touched = ? AND r.id < ?) ORDER BY touched DESC, r.id DESC LIMIT ?`).all(before.at, before.at, before.id, limit + 1);
+  const hasMore = rows.length > limit;
+  const reviews = rows.slice(0, limit).map(row => {
+    const pr = safeParseJson(row.pr_data) || {};
+    const local = row.review_type === 'local';
+    return { id: row.id, reviewType: row.review_type, repository: local ? path.basename(row.repository) : row.repository,
+      number: row.pr_number, title: row.title || row.name || path.basename(row.repository),
+      headSha: local ? row.local_head_sha : pr.head_sha || null, host: row.host || null, draftCount: row.draft_count,
+      updatedAt: row.updated_at, activity: safeParseJson(row.activity),
+      url: local ? `/local/${row.id}` : `/pr/${row.repository.split('/').map(encodeURIComponent).join('/')}/${row.pr_number}${row.host ? `?host=${encodeURIComponent(row.host)}` : ''}` };
+  });
+  const last = rows[Math.min(rows.length, limit) - 1];
+  res.json({ reviews, hasMore, next: hasMore ? Buffer.from(JSON.stringify({ at: last.touched, id: last.id })).toString('base64url') : null });
+});
+
+
 /**
  * Resolve the worktree path and base_sha for a PR-mode review.
  * Returns { worktreePath, baseSha } or throws with { status, error } on failure.

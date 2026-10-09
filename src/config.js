@@ -4,6 +4,7 @@ const path = require('path');
 const os = require('os');
 const childProcess = require('child_process');
 const logger = require('./utils/logger');
+const { digest, loadInstructionSources } = require('./utils/review-protocol');
 
 // Implementation matrix for per-area dispatch. Each operations module
 // exports an `IMPLEMENTED_MODES` Set lifted from its dispatcher's if/else
@@ -405,6 +406,7 @@ async function loadConfig() {
   for (const source of sources) {
     try {
       const data = await fs.readFile(source.path, 'utf8');
+      source.digest = digest(data);
       const parsed = JSON.parse(data);
       if (source.label === 'managed config' && Object.keys(parsed).length > 0) {
         hasManagedConfig = true;
@@ -417,6 +419,7 @@ async function loadConfig() {
           // Global config doesn't exist — create it with defaults
           const config = { ...DEFAULT_CONFIG };
           await saveConfig(config);
+          source.digest = digest(JSON.stringify(config, null, 2));
           logger.debug(`Created default config file: ${CONFIG_FILE}`);
           isFirstRun = true;
         }
@@ -469,8 +472,11 @@ async function loadConfig() {
 
   // Load global instructions from ~/.pair-review/global-instructions.md
   const globalInstructionsPath = path.join(CONFIG_DIR, 'global-instructions.md');
+  const globalSource = { path: globalInstructionsPath, label: 'Global instructions', digest: null };
+  sources.push(globalSource);
   try {
     const content = await fs.readFile(globalInstructionsPath, 'utf-8');
+    globalSource.digest = digest(content);
     const trimmed = content.trim();
     if (trimmed) {
       mergedConfig.globalInstructions = trimmed;
@@ -481,7 +487,10 @@ async function loadConfig() {
     }
   }
 
-  return { config: mergedConfig, isFirstRun, layers };
+  const included = await loadInstructionSources(mergedConfig.instruction_files);
+  if (included.content) mergedConfig.globalInstructions = [mergedConfig.globalInstructions, included.content].filter(Boolean).join('\n\n');
+  sources.push(...included.sources);
+  return { config: mergedConfig, isFirstRun, layers, protocolSources: sources };
 }
 
 /**

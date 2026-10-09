@@ -8,6 +8,8 @@
 
 const logger = require('../utils/logger');
 const ws = require('../ws');
+const activity = require('../analysis-activity');
+const { killChildSafely } = require('../ai/abort-signal-wiring');
 
 /**
  * Custom error class for analysis cancellation
@@ -35,6 +37,7 @@ const localReviewDiffs = new Map();
 // Store active child processes for each analysis (for cancellation support)
 // Maps analysisId -> Set of ChildProcess objects
 const activeProcesses = new Map();
+const processCancellations = new WeakMap();
 
 // Store active review setup operations (concurrency guard)
 // Maps setupKey (e.g., "pr:owner/repo/123" or "local:/path") -> { setupId, promise }
@@ -212,6 +215,11 @@ function broadcastIndexAnalysisEvent(data) {
  * @param {Object} progressData - Progress data to broadcast
  */
 function broadcastProgress(analysisId, progressData) {
+  const receipt = activity.progress(analysisId, progressData);
+  if (receipt?.status === 'cancellation_requested' && ['completed', 'failed', 'cancelled'].includes(progressData.status)) {
+    progressData = { ...progressData, status: receipt.status, progress: receipt.stage };
+    activeAnalyses.set(analysisId, progressData);
+  }
   ws.broadcast('analysis:' + analysisId, { type: 'progress', ...progressData });
 
   // Emit index-level events for analysis lifecycle transitions
@@ -244,22 +252,33 @@ function broadcastProgress(analysisId, progressData) {
  * @param {string} analysisId - Analysis ID
  * @param {ChildProcess} childProcess - The spawned child process
  */
-function registerProcess(analysisId, childProcess) {
+function registerProcess(analysisId, childProcess, cancel) {
+  processCancellations.set(childProcess, cancel || (() => killChildSafely(childProcess)));
   if (!activeProcesses.has(analysisId)) {
     activeProcesses.set(analysisId, new Set());
   }
   activeProcesses.get(analysisId).add(childProcess);
+  activity.setProcessCount(analysisId, activeProcesses.get(analysisId).size);
 
   // Auto-remove when process exits
   childProcess.on('close', () => {
     const processes = activeProcesses.get(analysisId);
     if (processes) {
       processes.delete(childProcess);
+      activity.setProcessCount(analysisId, processes.size);
       if (processes.size === 0) {
         activeProcesses.delete(analysisId);
+        const state = activeAnalyses.get(analysisId);
+        if (['cancellation_requested', 'cancelled'].includes(state?.status)) {
+          const cancelled = { ...state, status: 'cancelled', completedAt: new Date().toISOString() };
+          activeAnalyses.set(analysisId, cancelled);
+          activity.acknowledgeCancellation(analysisId);
+          broadcastProgress(analysisId, cancelled);
+        }
       }
     }
   });
+  if (isAnalysisCancelled(analysisId)) processCancellations.get(childProcess)();
 }
 
 /**
@@ -276,17 +295,13 @@ function killProcesses(analysisId) {
   let killed = 0;
   for (const proc of processes) {
     try {
-      // Send SIGTERM to gracefully terminate the process
-      proc.kill('SIGTERM');
-      killed++;
+      if ((processCancellations.get(proc) || (() => killChildSafely(proc)))()) killed++;
     } catch (err) {
       // Process may have already exited
       logger.warn(`Failed to kill process: ${err.message}`);
     }
   }
 
-  // Clear the set
-  activeProcesses.delete(analysisId);
   return killed;
 }
 
@@ -297,7 +312,7 @@ function killProcesses(analysisId) {
  */
 function isAnalysisCancelled(analysisId) {
   const analysis = activeAnalyses.get(analysisId);
-  return analysis?.status === 'cancelled';
+  return ['cancelled', 'cancellation_requested'].includes(analysis?.status);
 }
 
 /**
@@ -326,6 +341,7 @@ function createProgressCallback(analysisId) {
   const TOOL_USE_FALLBACK_MS = 2000;
 
   return (progressUpdate) => {
+    if (isAnalysisCancelled(analysisId)) return;
     const currentStatus = activeAnalyses.get(analysisId);
     if (!currentStatus) return;
 

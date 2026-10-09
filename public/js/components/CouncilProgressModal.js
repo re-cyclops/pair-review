@@ -56,6 +56,7 @@ class CouncilProgressModal {
     this.isVisible = true;
     this._voiceStates = {};
     this._completionHandled = false;
+    this._terminalStatus = null;
 
     // Detect rendering mode
     const configType = options.configType || (councilConfig ? 'advanced' : 'single');
@@ -132,25 +133,29 @@ class CouncilProgressModal {
    * Cancel the analysis.
    */
   async cancel() {
-    if (!this.currentAnalysisId) {
+    if (!this.currentAnalysisId || this._terminalStatus) {
       this.hide();
       return;
     }
 
+    const button = this.modal.querySelector('.council-cancel-btn');
     try {
-      await fetch(`/api/analyses/${this.currentAnalysisId}/cancel`, { method: 'POST' });
+      const response = await fetch(`/api/analyses/${this.currentAnalysisId}/cancel`, { method: 'POST' });
+      if (!response.ok) throw new Error(`Cancellation request failed (${response.status})`);
+      const result = await response.json();
+      if (this._terminalStatus) return;
+      if (['completed', 'failed', 'cancelled'].includes(result.status)) {
+        this.hide();
+        return;
+      }
+      if (button) {
+        button.textContent = 'Cancellation requested';
+        button.disabled = true;
+      }
+      // Keep monitoring until the executor acknowledges termination.
     } catch (error) {
-      console.warn('Cancel not available on server:', error.message);
-    }
-
-    this.stopProgressMonitoring();
-    this.hide();
-
-    if (window.prManager) {
-      window.prManager.resetButton();
-    }
-    if (window.aiPanel?.setAnalysisState) {
-      window.aiPanel.setAnalysisState('unknown');
+      if (window.toast) window.toast.showError(error.message);
+      if (button) button.disabled = false;
     }
   }
 
@@ -248,6 +253,8 @@ class CouncilProgressModal {
    * @param {Object} status
    */
   updateProgress(status) {
+    if (this._terminalStatus && !['completed', 'failed', 'cancelled'].includes(status.status)) return;
+    if (['completed', 'failed', 'cancelled'].includes(status.status)) this._terminalStatus = status.status;
     // No-levels mode: update the single row based on overall status
     if (this._noLevels) {
       this._updateNoLevelsProgress(status);
@@ -934,6 +941,7 @@ class CouncilProgressModal {
     }
     if (cancelBtn) {
       cancelBtn.textContent = 'Close';
+      cancelBtn.disabled = false;
     }
 
     // Update button
@@ -1019,6 +1027,7 @@ class CouncilProgressModal {
     }
     if (cancelBtn) {
       cancelBtn.textContent = 'Close';
+      cancelBtn.disabled = false;
     }
 
     if (window.prManager) {
@@ -1031,7 +1040,7 @@ class CouncilProgressModal {
     }
   }
 
-  _handleCancellation(_status) {
+  _handleCancellation(status) {
     if (this._renderMode === 'council') {
       // Voice-centric: mark all non-completed voice-level children as cancelled
       const vcEls = this.modal.querySelectorAll('[data-vc-voice][data-vc-level]');
@@ -1050,6 +1059,9 @@ class CouncilProgressModal {
     } else {
       // Level-centric / single: clean up any remaining running voices
       for (let level = 1; level <= 3; level++) {
+        if (this._renderMode === 'single' && status.levels?.[level]?.status !== 'completed') {
+          this._updateSingleModelLevel(level, { status: 'cancelled' });
+        }
         this._cancelAllVoicesForLevel(level);
         this._refreshLevelHeader(level);
       }
@@ -1064,6 +1076,7 @@ class CouncilProgressModal {
     }
     if (cancelBtn) {
       cancelBtn.textContent = 'Close';
+      cancelBtn.disabled = false;
     }
 
     if (window.prManager) {
@@ -1431,6 +1444,7 @@ class CouncilProgressModal {
     }
     if (cancelBtn) {
       cancelBtn.textContent = 'Cancel';
+      cancelBtn.disabled = false;
     }
     this.isRunningInBackground = false;
   }

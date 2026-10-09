@@ -289,24 +289,21 @@ ${rawResponse}
           ...(configEnv || {}),
           PATH: `${BIN_DIR}:${process.env.PATH}`
         },
-        shell: useShell
+        shell: useShell,
+        detached: useShell
       });
 
       // Register process for cancellation tracking if analysisId provided
       if (analysisId && registerProcess) {
-        registerProcess(analysisId, proc);
+        registerProcess(analysisId, proc, () => killChildSafely(proc, { shell: useShell }));
         logger.info(`${levelPrefix} Registered extraction process ${proc.pid} for analysis ${analysisId}`);
       }
 
       // Wire the optional AbortSignal -> SIGTERM. With no signal this is inert
       // (`cancelled()` is always false, `detach()` a no-op), so callers that
       // omit `abortSignal` behave exactly as before.
-      //
-      // Not `shell: useShell`: this spawn is not `detached`, so there is no
-      // process group to signal — group-kill would ESRCH and leave the child
-      // running. Plain child.kill, with the pid guard from killChildSafely.
-      // Same reasoning applies to the timeout path below.
-      const abortWiring = wireAbortToChild(proc, abortSignal, { logPrefix: levelPrefix });
+      // Shell commands own a process group so cancellation also reaps extraction grandchildren.
+      const abortWiring = wireAbortToChild(proc, abortSignal, { logPrefix: levelPrefix, shell: useShell });
 
       let stdout = '';
       let stderr = '';
@@ -332,7 +329,7 @@ ${rawResponse}
         logger.warn(cancelled
           ? `${levelPrefix} LLM extraction did not exit after cancellation`
           : `${levelPrefix} LLM extraction timed out after ${timeout}ms`);
-        killChildSafely(proc, { logPrefix: levelPrefix });
+        killChildSafely(proc, { logPrefix: levelPrefix, shell: useShell });
         if (cancelled) {
           // Killed on cancel but the child never exited. Report the cancel, not
           // the timeout, so the caller still sees an AbortError.
@@ -428,7 +425,7 @@ ${rawResponse}
                 return;
               }
               logger.warn(`${levelPrefix} Failed to write extraction prompt: ${err}`);
-              killChildSafely(proc, { logPrefix: levelPrefix });
+              killChildSafely(proc, { logPrefix: levelPrefix, shell: useShell });
               settle({ success: false, error: `Failed to write prompt: ${err}` });
             }
           });

@@ -1562,4 +1562,26 @@ describe('CouncilProgressModal', () => {
       delete window.analysisConfigModal;
     });
   });
+  it('keeps a terminal result closable when the cancellation response arrives late', async () => {
+    vi.useFakeTimers();
+    try {
+      const { modal, modalContainer } = createTestCouncilProgressModal();
+      const button = createMockElement('button');
+      modalContainer.querySelector.mockImplementation(selector => selector === '.council-cancel-btn' ? button : null);
+      modal.currentAnalysisId = 'owned-run';
+      modal.isVisible = true;
+      let acknowledge;
+      global.fetch.mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve; }));
+      const cancellation = modal.cancel();
+      modal.updateProgress({ status: 'cancelled', levels: {} });
+      acknowledge({ ok: true, json: async () => ({ status: 'cancellation_requested' }) });
+      await cancellation;
+      expect(button.disabled).toBe(false);
+      await modal.cancel();
+      expect(modal.isVisible).toBe(false);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -12,6 +12,8 @@ const logger = require('./utils/logger');
 const { attachWebSocket, closeAll: closeAllWS } = require('./ws');
 const { WorktreePoolLifecycle } = require('./git/worktree-pool-lifecycle');
 const { resolveDbPath, computeDbId } = require('./utils/db-identity');
+const activity = require('./analysis-activity');
+const { rejectUnsafeRequest } = require('./utils/loopback-security');
 
 let db = null;
 let server = null;
@@ -143,7 +145,7 @@ function findAvailablePort(app, startPort, maxAttempts = 20) {
     let currentPort = startPort;
     
     function tryPort() {
-      const testServer = app.listen(currentPort, (error) => {
+      const testServer = app.listen(currentPort, '127.0.0.1', (error) => {
         if (error) {
           testServer.close();
           console.log(`Port ${currentPort} is already in use`);
@@ -201,7 +203,7 @@ async function startServer(sharedDb = null, sharedPoolLifecycle = null, options 
   const cliOverrides = options.cliOverrides || {};
   try {
     // Load configuration
-    const { config, layers } = await loadConfig();
+    const { config, layers, protocolSources } = await loadConfig();
     applyEnvOverrides(config);
 
     // Get GitHub token (env var takes precedence over config)
@@ -262,22 +264,6 @@ async function startServer(sharedDb = null, sharedPoolLifecycle = null, options 
       console.log('Could not check database status:', error.message);
     }
 
-    // Clean up stale analysis runs that have been "running" for over 30 minutes.
-    // We use a time threshold rather than blanket cleanup because multiple server
-    // processes (e.g. Express + MCP) may share the same database, and a naive
-    // UPDATE would kill legitimately running analyses owned by another process.
-    // TODO: A more robust approach would be to record the owning PID in
-    // analysis_runs and only clean up records whose process is no longer alive.
-    // This would require a schema migration and updating the PID throughout the
-    // analysis lifecycle (since analysis spawns child processes).
-    try {
-      const result = await run(db, "UPDATE analysis_runs SET status = 'failed', completed_at = CURRENT_TIMESTAMP WHERE status = 'running' AND started_at < datetime('now', '-30 minutes')");
-      if (result.changes > 0) {
-        logger.info(`Cleaned up ${result.changes} stale analysis run(s) (running > 30 minutes)`);
-      }
-    } catch (error) {
-      logger.warn(`Failed to clean up orphaned analysis runs: ${error.message}`);
-    }
 
     // Check if public directory exists
     const publicDir = path.join(__dirname, '..', 'public');
@@ -290,8 +276,10 @@ async function startServer(sharedDb = null, sharedPoolLifecycle = null, options 
     
     // Create Express app
     const app = express();
+    app.set('protocolSources', protocolSources || []);
     
     // Middleware
+    app.use(rejectUnsafeRequest);
     app.use(requestLogger);
     app.use(express.json());
 
@@ -327,7 +315,7 @@ async function startServer(sharedDb = null, sharedPoolLifecycle = null, options 
           res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
           res.setHeader('Pragma', 'no-cache');
           res.setHeader('Expires', '0');
-        } else if (filePath.endsWith('.html')) {
+        } else if (/\.(html|js|css)$/.test(filePath)) {
           res.setHeader('Cache-Control', 'no-cache');
         } else {
           res.setHeader('Cache-Control', 'public, max-age=3600');
@@ -462,6 +450,9 @@ async function startServer(sharedDb = null, sharedPoolLifecycle = null, options 
     // entry points (main.js / local-review.js). Read per request by the analyze
     // routes; ranks above repo settings but below an explicit request body.
     app.set('cliOverrides', cliOverrides);
+    app.use((req, res, next) => activity.context.run({
+      entryPoint: req.get('X-Pair-Review-Entry-Point') === 'delegated-cli' ? 'delegated-cli' : 'ui'
+    }, next));
 
     // Create or reuse the worktree pool lifecycle instance.
     // When called from main.js, the shared instance (already rehydrated) is
@@ -558,7 +549,7 @@ async function startServer(sharedDb = null, sharedPoolLifecycle = null, options 
     }
 
     await new Promise((resolve, reject) => {
-      server = app.listen(port, () => {
+      server = app.listen(port, '127.0.0.1', () => {
         console.log(`Server running on http://localhost:${port}`);
         attachWebSocket(server, db, poolLifecycle);
         resolve();

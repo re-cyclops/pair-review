@@ -110,7 +110,7 @@ const defaults = {
 async function httpJson(deps, method, url, body, timeoutMs) {
   const options = {
     method,
-    headers: { Accept: 'application/json' },
+    headers: { Accept: 'application/json', 'X-Pair-Review-Entry-Point': 'delegated-cli' },
     // AbortSignal.timeout guards against a hung socket. Tests stub `fetch` and
     // ignore the signal, so this stays deterministic there.
     signal: AbortSignal.timeout(timeoutMs),
