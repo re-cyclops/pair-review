@@ -530,7 +530,7 @@ class MuseProvider extends AIProvider {
 
       // Register process for cancellation tracking if analysisId provided
       if (analysisId && registerProcess) {
-        registerProcess(analysisId, muse, () => killChildSafely(muse, { shell: this.useShell }));
+        registerProcess(analysisId, muse, signal => killChildSafely(muse, { shell: this.useShell, signal }));
         logger.info(`${levelPrefix} Registered process ${pid} for analysis ${analysisId}`);
       }
 

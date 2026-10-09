@@ -28,4 +28,38 @@ Label older or unknown finding revisions without changing text or anchors. Keep 
 
 Keep terminal results unread until acknowledged. Deduplicate opt-in browser notification attempts through durable per-run claims, and preserve notification and seen receipts across concurrent executor updates.
 
+Fence activity events by instance as well as database identity. Preserve events received during a snapshot request without relying on wall-clock ordering, so a newly observed run does not disappear when timestamps tie.
+
 Verify an owned pending review's contents after the final identity check, so host content added during that check stays pending instead of being submitted without authorization. Keep the local draft and durable partial receipt. Explain the remaining non-atomic host read/submission race in the final preview.
+
+Check only selected outgoing prose with opt-in Markdown-aware advisory or blocking rules. Bind policy and diagnostics into the exact confirmation manifest, preserve technical literals and uncertainty, and never rewrite text or invoke a model during validation. Keep draft revision labels current after saves.
+
+Capture immutable run protocol receipts, including real default-council settings and per-run/voice overrides. Distinguish loaded configuration, disk drift, historical inputs and outgoing policy without exposing private instructions or commands. Keep trusted instruction includes additive to the existing global file, reject project-supplied paths, and resolve selected Markdown sections and introductions once.
+
+Carry global, repository and request instructions through executable analysis and native council voices. Apply loaded global policy to chat creation and both resume paths while preserving independent chat-provider/model selection.
+
+Keep monitoring analysis after dismissing its progress dialog. Reset completed toolbar state, accept terminal cancellation acknowledgements when events are missed, and prevent delayed status responses or timers from changing a newer run.
+
+Inspect the analysis-history selection through the shared protocol command instead of showing only current server defaults or substituting the latest run.
+
+Separate local-history removal from checkout removal and explicit cancellation. Refuse removal while analysis termination is unconfirmed, chat is active, publication is unresolved, or owned background work has not settled. Preserve shared or dirty checkouts and report per-item bulk failures instead of implicit cancellation or false success.
+
+Keep blocked bulk-removal targets selected across table refreshes and filters, with persistent named results for each attempted review. Do not clear the selection on a transport failure or apply delayed results from an older database context.
+
+Serialize checkout removal with native analysis/import admission, chat activation and pool claims through database-backed checkout reservations. Keep pool refresh exclusive until it settles; never expire an interrupted reservation merely because its owner disappeared or its timestamp is old.
+
+Keep chat ownership until provider termination is acknowledged, including concurrent close requests and failed startup cleanup. Refuse another server's close/resume requests, fence stale bridge events and competing resumptions, and retain failed-close ownership for explicit recovery.
+
+Share visible, wrapping notification styles across the inbox and review pages, announce errors accessibly, and render notification messages and link labels as text rather than executable markup.
+
+Keep hidden panels and closed popovers out of keyboard navigation, restore focus when closing them, and use native modal isolation for analysis configuration. Make its level toggles and unchanged-diff expansion keyboard-operable. Preserve phone headings for assistive technology, enlarge touch targets, honor reduced motion inside diff shadow roots, and correct text, placeholder, badge and syntax contrast in both themes.
+
+Preserve check-run revisions instead of relabeling earlier results as current. Exclude mismatched revisions from counts, required-check evidence and failing-check shortcuts; order queued reruns without relying on absent start timestamps. Distinguish HTTP 429 rate limits and keep incomplete CI visible in uncertainty and attention filters.
+
+Report a delegated analysis outcome as unknown when the CLI loses contact before a terminal database result exists. Include its run ID and avoid recommending a duplicate execution while the original executor may still be running.
+
+Drain owned provider processes on graceful server shutdown and stdio MCP input closure, escalating termination when needed before recording cancellation. Refuse new run admission during shutdown and leave other instances sharing the database untouched.
+
+Refresh imported-result counts in activity events and snapshots without assigning an executor or claiming observed runtime. Derive older imported receipts' counts from their saved results.
+
+Update the chat API reference to use stable draft identities, revision-checked edits, independent inclusion and explicit text deletion. Explain conflict preservation instead of teaching revisionless updates that the API rejects.

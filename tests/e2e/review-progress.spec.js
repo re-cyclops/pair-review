@@ -121,6 +121,7 @@ test('keeps refreshed findings on the selected run when an older response arrive
   seed('older-result', '01', 'Earlier finding text.');
   await page.goto(url);
   await waitForDiffToRender(page);
+  await page.getByRole('button', { name: 'Toggle Review panel', exact: true }).click();
   await expect(page.locator('#diff-container')).toContainText('Earlier finding text.');
   let release, requested;
   const held = new Promise(resolve => { release = resolve; });

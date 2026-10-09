@@ -9,6 +9,7 @@ let active = 0;
 const MAX_PAGES = 10;
 const now = () => new Date().toISOString();
 const unavailable = error => ({ availability: 'unavailable', reason: error?.status === 401 ? 'unauthenticated'
+  : error?.status === 429 ? 'rate-limited'
   : error?.status === 403 ? 'permission-denied-or-rate-limited' : error?.status === 404 ? 'not-available'
     : 'offline-or-unsupported', fetchedAt: null });
 const safeUrl = value => { try { const url = new URL(value); return ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password ? url.href : null; } catch { return null; } };
@@ -86,10 +87,10 @@ const readThreads = async (client, identity) => {
 };
 
 const checkItems = (items, source, sha) => items.map(item => source === 'check-run' ? {
-  id: String(item.id), name: item.name, source, appId: item.app?.id ?? null, revision: sha,
+  id: String(item.id), name: item.name, source, appId: item.app?.id ?? null, revision: item.head_sha || sha,
   status: item.status, conclusion: item.conclusion, startedAt: item.started_at, completedAt: item.completed_at,
   url: safeUrl(item.details_url || item.html_url)
-} : { id: String(item.id), name: item.context, source, appId: null, revision: sha,
+} : { id: String(item.id), name: item.context, source, appId: null, revision: item.sha || sha,
   status: item.state === 'pending' ? 'queued' : 'completed', conclusion: item.state,
   startedAt: item.created_at, completedAt: item.updated_at, url: safeUrl(item.target_url) });
 
@@ -97,16 +98,20 @@ const readChecks = async (client, identity, sha) => {
   const params = { owner: identity.owner, repo: identity.repo, ref: sha };
   const runs = await section(async () => {
     const result = await pages(client.octokit.rest.checks.listForRef, { ...params, filter: 'all' }, 'check_runs');
-    return { items: checkItems(result.items, 'check-run', sha), availability: result.complete ? 'known' : 'partial' };
+    const items = checkItems(result.items, 'check-run', sha);
+    return { items, availability: result.complete && items.every(item => item.revision === sha) ? 'known' : 'partial' };
   });
   const statuses = await section(async () => {
     const result = await pages(client.octokit.rest.repos.listCommitStatusesForRef, params);
-    return { items: checkItems(result.items, 'commit-status', sha), availability: result.complete ? 'known' : 'partial' };
+    const items = checkItems(result.items, 'commit-status', sha);
+    return { items, availability: result.complete && items.every(item => item.revision === sha) ? 'known' : 'partial' };
   });
   const items = [...(runs.items || []), ...(statuses.items || [])];
   // Keep attempts in items. Only the compact summary picks the latest identity per app/context.
   const latest = new Map();
-  for (const item of [...items].sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)) || Number(a.id) - Number(b.id))) {
+  // Use provider ID order; queued attempts may not have a start timestamp.
+  for (const item of [...items].sort((a, b) => Number(a.id) - Number(b.id) || String(a.startedAt || '').localeCompare(String(b.startedAt || '')))) {
+    if (item.revision !== sha) continue;
     latest.set(`${item.source}:${item.appId}:${item.name}`, item);
   }
   const counts = { passed: 0, failed: 0, pending: 0, skipped: 0, neutral: 0, cancelled: 0, actionRequired: 0, unknown: 0 };
@@ -177,9 +182,9 @@ const collect = async (client, identity, accountKey) => {
   const testMerge = pr.merge_commit_sha && !pr.merged && pr.merge_commit_sha !== pr.head.sha
     ? await readChecks(client, identity, pr.merge_commit_sha) : null;
   const required = policy.requiredChecks?.map(rule => {
-    const matching = checks.items.filter(c => c.name === rule.name && (rule.appId == null || c.appId === rule.appId));
+    const matching = checks.items.filter(c => c.revision === checks.revision && c.name === rule.name && (rule.appId == null || c.appId === rule.appId));
     return { ...rule, presentOnHead: matching.length > 0,
-      presentOnTestMerge: !!testMerge?.items.some(c => c.name === rule.name && (rule.appId == null || c.appId === rule.appId)) };
+      presentOnTestMerge: !!testMerge?.items.some(c => c.revision === testMerge.revision && c.name === rule.name && (rule.appId == null || c.appId === rule.appId)) };
   }) ?? null;
   const own = viewerIdentity.login && pr.user?.login ? pr.user.login.toLowerCase() === viewerIdentity.login.toLowerCase() : null;
   const direct = requests.users && viewerIdentity.login

@@ -325,7 +325,7 @@ router.post('/api/chat/session', async (req, res) => {
       const config = req.app.get('config') || {};
       const formatConfig = resolveFormat(config.comment_format);
 
-      finalSystemPrompt = buildChatPrompt({ review, prData, chatInstructions, commentFormatTemplate: formatConfig.template });
+      finalSystemPrompt = buildChatPrompt({ review, prData, chatInstructions, globalInstructions: config.globalInstructions, commentFormatTemplate: formatConfig.template });
 
       if (!skipAnalysisContext) {
         // Fetch all AI suggestions from the latest analysis run
@@ -432,7 +432,7 @@ router.post('/api/chat/session', async (req, res) => {
     res.json({ data: responseData });
   } catch (error) {
     logger.error(`Error creating chat session: ${error.message}`);
-    res.status(500).json({ error: 'Failed to create chat session' });
+    res.status(error.statusCode || 500).json({ error: error.statusCode ? error.message : 'Failed to create chat session' });
   }
 });
 
@@ -473,7 +473,7 @@ router.post('/api/chat/session/:id/message', async (req, res) => {
       const config = req.app.get('config') || {};
       const fmtConfig = resolveFormat(config.comment_format);
 
-      const systemPrompt = buildChatPrompt({ review, prData, chatInstructions, commentFormatTemplate: fmtConfig.template });
+      const systemPrompt = buildChatPrompt({ review, prData, chatInstructions, globalInstructions: config.globalInstructions, commentFormatTemplate: fmtConfig.template });
       const cwd = await resolveReviewCwd(db, review);
       const loadSkills = await getRepoLoadSkillsForChat(db, review, config, session.provider);
 
@@ -512,6 +512,7 @@ router.post('/api/chat/session/:id/message', async (req, res) => {
     logger.debug(`[ChatRoute] Message stored as ID ${result.id}, awaiting agent response via WebSocket`);
     res.json({ data: { messageId: result.id } });
   } catch (error) {
+    if (error.statusCode === 409) return res.status(409).json({ error: error.message });
     if (error.code === SESSION_BUSY) {
       // The agent still owns its previous turn — e.g. an OMP run paused on a
       // background job, seen from a page reloaded mid-reply. The message was
@@ -636,7 +637,7 @@ router.post('/api/chat/session/:id/resume', async (req, res) => {
     const config = req.app.get('config') || {};
     const fmtConfig = resolveFormat(config.comment_format);
 
-    const systemPrompt = buildChatPrompt({ review, prData, chatInstructions, commentFormatTemplate: fmtConfig.template });
+    const systemPrompt = buildChatPrompt({ review, prData, chatInstructions, globalInstructions: config.globalInstructions, commentFormatTemplate: fmtConfig.template });
     const cwd = await resolveReviewCwd(db, review);
     const loadSkills = await getRepoLoadSkillsForChat(db, review, config, session.provider);
 
@@ -664,7 +665,7 @@ router.post('/api/chat/session/:id/resume', async (req, res) => {
     res.json({ data: { id: sessionId, status: 'active', model: resumed?.model ?? null } });
   } catch (error) {
     logger.error(`Error resuming chat session: ${error.message}`);
-    res.status(500).json({ error: 'Failed to resume session: ' + error.message });
+    res.status(error.statusCode || 500).json({ error: 'Failed to resume session: ' + error.message });
   }
 });
 
@@ -676,15 +677,13 @@ router.delete('/api/chat/session/:id', async (req, res) => {
     const sessionId = parseInt(req.params.id, 10);
     const chatSessionManager = req.app.chatSessionManager;
 
-    // Unregister broadcast listeners before closing the session
-    unregisterChatBroadcast(sessionId);
-
     await chatSessionManager.closeSession(sessionId);
+    unregisterChatBroadcast(sessionId);
     logger.info(`Chat session closed: ${sessionId}`);
     res.json({ data: { success: true } });
   } catch (error) {
     logger.error(`Error closing chat session: ${error.message}`);
-    res.status(500).json({ error: 'Failed to close chat session' });
+    res.status(error.statusCode || 500).json({ error: error.statusCode ? error.message : 'Failed to close chat session' });
   }
 });
 

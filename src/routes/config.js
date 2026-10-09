@@ -10,7 +10,7 @@
  */
 
 const express = require('express');
-const { RepoSettingsRepository, ReviewRepository, PRMetadataRepository, queryOne } = require('../database');
+const { RepoSettingsRepository, ReviewRepository, PRMetadataRepository, AnalysisRunRepository, queryOne } = require('../database');
 const {
   getAllProvidersInfo,
   testProviderAvailability,
@@ -52,9 +52,11 @@ router.get('/api/protocol', async (req, res) => {
     const config = req.app.get('config') || {};
     const receipt = await serverReceipt(config, req.app.get('protocolSources') || [], resolveDefaultProviderModel(config));
     if (req.query.runId) {
-      const row = await queryOne(req.app.get('db'), 'SELECT * FROM analysis_runs WHERE id = ?', [req.query.runId]);
+      const runs = new AnalysisRunRepository(req.app.get('db'));
+      const row = await runs.getById(req.query.runId);
       if (!row) return res.status(404).json({ error: 'Analysis run not found' });
       receipt['Selected run (captured configuration)'] = runReceipt(row);
+      if (!row.parent_run_id && row.config_type !== 'single') receipt['Council voice receipts'] = (await runs.getChildRuns(row.id)).map(runReceipt);
     }
     res.set('Cache-Control', 'no-store').json(receipt);
   } catch {

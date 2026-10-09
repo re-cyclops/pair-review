@@ -4,6 +4,7 @@ const path = require('node:path');
 if (process.argv.includes('--version')) { console.log('Deterministic OMP fixture'); process.exit(0); }
 const gate = process.env.WORKSPACE_PROVIDER_GATE;
 if (!gate) throw new Error('WORKSPACE_PROVIDER_GATE is required; this is not a real provider');
+if (process.env.WORKSPACE_PROVIDER_IGNORE_TERM === '1') process.on('SIGTERM', () => {});
 let watcher;
 const finish = () => {
   if (!fs.existsSync(gate)) return;

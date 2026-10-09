@@ -341,6 +341,9 @@ class AIPanel {
         this.isCollapsed = true;
         if (this.panel) {
             this.panel.classList.add('collapsed');
+            if (this.panel.contains(document.activeElement)) {
+                document.getElementById('ai-panel-toggle')?.focus();
+            }
         }
         // Set CSS variable to 0 so width calculations don't reserve space
         document.documentElement.style.setProperty('--ai-panel-width', '0px');

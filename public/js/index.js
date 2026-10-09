@@ -993,14 +993,16 @@
     row.innerHTML =
       '<td colspan="' + colCount + '">' +
         '<div class="delete-confirm-inner">' +
-          '<span>Delete session for ' + escapeHtml(sessionPath) + '?</span>' +
-          '<button class="btn-confirm-yes" data-session-id="' + sessionId + '">Delete</button>' +
+          '<span>Remove local history and drafts for ' + escapeHtml(sessionPath) + '? Files and remote reviews stay unchanged. This does not cancel work.</span>' +
+          '<button class="btn-confirm-yes" data-session-id="' + sessionId + '">Remove local history</button>' +
           '<button class="btn-confirm-no">Cancel</button>' +
         '</div>' +
       '</td>';
 
     // Wire up buttons
     row.querySelector('.btn-confirm-yes').addEventListener('click', async function () {
+      this.disabled = true;
+      row.querySelector('.btn-confirm-no').disabled = true;
       try {
         const response = await fetch('/api/local/sessions/' + sessionId, {
           method: 'DELETE'
@@ -1018,6 +1020,7 @@
         }
       } catch (error) {
         console.error('Error deleting local session:', error);
+        window.toast?.error(error.message);
         // Restore row on failure
         row.classList.remove('delete-confirm-row');
         row.innerHTML = originalHTML;
@@ -1192,7 +1195,7 @@
             ' data-review-id="' + review.id + '"' +
             ' data-repository="' + escapeHtmlAttribute(review.repository) + '"' +
             ' data-pr-number="' + review.pr_number + '"' +
-            ' title="Delete review"' +
+            ' title="Remove local history and drafts"' +
           '>' +
             '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">' +
               '<path fill-rule="evenodd" d="M6.5 1.75a.25.25 0 01.25-.25h2.5a.25.25 0 01.25.25V3h-3V1.75zm4.5 0V3h2.25a.75.75 0 010 1.5H2.75a.75.75 0 010-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75zM4.496 6.675a.75.75 0 10-1.492.15l.66 6.6A1.75 1.75 0 005.405 15h5.19a1.75 1.75 0 001.741-1.575l.66-6.6a.75.75 0 00-1.492-.15l-.66 6.6a.25.25 0 01-.249.225h-5.19a.25.25 0 01-.249-.225l-.66-6.6z"></path>' +
@@ -1224,29 +1227,32 @@
     row.innerHTML =
       '<td colspan="' + colCount + '">' +
         '<div class="delete-confirm-inner">' +
-          '<span>Delete review for ' + escapeHtml(repository) + ' #' + escapeHtml(String(prNumber)) + '?</span>' +
-          '<button class="btn-confirm-yes" data-review-id="' + reviewId + '">Delete</button>' +
+          '<span>Remove local history and drafts for ' + escapeHtml(repository) + ' #' + escapeHtml(String(prNumber)) + '? Its unshared checkout is also removed; pooled or shared checkouts stay. Remote reviews stay unchanged. This does not cancel work.</span>' +
+          '<button class="btn-confirm-yes" data-review-id="' + reviewId + '">Remove local history</button>' +
           '<button class="btn-confirm-no">Cancel</button>' +
         '</div>' +
       '</td>';
 
     // Wire up buttons
     row.querySelector('.btn-confirm-yes').addEventListener('click', async function () {
+      this.disabled = true;
+      row.querySelector('.btn-confirm-no').disabled = true;
       try {
         const response = await fetch('/api/worktrees/' + reviewId, {
           method: 'DELETE'
         });
 
-        if (!response.ok) {
-          const data = await response.json().catch(function () { return {}; });
-          throw new Error(data.error || 'Failed to delete review');
-        }
+        const data = await response.json().catch(function () { return {}; });
+        if (!response.ok) throw new Error(data.error || 'Failed to remove local history');
+        if (data.warning) window.toast?.error(data.warning);
+        else window.toast?.success(data.message);
 
         // Reload the recent reviews list
         await loadRecentReviews();
 
       } catch (error) {
         console.error('Error deleting review:', error);
+        window.toast?.error(error.message);
         // Restore row on failure
         row.classList.remove('delete-confirm-row');
         row.innerHTML = originalHTML;
@@ -1625,6 +1631,7 @@
     this._actionBar = null;
     this._toggleBtn = null;
     this._confirming = false;
+    this._removalResults = null;
   }
 
   SelectionMode.prototype.enter = function () {
@@ -1654,6 +1661,8 @@
   };
 
   SelectionMode.prototype.exit = function () {
+    this._removalResults?.remove();
+    this._removalResults = null;
     if (!this.active) return;
     this.active = false;
     this.selectedIds.clear();
@@ -1914,7 +1923,13 @@
     if (tbody) tbody.querySelectorAll('tr').forEach((row) => {
       var id = row.dataset[this.config.rowIdAttr];
       if (this.selectedIds.has(id)) {
-        this.selectedRows.set(id, { ...row.dataset });
+        var repository = row.querySelector('.col-repo')?.textContent.trim() || '';
+        var prLink = row.querySelector('.col-pr a');
+        var host = prLink ? new URL(prLink.href).searchParams.get('host') : null;
+        var label = prLink
+          ? repository + ' ' + prLink.textContent.trim() + (host ? ' (' + host + ')' : '')
+          : [row.querySelector('.col-local-name')?.textContent.trim(), row.querySelector('.col-local-path')?.title || repository].filter(Boolean).join(' · ');
+        this.selectedRows.set(id, { ...row.dataset, label: label || 'Review ' + id });
         if (row.getClientRects().length) visibleSelected++;
       }
     });
@@ -1939,6 +1954,43 @@
       this._inlineEl.classList.remove('confirming');
       this._confirming = false;
     }
+  };
+
+  SelectionMode.prototype.showRemovalResults = function (selectedIds, data) {
+    var errors = new Map((data.errors || []).map(item => [String(item.id), item.error]));
+    var warnings = new Map((data.warnings || []).map(item => [String(item.id), item.message]));
+    var results = Array.from(selectedIds, id => ({
+      id: id,
+      label: this.selectedRows.get(id)?.label || 'Review ' + id,
+      error: errors.get(id),
+      warning: warnings.get(id)
+    }));
+    for (var result of results) {
+      if (!errors.has(result.id)) this.selectedIds.delete(result.id);
+    }
+    if (this.selectedIds.size === 0) this.exit();
+    else this._updateInlineActions();
+
+    this._removalResults?.remove();
+    var section = document.createElement('section');
+    section.className = 'bulk-removal-results';
+    section.setAttribute('aria-label', 'Local history removal results');
+    section.setAttribute('role', 'status');
+    var heading = document.createElement('h3');
+    heading.textContent = 'Local history removal results';
+    section.appendChild(heading);
+    var list = document.createElement('ul');
+    for (var result of results) {
+      var item = document.createElement('li');
+      item.dataset.reviewId = result.id;
+      item.textContent = result.label + ': ' + (result.error
+        ? 'Retained — ' + result.error
+        : 'Removed local history.' + (result.warning ? ' ' + result.warning : ''));
+      list.appendChild(item);
+    }
+    section.appendChild(list);
+    document.getElementById(this.config.containerId)?.before(section);
+    this._removalResults = section;
   };
 
   /**
@@ -1985,7 +2037,7 @@
     tbodyId: 'recent-reviews-tbody',
     rowIdAttr: 'reviewId',
     actions: [
-      { label: 'Delete', className: 'btn-bulk-delete', handler: handleBulkDeletePR }
+      { label: 'Remove local history', className: 'btn-bulk-delete', handler: handleBulkDeletePR }
     ]
   });
 
@@ -1995,7 +2047,7 @@
     tbodyId: 'local-reviews-tbody',
     rowIdAttr: 'sessionId',
     actions: [
-      { label: 'Delete', className: 'btn-bulk-delete', handler: handleBulkDeleteLocal }
+      { label: 'Remove local history', className: 'btn-bulk-delete', handler: handleBulkDeleteLocal }
     ]
   });
 
@@ -2064,7 +2116,8 @@
 
   async function handleBulkDeletePR(selectedIds, selectionInstance) {
     var count = selectedIds.size;
-    selectionInstance.showConfirm('Delete ' + count + ' review' + (count === 1 ? '' : 's') + '?', async function () {
+    selectionInstance.showConfirm('Remove local history and drafts for ' + count + ' review' + (count === 1 ? '' : 's') + '? Unshared checkouts are removed; pooled or shared checkouts stay. Remote reviews stay unchanged. Active work is not cancelled.', async function () {
+      var context = window.reviewWorkspace?.contextVersion || 0;
       try {
         var response = await fetch('/api/worktrees/bulk-delete', {
           method: 'POST',
@@ -2072,20 +2125,22 @@
           body: JSON.stringify({ ids: Array.from(selectedIds).map(Number) })
         });
         var data = await response.json();
+        if (context !== (window.reviewWorkspace?.contextVersion || 0)) return;
         if (!response.ok) throw new Error(data.error || 'Bulk delete failed');
 
-        if (data.failed > 0) {
-          if (window.toast) window.toast.error(data.failed + ' of ' + count + ' failed to delete');
+        if (data.failed > 0 || data.warnings?.length) {
+          const details = [...(data.errors || []).map(item => `#${item.id}: ${item.error}`), ...(data.warnings || []).map(item => `#${item.id}: ${item.message}`)];
+          window.toast?.error(`Removed ${data.deleted}; retained ${data.failed}. ${details.join(' ')}`);
         } else {
-          if (window.toast) window.toast.success('Deleted ' + data.deleted + ' review' + (data.deleted === 1 ? '' : 's'));
+          window.toast?.success('Removed local history for ' + data.deleted + ' review' + (data.deleted === 1 ? '' : 's') + '. Remote reviews unchanged.');
         }
 
-        selectionInstance.exit();
+        selectionInstance.showRemovalResults(selectedIds, data);
         await loadRecentReviews();
       } catch (error) {
+        if (context !== (window.reviewWorkspace?.contextVersion || 0)) return;
         console.error('Bulk delete PR error:', error);
         if (window.toast) window.toast.error('Bulk delete failed: ' + error.message);
-        selectionInstance.exit();
         await loadRecentReviews();
       }
     });
@@ -2093,7 +2148,8 @@
 
   async function handleBulkDeleteLocal(selectedIds, selectionInstance) {
     var count = selectedIds.size;
-    selectionInstance.showConfirm('Delete ' + count + ' session' + (count === 1 ? '' : 's') + '?', async function () {
+    selectionInstance.showConfirm('Remove local history and drafts for ' + count + ' local review' + (count === 1 ? '' : 's') + '? Files and remote reviews stay unchanged. Active work is not cancelled.', async function () {
+      var context = window.reviewWorkspace?.contextVersion || 0;
       try {
         var response = await fetch('/api/local/sessions/bulk-delete', {
           method: 'POST',
@@ -2101,20 +2157,21 @@
           body: JSON.stringify({ ids: Array.from(selectedIds).map(Number) })
         });
         var data = await response.json();
+        if (context !== (window.reviewWorkspace?.contextVersion || 0)) return;
         if (!response.ok) throw new Error(data.error || 'Bulk delete failed');
 
         if (data.failed > 0) {
-          if (window.toast) window.toast.error(data.failed + ' of ' + count + ' failed to delete');
+          window.toast?.error(`Removed ${data.deleted}; retained ${data.failed}. ${(data.errors || []).map(item => `#${item.id}: ${item.error}`).join(' ')}`);
         } else {
-          if (window.toast) window.toast.success('Deleted ' + data.deleted + ' session' + (data.deleted === 1 ? '' : 's'));
+          window.toast?.success('Removed local history for ' + data.deleted + ' local review' + (data.deleted === 1 ? '' : 's') + '. Files and remote reviews unchanged.');
         }
 
-        selectionInstance.exit();
+        selectionInstance.showRemovalResults(selectedIds, data);
         await loadLocalReviews();
       } catch (error) {
+        if (context !== (window.reviewWorkspace?.contextVersion || 0)) return;
         console.error('Bulk delete local error:', error);
         if (window.toast) window.toast.error('Bulk delete failed: ' + error.message);
-        selectionInstance.exit();
         await loadLocalReviews();
       }
     });

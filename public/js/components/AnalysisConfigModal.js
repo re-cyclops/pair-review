@@ -189,9 +189,10 @@ class AnalysisConfigModal {
     }
 
     // Create modal container
-    const modalContainer = document.createElement('div');
+    const modalContainer = document.createElement('dialog');
     modalContainer.id = 'analysis-config-modal';
     modalContainer.className = 'modal-overlay analysis-config-overlay';
+    modalContainer.setAttribute('aria-labelledby', 'analysis-config-title');
     modalContainer.style.display = 'none';
 
     modalContainer.innerHTML = `
@@ -207,7 +208,7 @@ class AnalysisConfigModal {
               </svg>
             </div>
             <div>
-              <h3>Configure AI Analysis</h3>
+              <h3 id="analysis-config-title">Configure AI Analysis</h3>
               <p class="header-subtitle">Customize how the AI reviews this PR</p>
             </div>
           </div>
@@ -451,6 +452,8 @@ class AnalysisConfigModal {
     // Escape key handler - bound function for add/remove symmetry
     this.escapeHandler = (e) => {
       if (e.key === 'Escape' && this.isVisible) {
+        e.preventDefault();
+        e.stopPropagation();
         this.hide();
       }
     };
@@ -473,6 +476,7 @@ class AnalysisConfigModal {
   renderProviderButtons() {
     const container = this.modal.querySelector('#provider-toggle-container');
     if (!container) return;
+    const restoreFocus = container.contains(document.activeElement);
 
     // Filter to only show available providers, sorted alphabetically by name
     const availableProviderIds = Object.keys(this.providers).filter(providerId => {
@@ -499,7 +503,7 @@ class AnalysisConfigModal {
       const escapedName = window.escapeHtmlAttribute(provider.name);
 
       return `
-        <button class="provider-btn ${providerId === this.selectedProvider ? 'selected' : ''}" data-provider="${providerId}" title="${escapedName}">
+        <button class="provider-btn ${providerId === this.selectedProvider ? 'selected' : ''}" data-provider="${providerId}" aria-pressed="${providerId === this.selectedProvider}" title="${escapedName}">
           ${escapedName}
         </button>
       `;
@@ -509,6 +513,7 @@ class AnalysisConfigModal {
     container.querySelectorAll('.provider-btn').forEach(btn => {
       btn.addEventListener('click', () => this.selectProvider(btn.dataset.provider));
     });
+    if (restoreFocus) container.querySelector('.provider-btn.selected')?.focus();
   }
 
   /**
@@ -519,7 +524,7 @@ class AnalysisConfigModal {
     if (!container) return;
 
     container.innerHTML = this.models.map(model => `
-      <button class="model-card ${model.id === this.selectedModel ? 'selected' : ''}" data-model="${model.id}" data-tier="${model.tier}">
+      <button class="model-card ${model.id === this.selectedModel ? 'selected' : ''}" data-model="${model.id}" data-tier="${model.tier}" aria-pressed="${model.id === this.selectedModel}">
         <div class="model-badge ${model.badgeClass || ''}">${model.badge || ''}</div>
         <div class="model-icon">${model.icon || this.getModelIcon(model.tier)}</div>
         <div class="model-info">
@@ -639,6 +644,7 @@ class AnalysisConfigModal {
     // Update UI
     this.modal.querySelectorAll('.model-card').forEach(card => {
       card.classList.toggle('selected', card.dataset.model === modelId);
+      card.setAttribute('aria-pressed', String(card.dataset.model === modelId));
     });
 
     // Get the tier of the selected model
@@ -873,6 +879,9 @@ class AnalysisConfigModal {
       // Show modal immediately with loading state (providers may take a moment)
       this._showLoading(true);
       this.modal.style.display = 'flex';
+      const modalBody = this.modal.querySelector('.analysis-config-body');
+      if (modalBody) modalBody.scrollTop = 0;
+      if (!this.modal.open) this.modal.showModal();
       requestAnimationFrame(() => {
         this.modal.classList.add('visible');
       });
@@ -988,18 +997,6 @@ class AnalysisConfigModal {
     // Remove loading state and reveal content
     this._showLoading(false);
 
-    // Focus the textarea without scrolling the modal body
-    setTimeout(() => {
-      const textarea = this.modal.querySelector('#custom-instructions');
-      const modalBody = this.modal.querySelector('.analysis-config-body');
-      if (textarea) {
-        textarea.focus({ preventScroll: true });
-        // Ensure modal body is scrolled to top
-        if (modalBody) {
-          modalBody.scrollTop = 0;
-        }
-      }
-    }, 50);
   }
 
   /**
@@ -1092,6 +1089,7 @@ class AnalysisConfigModal {
     if (tabBar) {
       tabBar.querySelectorAll('.analysis-tab').forEach(t => {
         t.classList.toggle('active', t.dataset.tab === tabId);
+        t.setAttribute('aria-pressed', String(t.dataset.tab === tabId));
       });
     }
 
@@ -1250,6 +1248,8 @@ class AnalysisConfigModal {
 
     this.modal.classList.remove('visible');
     this.isVisible = false;
+    this.modal.style.display = 'none';
+    this.modal.close();
 
     setTimeout(() => {
       // Guard against race condition: if modal was reopened before this timeout fired,

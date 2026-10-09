@@ -31,6 +31,7 @@
 
     <!-- PR Display Styles -->
     <link rel="stylesheet" href="/css/pr.css">
+    <link rel="stylesheet" href="/css/toast.css">
     <link rel="stylesheet" href="/css/ai-summary-modal.css">
     <link rel="stylesheet" href="/css/analysis-config.css">
     <link rel="stylesheet" href="/css/snippet-manager.css">
@@ -351,7 +352,7 @@
         <!-- Main Three-Panel Layout -->
         <div class="main-layout">
             <!-- File Tree Sidebar (Left) -->
-            <aside class="sidebar files-sidebar" id="files-sidebar">
+            <aside class="sidebar files-sidebar" id="files-sidebar" aria-label="File navigator">
                 <div class="sidebar-header">
                     <span class="sidebar-title">File Navigator</span>
                     <div style="display: flex; align-items: center; gap: 8px;">
@@ -462,7 +463,7 @@
             <!-- Right Panel Group (AI Panel + Chat) -->
             <div class="right-panel-group" id="right-panel-group">
                 <!-- AI Analysis Panel (Right) -->
-                <aside class="ai-panel collapsed" id="ai-panel">
+                <aside class="ai-panel collapsed" id="ai-panel" aria-label="Review findings">
                     <div class="resize-handle resize-handle-left" data-panel="ai-panel"></div>
                     <div class="ai-panel-header">
                         <div class="ai-panel-title">

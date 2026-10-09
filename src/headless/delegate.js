@@ -45,17 +45,16 @@ const SETUP_POLL_INTERVAL_MS = 1000;
 const ANALYSIS_POLL_INTERVAL_MS = 3000;
 
 // After this many CONSECUTIVE failed analysis-status polls, we consult the DB
-// run row: a terminal row means the run finished (the server may have shed the
-// in-memory entry); a still-running row means the server died mid-run.
+// run row: a terminal row proves completion; a nonterminal row leaves the
+// outcome unknown because lost contact does not prove the executor stopped.
 const MAX_CONSECUTIVE_POLL_FAILURES = 5;
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const isTerminal = (status) => TERMINAL_STATUSES.has(status);
 
-const SERVER_DIED_MESSAGE =
-  'The pair-review server became unreachable while the analysis was still ' +
-  'running. It may have crashed or been stopped mid-run; the analysis did not ' +
-  'complete. Re-run without a server (or with --no-server) to analyze in-process.';
+const SERVER_UNREACHABLE_MESSAGE =
+  'The pair-review server became unreachable; the analysis outcome is unknown. ' +
+  'The executor may still be running. Check its activity before retrying or starting another run.';
 
 /**
  * Look up the persisted status of an analysis run row (the delegation fallback
@@ -543,8 +542,8 @@ function summarizeProgress(status) {
  *   - A 404 means the server dropped its in-memory entry: consult the DB run row
  *     — terminal → done; still running → let it count as a poll failure.
  *   - A transport/5xx failure is a poll failure. Once the threshold is crossed
- *     with a still-non-terminal DB row, the server is presumed dead and we
- *     resolve a `failed` outcome explaining why.
+ *     with a still-non-terminal DB row, report an unknown outcome. The executor
+ *     may remain live despite the CLI losing contact.
  *
  * The DB row fetched on the LAST 404 is reused by the exhaustion handler (no
  * redundant re-fetch); a transport/5xx streak re-reads fresh, since no 404
@@ -587,7 +586,7 @@ async function waitForAnalysis(deps, baseUrl, analysisId, runId, db) {
       // transport/5xx streak did not, so read fresh (the run may have finished).
       const dbStatus = failure.kind === '404' ? lastDbStatus : await deps.getRunStatus(db, runId);
       if (isTerminal(dbStatus)) return { done: true, value: { status: dbStatus } };
-      return { done: true, value: { status: 'failed', error: SERVER_DIED_MESSAGE } };
+      return { done: true, value: { status: 'unknown', error: `${SERVER_UNREACHABLE_MESSAGE} Run: ${runId}.` } };
     },
   });
 }

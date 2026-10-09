@@ -10,6 +10,7 @@ const pendingComments = require('./github/operations/pending-review-comments');
 const { resolveRepoLinks, substituteUrlTemplate } = require('./links/repo-links');
 const { resolveBindingRepositoryForHost } = require('./utils/host-resolution');
 const { USER_DRAFT_CONDITION } = require('./utils/stats-calculator');
+const { checkReviewProse } = require('./utils/review-prose');
 
 const active = new Set();
 const anchors = new Map();
@@ -220,10 +221,12 @@ async function buildSubmissionManifest({ db, reviewId, client, target, config = 
   if (comments.some(comment => comment.errors.length)) blockers.push('Resolve the selected comment anchors before publishing. No comments will be silently skipped.');
   if (prior && prior.items.some(item => ['unknown', 'writing'].includes(item.state))) blockers.push('A previous write has an unknown outcome. Reconcile its receipt before attempting another write.');
   if (prior && mode === 'draft' && pending && pending.body !== text) blockers.push('The existing remote draft has a different body. Submit the explicitly previewed replacement body, or edit the draft on the host.');
+  const prose = checkReviewProse(config, [{ key: 'summary', body: text }, ...comments.map(({ key, body }) => ({ key, body }))]);
+  if (prose.diagnostics.some(item => item.severity === 'blocking')) blockers.push('Resolve the blocking prose diagnostics before publishing. Your text has not been changed.');
   const manifest = { version: 1, database: activity.identity(db).dbId, reviewId, reviewType: review.review_type,
     target: destination, local, mode, event: decision, body: text, bodyRevision: body === undefined ? review.draft_revision : null,
     association: review.associated_pr ? JSON.parse(review.associated_pr) : null,
-    selection, pendingReviewId: pending?.id || null, pendingBody: pending?.body ?? text, comments, count: comments.length };
+    selection, pendingReviewId: pending?.id || null, pendingBody: pending?.body ?? text, comments, count: comments.length, prose };
   return { ...manifest, digest: digest(manifest), drafts, pending, blockers, allowedEvents,
     fetchedAt: now(), attempt: prior ? receipt(db, prior.id) : null };
 }

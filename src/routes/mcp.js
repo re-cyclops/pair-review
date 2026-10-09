@@ -16,6 +16,7 @@ const { reviewScope } = require('../local-scope');
 const { normalizeRepository } = require('../utils/paths');
 const logger = require('../utils/logger');
 const { broadcastReviewEvent } = require('../events/review-events');
+const { captureRunProtocol } = require('../utils/review-protocol');
 const {
   activeAnalyses,
   reviewToAnalysisId,
@@ -671,7 +672,8 @@ function createMCPServer(db, options = {}) {
             globalInstructions: config.globalInstructions || null,
             repoInstructions,
             requestInstructions,
-            headSha: localHeadSha
+            headSha: localHeadSha,
+            protocol: captureRunProtocol(config, { provider, model, tier, ...providerOverrides })
           });
 
           // Launch analysis asynchronously (skipRunCreation since we created the record above).
@@ -828,7 +830,8 @@ function createMCPServer(db, options = {}) {
             globalInstructions: config.globalInstructions || null,
             repoInstructions,
             requestInstructions,
-            headSha: prMetadata.head_sha || null
+            headSha: prMetadata.head_sha || null,
+            protocol: captureRunProtocol(config, { provider, model, tier })
           });
 
           // Launch analysis asynchronously (skipRunCreation since we created the record above)

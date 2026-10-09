@@ -91,7 +91,7 @@ async function submissionContext(req, recorded = null) {
   const config = req.app.get('config') || {};
   const review = req.review;
   const associated = recorded || (review.review_type === 'local' ? safeParseJson(review.associated_pr) : null);
-  if (review.review_type === 'local' && !associated) return { db, reviewId: review.id };
+  if (review.review_type === 'local' && !associated) return { db, config, reviewId: review.id };
   const repository = associated?.repository || review.repository;
   const [owner, repo] = repository.split('/');
   const prNumber = associated?.number || review.pr_number;
@@ -111,7 +111,7 @@ function submissionError(res, error) {
 router.get('/api/reviews/:reviewId/manifest', validateReviewId, async (req, res) => {
   try {
     const localOnly = req.query.local === 'true';
-    const context = localOnly ? { db: req.app.get('db'), reviewId: req.reviewId, localOnly } : await submissionContext(req);
+    const context = localOnly ? { db: req.app.get('db'), config: req.app.get('config') || {}, reviewId: req.reviewId, localOnly } : await submissionContext(req);
     res.json(await submission.buildSubmissionManifest({ ...context, mode: req.query.mode || 'submit' }));
   } catch (error) { submissionError(res, error); }
 });

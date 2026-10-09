@@ -12,7 +12,7 @@
  * - Tab switch exits selection mode
  */
 
-import { test, expect } from './fixtures.js';
+import { test, publicationTest, expect } from './fixtures.js';
 
 /**
  * Seed additional PR reviews into the test database so the PR table has
@@ -215,7 +215,7 @@ test.describe('Bulk Actions - PR Tab', () => {
     await expect(selectAll).not.toBeChecked();
   });
 
-  test('bulk delete with confirmation deletes selected items', async ({ page }) => {
+  test('bulk delete with confirmation deletes selected items', async ({ page, testServer }) => {
     const selectBtn = page.locator('.btn-select-toggle[data-selection-tab="pr-tab"]');
     await selectBtn.click();
 
@@ -223,10 +223,11 @@ test.describe('Bulk Actions - PR Tab', () => {
     const rowsBefore = await page.locator('#recent-reviews-tbody tr[data-review-id]').count();
     expect(rowsBefore).toBeGreaterThanOrEqual(3);
 
-    // Select 2 rows
-    const checkboxes = page.locator('#recent-reviews-tbody .col-select input[type="checkbox"]');
-    await checkboxes.nth(0).check();
-    await checkboxes.nth(1).check();
+    // Remove only the two clean seeded reviews, not the fixture's active chat.
+    const removable = testServer.db.prepare('SELECT id FROM pr_metadata WHERE pr_number IN (2, 3)').all();
+    for (const { id } of removable) {
+      await page.locator(`#recent-reviews-tbody tr[data-review-id="${id}"] .col-select input`).check();
+    }
 
     // Click Delete button in action bar
     const deleteBtn = page.locator('#pr-tab .bulk-action-buttons .btn-bulk-delete');
@@ -235,10 +236,6 @@ test.describe('Bulk Actions - PR Tab', () => {
     // Action bar should enter confirming state
     const actionBar = page.locator('#pr-tab .bulk-inline-actions.confirming');
     await expect(actionBar).toBeVisible();
-
-    // Confirmation message should mention count
-    const countEl = page.locator('#pr-tab .bulk-action-count');
-    await expect(countEl).toContainText('Delete 2 review');
 
     // Click Confirm
     const confirmBtn = page.locator('#pr-tab .bulk-confirm-buttons .btn-bulk-delete');
@@ -454,4 +451,43 @@ test.describe('Bulk Actions - Cross-Tab Behaviors', () => {
     await firstCheckbox.uncheck();
     await expect(firstRow).not.toHaveClass(/bulk-selected/);
   });
+});
+
+publicationTest('partial removal retains hidden failed selection and per-review results across filters', async ({ page, testServer }) => {
+  seedExtraPRReviews(testServer.db);
+  testServer.db.prepare("UPDATE chat_sessions SET status = 'closed' WHERE review_id = 1").run();
+  testServer.db.prepare(`INSERT INTO submission_attempts (id, review_id, target_key, manifest, digest, state, phase, owner, created_at, updated_at)
+    VALUES ('pending-batch', 1, 'target', '{}', 'digest', 'outcome_unknown', 'submitting', 'other-instance', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`).run();
+  const retained = testServer.db.prepare('SELECT id FROM pr_metadata WHERE pr_number = 1').get().id;
+  const removed = testServer.db.prepare('SELECT id FROM pr_metadata WHERE pr_number = 2').get().id;
+  const drafts = testServer.db.prepare('SELECT * FROM comments WHERE review_id = 1').all();
+
+  await page.goto('/');
+  await waitForPRTable(page, 3);
+  await page.locator('.btn-select-toggle[data-selection-tab="pr-tab"]').click();
+  await page.locator(`tr[data-review-id="${retained}"] .col-select input`).check();
+  await page.locator(`tr[data-review-id="${removed}"] .col-select input`).check();
+  const filter = page.getByRole('searchbox', { name: 'Filter loaded reviews' });
+  await filter.fill('#2');
+  await expect(page.locator('#pr-tab .bulk-action-count')).toHaveText('2 selected · 1 hidden');
+  await page.locator('#pr-tab .bulk-action-buttons .btn-bulk-delete').click();
+  const responsePromise = page.waitForResponse(response => response.url().endsWith('/api/worktrees/bulk-delete'));
+  await page.locator('#pr-tab .bulk-confirm-buttons .btn-bulk-delete').click();
+  expect(await (await responsePromise).json()).toMatchObject({
+    deleted: 1, failed: 1, errors: [{ id: retained, error: expect.stringMatching(/pending submission/) }]
+  });
+
+  const results = page.getByRole('status', { name: 'Local history removal results' });
+  await expect(results.locator(`[data-review-id="${retained}"]`)).toContainText('test-owner/test-repo #1: Retained');
+  await expect(results.locator(`[data-review-id="${retained}"]`)).toContainText('pending submission');
+  await expect(results.locator(`[data-review-id="${removed}"]`)).toContainText('test-owner/test-repo #2: Removed');
+  await expect(page.locator('#recent-reviews-tbody tr[data-review-id="' + removed + '"]')).toHaveCount(0);
+  await expect(page.locator('#pr-tab .bulk-action-count')).toHaveText('1 selected · 1 hidden');
+  await filter.fill('#1');
+  await expect(page.locator(`tr[data-review-id="${retained}"] .col-select input`)).toBeChecked();
+  await expect(page.locator('#pr-tab .bulk-action-count')).toHaveText('1 selected');
+  await expect(results).toBeVisible();
+  expect(testServer.db.prepare('SELECT * FROM comments WHERE review_id = 1').all()).toEqual(drafts);
+  expect(testServer.db.prepare("SELECT state FROM submission_attempts WHERE id = 'pending-batch'").get().state).toBe('outcome_unknown');
+  expect(testServer.reviewHost.state.calls).toEqual([]);
 });

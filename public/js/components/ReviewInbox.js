@@ -179,7 +179,7 @@
         row.tabIndex = 0;
         this.records.set(row, record);
         this.observer.observe(row);
-        row.querySelector('.btn-delete-review')?.setAttribute('aria-label', 'Remove local review and worktree');
+        row.querySelector('.btn-delete-review')?.setAttribute('aria-label', 'Remove local history and drafts');
       }
       this.updateFilterOptions();
       this.renderRows();
@@ -361,7 +361,8 @@
             return head ? head !== local.lastReviewedHead : null;
           }
           if (record.local) return filter === 'needs-you' ? local ? hasDraft(local) : null : filter === 'unknown' ? !local : false;
-          if (filter === 'unknown') return unavailable || s?.viewer?.needsYou == null || s?.policy?.availability !== 'known';
+          if (filter === 'unknown') return unavailable || s?.viewer?.needsYou == null
+            || ['approvals', 'requests', 'checks', 'policy', 'threads'].some(section => s?.[section]?.availability !== 'known');
           if (unavailable) return null;
           if (['needs-you', 'individual', 'teams'].includes(filter) && (s.merged || s.state === 'closed')) return false;
           if (filter === 'needs-you') return s.viewer?.self ? false : s.viewer?.needsYou == null ? null
@@ -370,7 +371,12 @@
           if (filter === 'teams') return s.viewer?.requestedViaTeam ?? null;
           if (filter === 'pr-draft') return s.draft;
           if (filter === 'pr-ready') return !s.draft;
-          if (filter === 'failed-ci') return s.checks?.counts ? !!(s.checks.counts.failed || s.checks.counts.actionRequired || s.checks.counts.cancelled) : null;
+          if (filter === 'failed-ci') {
+            const counts = s.checks?.counts;
+            if (!counts) return null;
+            if (counts.failed || counts.actionRequired || counts.cancelled) return true;
+            return s.checks.availability === 'known' ? false : null;
+          }
           if (filter === 'changed') return s.viewer?.newRevision ?? null;
           return true;
         };

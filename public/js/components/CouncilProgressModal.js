@@ -54,6 +54,7 @@ class CouncilProgressModal {
     this.currentAnalysisId = analysisId;
     this.councilConfig = councilConfig;
     this.isVisible = true;
+    this.isRunningInBackground = false;
     this._voiceStates = {};
     this._completionHandled = false;
     this._terminalStatus = null;
@@ -99,6 +100,8 @@ class CouncilProgressModal {
   hide() {
     this.isVisible = false;
     this.modal.style.display = 'none';
+    // Dismissing progress never detaches the active run's completion handler.
+    this.isRunningInBackground = !!this.currentAnalysisId && !this._terminalStatus;
 
     if (!this.isRunningInBackground) {
       this.stopProgressMonitoring();
@@ -109,7 +112,6 @@ class CouncilProgressModal {
    * Run analysis in background.
    */
   runInBackground() {
-    this.isRunningInBackground = true;
     this.hide();
   }
 
@@ -138,13 +140,16 @@ class CouncilProgressModal {
       return;
     }
 
+    const analysisId = this.currentAnalysisId;
     const button = this.modal.querySelector('.council-cancel-btn');
     try {
-      const response = await fetch(`/api/analyses/${this.currentAnalysisId}/cancel`, { method: 'POST' });
+      const response = await fetch(`/api/analyses/${analysisId}/cancel`, { method: 'POST' });
       if (!response.ok) throw new Error(`Cancellation request failed (${response.status})`);
       const result = await response.json();
-      if (this._terminalStatus) return;
+      if (this.currentAnalysisId !== analysisId || this._terminalStatus) return;
       if (['completed', 'failed', 'cancelled'].includes(result.status)) {
+        this.updateProgress(result);
+        this.stopProgressMonitoring();
         this.hide();
         return;
       }
@@ -154,6 +159,7 @@ class CouncilProgressModal {
       }
       // Keep monitoring until the executor acknowledges termination.
     } catch (error) {
+      if (this.currentAnalysisId !== analysisId) return;
       if (window.toast) window.toast.showError(error.message);
       if (button) button.disabled = false;
     }
@@ -228,10 +234,11 @@ class CouncilProgressModal {
    */
   _fetchAndApplyStatus() {
     if (!this.currentAnalysisId) return;
-    fetch('/api/analyses/' + this.currentAnalysisId + '/status')
+    const analysisId = this.currentAnalysisId;
+    return fetch('/api/analyses/' + analysisId + '/status')
       .then(r => r.ok ? r.json() : null)
       .then(status => {
-        if (status) {
+        if (status && this.currentAnalysisId === analysisId) {
           this.updateProgress(status);
           if (['completed', 'failed', 'cancelled'].includes(status.status)) {
             this.stopProgressMonitoring();
@@ -253,7 +260,7 @@ class CouncilProgressModal {
    * @param {Object} status
    */
   updateProgress(status) {
-    if (this._terminalStatus && !['completed', 'failed', 'cancelled'].includes(status.status)) return;
+    if (this._terminalStatus) return;
     if (['completed', 'failed', 'cancelled'].includes(status.status)) this._terminalStatus = status.status;
     // No-levels mode: update the single row based on overall status
     if (this._noLevels) {
@@ -904,6 +911,10 @@ class CouncilProgressModal {
     // Guard against duplicate invocations (e.g. WebSocket retry + reconnect fetch race)
     if (this._completionHandled) return;
     this._completionHandled = true;
+    const analysisId = this.currentAnalysisId;
+    const hideCompletedRun = () => {
+      if (this.currentAnalysisId === analysisId) this.hide();
+    };
 
     // Play notification sound before any async work so it fires promptly
     if (window.notificationSounds) window.notificationSounds.playIfEnabled('analysis');
@@ -969,6 +980,7 @@ class CouncilProgressModal {
 
       refreshHistory()
         .then((didSwitch) => {
+          if (this.currentAnalysisId !== analysisId) return;
           if (didSwitch) {
             return manager.loadAISuggestions();
           }
@@ -977,19 +989,19 @@ class CouncilProgressModal {
         })
         .then(() => {
           console.log('AI suggestions reloaded after council analysis');
-          if (this.isVisible) {
-            setTimeout(() => this.hide(), 2000);
+          if (this.isVisible && this.currentAnalysisId === analysisId) {
+            setTimeout(hideCompletedRun, 2000);
           }
         })
         .catch(error => {
           console.error('Error reloading AI suggestions:', error);
-          if (this.isVisible) {
-            setTimeout(() => this.hide(), 5000);
+          if (this.isVisible && this.currentAnalysisId === analysisId) {
+            setTimeout(hideCompletedRun, 5000);
           }
         });
     } else {
       if (this.isVisible) {
-        setTimeout(() => this.hide(), 3000);
+        setTimeout(hideCompletedRun, 3000);
       }
     }
   }
@@ -1090,7 +1102,10 @@ class CouncilProgressModal {
     }
 
     if (this.isVisible) {
-      setTimeout(() => this.hide(), 1500);
+      const analysisId = this.currentAnalysisId;
+      setTimeout(() => {
+        if (this.currentAnalysisId === analysisId) this.hide();
+      }, 1500);
     }
   }
 

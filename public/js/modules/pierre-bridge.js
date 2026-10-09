@@ -122,8 +122,8 @@ class PierreBridge {
 
   getThemeConfig() {
     return {
-      dark: 'github-dark',
-      light: 'github-light',
+      dark: 'github-dark-high-contrast',
+      light: 'github-light-high-contrast',
     };
   }
 
@@ -610,6 +610,23 @@ class PierreBridge {
         const fileState = this.files.get(fileName);
         if (fileState) {
           fileState.shadowHost = node;
+        }
+        for (const button of node.shadowRoot?.querySelectorAll('[data-expand-button], [data-unmodified-lines]') || []) {
+          const direction = button.hasAttribute('data-expand-up') ? 'preceding' : button.hasAttribute('data-expand-down') ? 'following' : 'surrounding';
+          button.setAttribute('role', 'button');
+          button.setAttribute('aria-label', `Expand ${direction} unchanged lines in ${fileName}`);
+          button.tabIndex = 0;
+          button.onkeydown = (event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            event.stopPropagation();
+            button.click();
+            requestAnimationFrame(() => {
+              if (!button.isConnected) {
+                this.files.get(fileName)?.container.closest('.d2h-file-wrapper')?.querySelector('.file-collapse-toggle')?.focus();
+              }
+            });
+          };
         }
         this._syncSplitAnnotationLayout(fileName);
       },
@@ -2465,6 +2482,12 @@ class PierreBridge {
         background-color: transparent;
         box-shadow: inset 3px 0 0 transparent;
       }
+    }
+    [data-expand-button], [data-unmodified-lines] { min-height: 24px; }
+    [data-unmodified-lines] { display: inline-flex; align-items: center; }
+    [data-expand-button]:focus-visible, [data-unmodified-lines]:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: -2px; }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
     }
   `;
 

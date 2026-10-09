@@ -5,11 +5,13 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
 const appRoot = path.resolve(process.env.WORKSPACE_TEST_APP_ROOT || path.join(__dirname, '../..'));
 const home = process.env.WORKSPACE_TEST_HOME || fs.mkdtempSync(path.join(os.tmpdir(), 'pair-review-workspace-'));
 const files = Array.from({ length: Number(process.env.WORKSPACE_TEST_FILE_COUNT || 1) }, (_, index) => index ? `sample-${index}.js` : 'sample.js');
 const lineCount = Number(process.env.WORKSPACE_TEST_LINES || 40);
+const historyCount = Number(process.env.WORKSPACE_TEST_HISTORY_COUNT || 0);
+const fixtureNow = process.env.WORKSPACE_TEST_NOW ? Date.parse(process.env.WORKSPACE_TEST_NOW) : Date.now();
 const changedLines = [...new Set([1, 12, ...(files.length > 1 ? Array.from({ length: Math.floor((lineCount - 20) / 8) }, (_, index) => 20 + index * 8) : [])])];
 // The baseline application predates explicit loopback binding. Keep both
 // comparison servers private at the fixture's network boundary.
@@ -44,6 +46,9 @@ const hostStatePath = path.join(home, 'synthetic-host.json');
 const saved = fs.existsSync(hostStatePath) ? JSON.parse(fs.readFileSync(hostStatePath, 'utf8')) : {};
 const state = { calls: [], viewer: 'reviewer', readError: null, partialAfter: null, failAfterSubmit: false,
   ...saved, prs: new Map(saved.prs || []), reviews: new Map(saved.reviews || []) };
+const readCalls = [];
+let activeReads = 0;
+let maxConcurrentReads = 0;
 const key = args => `${args.owner}/${args.repo}#${args.pull_number || args.prNumber || args.number}`;
 const copy = value => JSON.parse(JSON.stringify(value));
 const response = data => ({ data: copy(data), headers: {} });
@@ -103,14 +108,22 @@ const octokit = {
       }),
       getBranchProtection: read(() => ({ required_pull_request_reviews: { required_approving_review_count: 2, require_code_owner_reviews: true }, required_status_checks: { contexts: ['build', 'lint'] } })),
       getRulesForBranch: read(() => []),
-      listCommitStatusesForRef: read(() => [])
+      listCommitStatusesForRef: read(args => state.commitStatuses?.[args.ref] || [])
     },
-    checks: { listForRef: read(args => ({ check_runs: [
+    checks: { listForRef: read(args => ({ check_runs: (state.checkRuns?.[args.ref] || [
       { id: 10, name: 'build', app: { id: 1 }, status: 'completed', conclusion: 'failure', started_at: '2026-01-01', details_url: 'https://example.invalid/checks/build' },
       { id: 11, name: 'lint', app: { id: 1 }, status: 'in_progress', conclusion: null, started_at: '2026-01-02', details_url: 'https://example.invalid/checks/lint' }
-    ].map(check => ({ ...check, head_sha: args.ref })) })) }
+    ]).map(check => ({ head_sha: args.ref, ...check })) })) }
   },
-  paginate: async (method, args) => { const { data } = await method(args); return Array.isArray(data) ? data : data.items; },
+  paginate: async (method, args) => {
+    const results = [];
+    for (let page = 1; ; page++) {
+      const response = await method({ ...args, per_page: 100, page });
+      const data = response.data;
+      results.push(...(Array.isArray(data) ? data : data.items || data.check_runs || []));
+      if (!response.headers.link) return results;
+    }
+  },
   graphql: async (source, args = {}) => {
     const literals = [];
     const syntax = source.replace(/"(?:\\.|[^"\\])*"/g, value => { literals.push(JSON.parse(value)); return `LITERAL_${literals.length - 1}`; });
@@ -176,9 +189,42 @@ const octokit = {
     } finally { if (syntax.includes('mutation')) persistHost(); }
   }
 };
+for (const [resource, methods] of Object.entries(octokit.rest)) {
+  for (const [name, method] of Object.entries(methods)) {
+    methods[name] = async (args = {}) => {
+      const call = { operation: `${resource}.${name}`, key: args.owner ? key(args) : null, page: args.page || 1,
+        perPage: args.per_page || 30, diff: args.mediaType?.format === 'diff', startedAt: performance.now() };
+      readCalls.push(call);
+      maxConcurrentReads = Math.max(maxConcurrentReads, ++activeReads);
+      try {
+        const result = await method(args);
+        const collection = Array.isArray(result.data) ? null
+          : ['items', 'check_runs'].find(field => Array.isArray(result.data?.[field]));
+        const values = collection ? result.data[collection] : result.data;
+        if (Array.isArray(values)) {
+          const start = (call.page - 1) * call.perPage;
+          const page = values.slice(start, start + call.perPage);
+          result.data = collection ? { ...result.data, [collection]: page, total_count: values.length } : page;
+          if (start + page.length < values.length) result.headers.link = '<https://example.invalid/next>; rel="next"';
+          call.items = page.length;
+        }
+        return result;
+      } finally {
+        call.durationMs = performance.now() - call.startedAt;
+        activeReads--;
+      }
+    };
+  }
+}
+const graphql = octokit.graphql;
+octokit.graphql = async (source, args) => {
+  if (!/\bmutation\b/.test(source)) readCalls.push({ operation: 'graphql', startedAt: performance.now() });
+  return graphql(source, args);
+};
 GitHubClient.prototype._buildOctokit = () => octokit;
-const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' };
-const git = (directory, args) => execFileSync('git', ['-C', directory, ...args], { env: gitEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0',
+  GIT_AUTHOR_DATE: '2026-01-01T12:00:00Z', GIT_COMMITTER_DATE: '2026-01-01T12:00:00Z' };
+const git = (directory, args) => execFileSync('git', ['-C', directory, ...args], { env: gitEnv, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 async function main() {
   fs.mkdirSync(path.join(home, '.pair-review'), { recursive: true });
   const resume = fs.existsSync(path.join(home, '.pair-review', 'workspace.db'));
@@ -228,7 +274,7 @@ async function main() {
     for (let index = 0; index < total; index++) {
       const repository = index === 1 ? 'example/beta' : 'example/alpha';
       const number = index < 2 ? 42 : 41 + index;
-      const now = new Date(Date.now() - index * 1000).toISOString();
+      const now = new Date(fixtureNow - index * 1000).toISOString();
       git(repoPath, ['update-ref', `refs/pull/${number}/head`, headSha]);
       const pr = { repository, number, node_id: `PR_${index}`, title: `Preserve request state ${index + 1}`, body: 'Synthetic fixture only.',
         user: { login: index === 1 ? 'reviewer' : 'contributor' }, state: 'open', merged: false, draft: false,
@@ -240,8 +286,9 @@ async function main() {
       state.prs.set(`${repository}#${number}`, pr);
       const opinions = index === 0 ? [['kim', 'APPROVED'], ['pat', 'APPROVED']]
         : index === 2 ? [['reviewer', 'APPROVED'], ['maintainer', 'CHANGES_REQUESTED']]
-          : index === 3 ? [['reviewer', 'CHANGES_REQUESTED'], ['reviewer', 'COMMENTED']] : [];
-      for (const [login, decision] of opinions) {
+          : index === 3 ? [['reviewer', 'CHANGES_REQUESTED'], ['reviewer', 'COMMENTED'], ['maintainer', 'APPROVED']] : [];
+      const history = index < 4 ? Array.from({ length: historyCount }, (_, i) => [`previous-reviewer-${i % 20}`, 'COMMENTED']) : [];
+      for (const [login, decision] of [...history, ...opinions]) {
         const databaseId = ++id;
         state.reviews.set(`REVIEW_${databaseId}`, { id: `REVIEW_${databaseId}`, databaseId, key: `${repository}#${number}`,
           state: decision, user: { login }, submitted_at: new Date(databaseId * 1000).toISOString(),
@@ -259,6 +306,17 @@ async function main() {
         await comments.createFileComment({ review_id: reviewId, file: 'sample.js', commit_sha: headSha, body: 'Keep the file-level invariant explicit.' });
       }
     }
+    if (historyCount) {
+      state.checkRuns = { [headSha]: [
+        ...Array.from({ length: historyCount }, (_, index) => ({
+          id: 100 + index, name: index % 2 ? 'build' : 'lint', app: { id: 1 }, status: 'completed',
+          conclusion: index % 3 ? 'success' : 'failure', started_at: new Date(Date.UTC(2025, 0, 1) + index * 1000).toISOString(),
+          details_url: `https://example.invalid/checks/history-${index}`
+        })),
+        { id: 100 + historyCount, name: 'build', app: { id: 1 }, status: 'completed', conclusion: 'failure', started_at: '2026-01-01', details_url: 'https://example.invalid/checks/build' },
+        { id: 101 + historyCount, name: 'lint', app: { id: 1 }, status: 'in_progress', conclusion: null, started_at: '2026-01-02', details_url: 'https://example.invalid/checks/lint' }
+      ] };
+    }
     persistHost();
   } else if (!state.prs.size) {
     for (const row of db.prepare('SELECT pr_number, repository, pr_data FROM pr_metadata').all()) {
@@ -267,7 +325,14 @@ async function main() {
     persistHost();
   }
   require(path.join(appRoot, 'src/ai')).checkAllProviders = async () => {};
-  require(path.join(appRoot, 'src/chat/chat-providers')).checkAllChatProviders = async () => {};
+  const chatProviders = require(path.join(appRoot, 'src/chat/chat-providers'));
+  const checkChatProviders = chatProviders.checkAllChatProviders;
+  const chatCommands = new Set(Object.values(config.chat_providers || {}).map(provider => provider.command).filter(Boolean));
+  chatProviders.checkAllChatProviders = () => checkChatProviders({
+    spawn: (command, args, options) => chatCommands.has(command)
+      ? spawn(command, args, options)
+      : spawn(path.join(home, 'unavailable-chat-provider'), [], { ...options, shell: false })
+  });
   const { startServer } = require(path.join(appRoot, 'src/server'));
   await startServer(db);
   let localReview = null;
@@ -286,7 +351,8 @@ async function main() {
     for await (const chunk of request) chunks.push(chunk);
     const changes = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
     if (request.method === 'POST' && url.pathname === '/control') {
-      for (const field of ['readError', 'partialAfter', 'failAfterSubmit', 'viewer', 'foreignCommentOnIdentity']) if (Object.hasOwn(changes, field)) state[field] = changes[field];
+      if (changes.resetReadCalls) { readCalls.length = 0; maxConcurrentReads = activeReads; }
+      for (const field of ['readError', 'partialAfter', 'failAfterSubmit', 'viewer', 'foreignCommentOnIdentity', 'checkRuns', 'commitStatuses']) if (Object.hasOwn(changes, field)) state[field] = changes[field];
       if (changes.providerResult) fs.writeFileSync(process.env.WORKSPACE_PROVIDER_GATE, JSON.stringify(changes.providerResult));
       if (changes.pr) Object.assign(state.prs.get(changes.key || 'example/alpha#42'), changes.pr);
       if (changes.policy) fs.writeFileSync(policy, changes.policy);
@@ -294,7 +360,7 @@ async function main() {
       persistHost();
     }
     response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify({ calls: state.calls, reviews: [...state.reviews.values()], home, providerGate: process.env.WORKSPACE_PROVIDER_GATE,
+    response.end(JSON.stringify({ calls: state.calls, readCalls, maxConcurrentReads, reviews: [...state.reviews.values()], home, providerGate: process.env.WORKSPACE_PROVIDER_GATE,
       analysis: db.prepare(`SELECT id, status, ${activityColumn} FROM analysis_runs`).all(),
       comments: db.prepare("SELECT id, review_id, source, status, file, side, line_start, line_end, body FROM comments WHERE source = 'user'").all() }));
   });

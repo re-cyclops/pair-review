@@ -18,6 +18,7 @@ const { rejectUnsafeRequest } = require('./utils/loopback-security');
 let db = null;
 let server = null;
 let chatSessionManager = null;
+let shutdownPromise = null;
 
 /**
  * Assemble the GET /health response body. Kept as a standalone factory so the
@@ -598,42 +599,36 @@ async function startServer(sharedDb = null, sharedPoolLifecycle = null, options 
 /**
  * Graceful shutdown handler
  */
-async function gracefulShutdown(signal) {
-  console.log('\nServer shutting down...');
-
-  // Close all active chat sessions
-  if (chatSessionManager) {
+function gracefulShutdown(signal) {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    console.log('\nServer shutting down...');
+    const { shutdownAnalyses } = require('./routes/shared');
+    // Stop accepting work before draining owned execution. Existing requests
+    // cannot admit another run once shutdownAnalyses closes the admission gate.
+    closeAllWS();
+    const closed = server ? new Promise(resolve => server.close(resolve)) : Promise.resolve();
+    const connectionDeadline = server ? setTimeout(() => server.closeAllConnections(), 5000) : null;
+    connectionDeadline?.unref();
     try {
-      await chatSessionManager.closeAll();
-    } catch (error) {
-      console.error('Error closing chat sessions:', error.message);
-    }
-  }
-
-  closeAllWS();
-
-  if (server) {
-    server.close(() => {
-      if (db) {
-        db.close((error) => {
-          if (error) {
-            console.error('Error closing database:', error.message);
-          }
-          process.exit(0);
-        });
-      } else {
-        process.exit(0);
+      await shutdownAnalyses();
+      if (chatSessionManager) {
+        try {
+          await chatSessionManager.closeAll();
+        } catch (error) {
+          console.error('Error closing chat sessions:', error.message);
+        }
       }
-    });
-    
-    // Force exit after 5 seconds if graceful shutdown fails
-    setTimeout(() => {
-      console.error('Could not close connections in time, forcefully shutting down');
-      process.exit(1);
-    }, 5000);
-  } else {
-    process.exit(0);
-  }
+      await closed;
+      // Include any already-started provider that registered during draining.
+      await shutdownAnalyses();
+      if (db?.open) db.close();
+      process.exit(signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : 0);
+    } finally {
+      clearTimeout(connectionDeadline);
+    }
+  })();
+  return shutdownPromise;
 }
 
 // Handle graceful shutdown
@@ -656,4 +651,4 @@ if (require.main === module) {
   startServer();
 }
 
-module.exports = { startServer, applyEnvOverrides, applyHostQueryCorrection, buildHealthPayload };
+module.exports = { startServer, gracefulShutdown, applyEnvOverrides, applyHostQueryCorrection, buildHealthPayload };

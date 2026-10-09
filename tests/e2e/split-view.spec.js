@@ -58,6 +58,21 @@ async function seedComment(page, reviewId, { file = FILE, line = 3, side = 'RIGH
 
 for (const mode of MODES) {
   test.describe(`Split diff view (${mode.name})`, () => {
+    test('diff options support keyboard selection and restore focus without exposing closed controls', async ({ page }) => {
+      await page.goto(mode.path);
+      await waitForDiffToRender(page);
+      const options = page.locator('#diff-options-btn');
+      await options.press('Enter');
+      const dialog = page.getByRole('dialog', { name: 'Diff options' });
+      await expect.poll(() => dialog.evaluate(element => element.contains(document.activeElement))).toBe(true);
+      await dialog.getByRole('button', { name: 'Split', exact: true }).press('Space');
+      await waitForDiffType(page, 'split');
+      await page.keyboard.press('Escape');
+      await expect(options).toBeFocused();
+      await dialog.getByRole('button', { name: 'Unified', exact: true }).focus();
+      await expect(options).toBeFocused();
+    });
+
     test('defaults to unified and toggles to split via the gear dropdown', async ({ page }) => {
       await page.goto(mode.path);
       await waitForDiffToRender(page);

@@ -253,7 +253,7 @@ function broadcastProgress(analysisId, progressData) {
  * @param {ChildProcess} childProcess - The spawned child process
  */
 function registerProcess(analysisId, childProcess, cancel) {
-  processCancellations.set(childProcess, cancel || (() => killChildSafely(childProcess)));
+  processCancellations.set(childProcess, cancel || (signal => killChildSafely(childProcess, { signal })));
   if (!activeProcesses.has(analysisId)) {
     activeProcesses.set(analysisId, new Set());
   }
@@ -278,7 +278,8 @@ function registerProcess(analysisId, childProcess, cancel) {
       }
     }
   });
-  if (isAnalysisCancelled(analysisId)) processCancellations.get(childProcess)();
+  if (activity.isStopping()) processCancellations.get(childProcess)('SIGKILL');
+  else if (isAnalysisCancelled(analysisId)) processCancellations.get(childProcess)();
 }
 
 /**
@@ -286,7 +287,7 @@ function registerProcess(analysisId, childProcess, cancel) {
  * @param {string} analysisId - Analysis ID
  * @returns {number} Number of processes killed
  */
-function killProcesses(analysisId) {
+function killProcesses(analysisId, signal = 'SIGTERM') {
   const processes = activeProcesses.get(analysisId);
   if (!processes || processes.size === 0) {
     return 0;
@@ -295,7 +296,7 @@ function killProcesses(analysisId) {
   let killed = 0;
   for (const proc of processes) {
     try {
-      if ((processCancellations.get(proc) || (() => killChildSafely(proc)))()) killed++;
+      if ((processCancellations.get(proc) || (signal => killChildSafely(proc, { signal })))(signal)) killed++;
     } catch (err) {
       // Process may have already exited
       logger.warn(`Failed to kill process: ${err.message}`);
@@ -306,13 +307,41 @@ function killProcesses(analysisId) {
 }
 
 /**
+ * Stop this executor's analyses and wait for actual child-close acknowledgements.
+ * Run admission stays closed for the remainder of this process's lifetime.
+ */
+async function shutdownAnalyses() {
+  activity.cancelOwnedRuns();
+  for (const [id, state] of activeAnalyses) {
+    if (!activity.terminal.has(state.status)) {
+      const requested = { ...state, status: 'cancellation_requested', progress: 'Executor shutting down' };
+      activeAnalyses.set(id, requested);
+      broadcastProgress(id, requested);
+    }
+  }
+  while (activeProcesses.size) {
+    // Subscribe before signalling; even an immediate close must be acknowledged.
+    const closed = [];
+    for (const processes of activeProcesses.values()) {
+      for (const child of processes) closed.push(new Promise(resolve => child.once('close', resolve)));
+    }
+    for (const id of activeProcesses.keys()) killProcesses(id);
+    const force = setTimeout(() => {
+      for (const id of activeProcesses.keys()) killProcesses(id, 'SIGKILL');
+    }, 1000);
+    try { await Promise.all(closed); } finally { clearTimeout(force); }
+  }
+  activity.cancelOwnedRuns(true);
+}
+
+/**
  * Check if an analysis has been cancelled
  * @param {string} analysisId - Analysis ID
  * @returns {boolean} True if cancelled
  */
 function isAnalysisCancelled(analysisId) {
   const analysis = activeAnalyses.get(analysisId);
-  return ['cancelled', 'cancellation_requested'].includes(analysis?.status);
+  return activity.isStopping() || ['cancelled', 'cancellation_requested'].includes(analysis?.status);
 }
 
 /**
@@ -610,6 +639,7 @@ module.exports = {
   broadcastSetupProgress,
   registerProcess,
   killProcesses,
+  shutdownAnalyses,
   isAnalysisCancelled,
   createProgressCallback,
   finalizeConsolidationLevel,

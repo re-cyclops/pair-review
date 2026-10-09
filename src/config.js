@@ -4,7 +4,8 @@ const path = require('path');
 const os = require('os');
 const childProcess = require('child_process');
 const logger = require('./utils/logger');
-const { digest, loadInstructionSources } = require('./utils/review-protocol');
+const { digest, loadInstructionSources, loadedProtocol } = require('./utils/review-protocol');
+const { prosePolicy } = require('./utils/review-prose');
 
 // Implementation matrix for per-area dispatch. Each operations module
 // exports an `IMPLEMENTED_MODES` Set lifted from its dispatcher's if/else
@@ -61,6 +62,7 @@ const CONFIG_LOCAL_FILE = path.join(CONFIG_DIR, 'config.local.json');
 const CONFIG_EXAMPLE_FILE = path.join(CONFIG_DIR, 'config.example.json');
 const PACKAGE_ROOT = path.join(__dirname, '..');
 const MANAGED_CONFIG_FILE = path.join(PACKAGE_ROOT, 'config.managed.json');
+const DERIVED_CONFIG_KEYS = ['_finalKeys', '_globalOverrides', '_protocol', 'globalInstructions'];
 
 const DEFAULT_CONFIG = {
   github_token: "",
@@ -384,12 +386,19 @@ async function loadConfig() {
   await ensureConfigDir();
 
   const localDir = path.join(process.cwd(), '.pair-review');
+  const userConfigDirectory = await fs.realpath(CONFIG_DIR);
+  const projectConfigDirectory = await fs.realpath(localDir).catch(error => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
   const sources = [
     { path: MANAGED_CONFIG_FILE,                         label: 'managed config',       layerName: 'managed',       required: false },
     { path: CONFIG_FILE,                                label: 'global config',        layerName: 'config',        required: true  },
     { path: CONFIG_LOCAL_FILE,                           label: 'global local config',  layerName: 'config.local',  required: false },
-    { path: path.join(localDir, 'config.json'),         label: 'project config',       layerName: 'project',       required: false },
-    { path: path.join(localDir, 'config.local.json'),   label: 'project local config', layerName: 'project.local', required: false },
+    ...(projectConfigDirectory === userConfigDirectory ? [] : [
+      { path: path.join(localDir, 'config.json'),       label: 'project config',       layerName: 'project',       required: false },
+      { path: path.join(localDir, 'config.local.json'), label: 'project local config', layerName: 'project.local', required: false },
+    ]),
   ];
 
   let mergedConfig = { ...DEFAULT_CONFIG };
@@ -435,6 +444,9 @@ async function loadConfig() {
       }
     }
   }
+  if (layers.some(layer => layer.name.startsWith('project') && Object.hasOwn(layer.data, 'instruction_files'))) {
+    throw new Error('instruction_files must be configured in managed or user configuration, not a project file');
+  }
 
   // Normalize legacy monorepos into one canonical repos map. Lowercase both
   // sides before merging so JS object identity matches DB COLLATE NOCASE.
@@ -474,6 +486,7 @@ async function loadConfig() {
   const globalInstructionsPath = path.join(CONFIG_DIR, 'global-instructions.md');
   const globalSource = { path: globalInstructionsPath, label: 'Global instructions', digest: null };
   sources.push(globalSource);
+  for (const key of DERIVED_CONFIG_KEYS) delete mergedConfig[key];
   try {
     const content = await fs.readFile(globalInstructionsPath, 'utf-8');
     globalSource.digest = digest(content);
@@ -489,7 +502,9 @@ async function loadConfig() {
 
   const included = await loadInstructionSources(mergedConfig.instruction_files);
   if (included.content) mergedConfig.globalInstructions = [mergedConfig.globalInstructions, included.content].filter(Boolean).join('\n\n');
+  prosePolicy(mergedConfig);
   sources.push(...included.sources);
+  mergedConfig._protocol = loadedProtocol(mergedConfig, layers, sources);
   return { config: mergedConfig, isFirstRun, layers, protocolSources: sources };
 }
 

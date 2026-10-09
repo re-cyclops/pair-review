@@ -36,7 +36,9 @@
   };
   const failingCheck = snapshot => {
     const latest = new Map();
-    for (const check of [...(snapshot?.checks?.items || [])].sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)) || Number(a.id) - Number(b.id))) latest.set(`${check.source}:${check.appId}:${check.name}`, check);
+    for (const check of [...(snapshot?.checks?.items || [])].sort((a, b) => Number(a.id) - Number(b.id) || String(a.startedAt || '').localeCompare(String(b.startedAt || '')))) {
+      if (check.revision && check.revision === snapshot.checks.revision) latest.set(`${check.source}:${check.appId}:${check.name}`, check);
+    }
     return [...latest.values()].find(check => ['failure', 'error', 'timed_out', 'action_required'].includes(check.conclusion) && externalUrl(check.url));
   };
   const render = (body, record, s, local, refresh) => {
@@ -97,7 +99,7 @@
       for (const check of checks?.items || []) {
         const item = element('div', null, { class: 'workspace-check' });
         item.append(externalLink(`${check.name} · ${check.status === 'completed' ? check.conclusion || 'unknown' : check.status}`, check.url),
-          element('span', `${check.source}${check.appId != null ? ` · app ${check.appId}` : ''} · ID ${check.id}`, { class: 'workspace-muted' }));
+          element('span', `${check.source}${check.appId != null ? ` · app ${check.appId}` : ''} · ID ${check.id} · revision ${check.revision || 'unknown'}${check.revision !== checks.revision ? ' · different revision; excluded from current totals' : ''}`, { class: 'workspace-muted' }));
         body.append(item);
       }
     }

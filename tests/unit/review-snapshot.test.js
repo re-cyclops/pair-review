@@ -175,4 +175,147 @@ describe('read-only review snapshots', () => {
       self: unknown.viewer.self, direct: unknown.viewer.requestedDirectly, pending: unknown.viewer.pendingReview })
       .toEqual({ team: null, teamNeeds: null, self: null, direct: null, pending: null });
   });
+
+  it('keeps wrong-revision results out of current-head and test-merge check evidence', async () => {
+    const client = fixture();
+    const get = client.octokit.rest.pulls.get;
+    client.octokit.rest.pulls.get = async () => ({ data: { ...(await get()).data, merge_commit_sha: 'merge' } });
+    client.octokit.rest.checks.listForRef = ({ ref }) => result({ check_runs: [{
+      id: 1, name: 'ci', head_sha: ref === 'head' ? 'old-head' : 'head',
+      status: 'completed', conclusion: 'success'
+    }] });
+    const snapshot = await fetchReviewSnapshot(client, identity);
+    expect(snapshot.checks).toMatchObject({ availability: 'partial', counts: { passed: 0 } });
+    expect(snapshot.checks.items[0].revision).toBe('old-head');
+    expect(snapshot.testMerge).toMatchObject({ availability: 'partial', counts: { passed: 0 } });
+    expect(snapshot.testMerge.items[0].revision).toBe('head');
+    expect(snapshot.policy.requiredChecks).toEqual([
+      { name: 'ci', appId: null, presentOnHead: false, presentOnTestMerge: false }
+    ]);
+  });
+
+  it.each([[401, 'unauthenticated'], [429, 'rate-limited'], [503, 'offline-or-unsupported']])(
+    'keeps an unobserved snapshot unavailable after HTTP %s', async (status, reason) => {
+      const client = fixture();
+      client.octokit.rest.pulls.get = async () => { throw Object.assign(new Error('Host read failed'), { status }); };
+      expect(await fetchReviewSnapshot(client, identity))
+        .toMatchObject({ availability: 'unavailable', error: reason, lastSuccessAt: null });
+    });
+
+  it('retains successful evidence as stale when a subsequent refresh fails', async () => {
+    const client = fixture();
+    const before = await fetchReviewSnapshot(client, identity);
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 6000);
+    try {
+      client.octokit.rest.pulls.get = async () => { throw Object.assign(new Error('Host offline'), { status: 503 }); };
+      const stale = await fetchReviewSnapshot(client, identity, { refresh: true });
+      expect(stale).toMatchObject({ availability: 'stale', headSha: before.headSha, lastSuccessAt: before.fetchedAt });
+      expect(stale.approvals).toEqual(before.approvals);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('does not share GitHub evidence or assume GraphQL policy capabilities on an alternate host', async () => {
+    const github = fixture();
+    github.octokit.rest.pulls.listReviews = () => result([{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED' }]);
+    expect((await fetchReviewSnapshot(github, identity)).approvals.observedCount).toBe(1);
+    const alternate = fixture();
+    alternate.token = github.token;
+    alternate.apiHost = 'https://git.example.invalid/api/v3';
+    alternate.octokit.rest.repos.getRulesForBranch = async () => { throw Object.assign(new Error('Unsupported'), { status: 404 }); };
+    const snapshot = await fetchReviewSnapshot(alternate, identity);
+    expect(snapshot).toMatchObject({
+      identity: { host: alternate.apiHost },
+      approvals: { observedCount: 0, requiredCount: null },
+      threads: { availability: 'unavailable', reason: 'host-capability-unavailable', unresolved: null },
+      policy: { availability: 'unavailable' }
+    });
+  });
+
+  it('counts effective reviewers once without letting comments or pending drafts erase their opinions', async () => {
+    const client = fixture();
+    client.octokit.rest.pulls.listReviews = () => result([
+      ['reviewer', 'APPROVED'], ['reviewer', 'APPROVED'], ['reviewer', 'COMMENTED'],
+      ['kim', 'CHANGES_REQUESTED'], ['kim', 'APPROVED'], ['pat', 'PENDING'], ['reviewer', 'PENDING']
+    ].map(([login, state], index) => ({ id: index + 1, user: { login }, state, submitted_at: `2026-01-0${index + 1}`, commit_id: 'head' })));
+    const snapshot = await fetchReviewSnapshot(client, identity);
+    expect(snapshot.approvals.observedCount).toBe(2);
+    expect(snapshot.approvals.effective.map(review => [review.reviewer.login, review.state]))
+      .toEqual([['reviewer', 'APPROVED'], ['kim', 'APPROVED']]);
+    expect(snapshot.viewer).toMatchObject({ effectiveReview: { state: 'APPROVED' }, pendingReview: true, needsYou: true, soleBlocker: null });
+  });
+
+  it.each(['direct', 'team'])('keeps an explicit %s re-request actionable after the viewer approved', async kind => {
+    const client = fixture();
+    client.octokit.rest.pulls.listReviews = () => result([{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', commit_id: 'head' }]);
+    client.octokit.rest.pulls.listRequestedReviewers = () => result({
+      users: kind === 'direct' ? [{ login: 'reviewer' }] : [],
+      teams: kind === 'team' ? [{ id: 7, slug: 'maintainers' }] : []
+    });
+    expect((await fetchReviewSnapshot(client, identity)).viewer)
+      .toMatchObject({ effectiveReview: { state: 'APPROVED' }, needsYou: true, requestedDirectly: kind === 'direct', requestedViaTeam: kind === 'team' });
+  });
+
+  it.each([0, 1])('distinguishes an observed requirement of %s approvals from an unknown requirement', async required => {
+    const client = fixture();
+    client.octokit.rest.repos.getBranchProtection = () => result({ required_pull_request_reviews: { required_approving_review_count: required } });
+    expect((await fetchReviewSnapshot(client, identity)).approvals).toMatchObject({ observedCount: 0, requiredCount: required });
+  });
+
+  it('keeps partial code-owner rules and somebody else’s change request separate from viewer responsibility', async () => {
+    const client = fixture();
+    client.octokit.rest.pulls.listReviews = () => result([
+      { id: 1, user: { login: 'reviewer' }, state: 'APPROVED', commit_id: 'head' },
+      { id: 2, user: { login: 'maintainer' }, state: 'CHANGES_REQUESTED', commit_id: 'head' }
+    ]);
+    client.octokit.rest.repos.getRulesForBranch = () => Promise.resolve({
+      data: [{ type: 'pull_request', parameters: { required_approving_review_count: 3, require_code_owner_review: true } }],
+      headers: { link: '<next>; rel="next"' }
+    });
+    const snapshot = await fetchReviewSnapshot(client, identity);
+    expect(snapshot).toMatchObject({
+      approvals: { observedCount: 1, requiredCount: null },
+      policy: { availability: 'partial', codeOwnersRequired: true, requirementKnowledge: 'partial' },
+      viewer: { effectiveReview: { state: 'APPROVED' }, needsYou: false, soleBlocker: null }
+    });
+    expect(snapshot.approvals.effective.find(review => review.reviewer.login === 'maintainer').state).toBe('CHANGES_REQUESTED');
+  });
+
+  it('separates check sources, reruns, pending and non-passing conclusions from a failing test merge', async () => {
+    const client = fixture();
+    const get = client.octokit.rest.pulls.get;
+    client.octokit.rest.pulls.get = async () => ({ data: { ...(await get()).data, merge_commit_sha: 'merge' } });
+    const runs = [
+      ['pass', 'completed', 'success'], ['fail', 'completed', 'failure'],
+      ['skip', 'completed', 'skipped'], ['neutral', 'completed', 'neutral'],
+      ['cancel', 'completed', 'cancelled'], ['action', 'completed', 'action_required'],
+      ['queued', 'queued', null], ['running', 'in_progress', null]
+    ].map(([name, status, conclusion], index) => ({ id: index + 1, name, status, conclusion, app: { id: 1 }, started_at: '2026-01-01' }));
+    runs.push(
+      { id: 9, name: 'ci', app: { id: 1 }, status: 'completed', conclusion: 'success', started_at: '2026-01-01' },
+      { id: 10, name: 'ci', app: { id: 1 }, status: 'queued', conclusion: null, started_at: '2026-01-02' },
+      { id: 11, name: 'ci', app: { id: 2 }, status: 'completed', conclusion: 'success', started_at: '2026-01-02' }
+    );
+    client.octokit.rest.checks.listForRef = ({ ref }) => result({ check_runs: ref === 'head' ? runs : [
+      { id: 20, name: 'merge-build', status: 'completed', conclusion: 'failure', head_sha: 'merge' }
+    ] });
+    client.octokit.rest.repos.listCommitStatusesForRef = ({ ref }) => result(ref === 'head'
+      ? [{ id: 12, context: 'ci', state: 'error', created_at: '2026-01-02' }] : []);
+    const snapshot = await fetchReviewSnapshot(client, identity);
+    expect(snapshot.checks.counts).toEqual({ passed: 2, failed: 2, pending: 3, skipped: 1, neutral: 1, cancelled: 1, actionRequired: 1, unknown: 0 });
+    expect(snapshot.testMerge).toMatchObject({ revision: 'merge', counts: { passed: 0, failed: 1 } });
+  });
+
+  it.each([false, true])('orders queued attempts without start timestamps (latest pending: %s)', async latestPending => {
+    const client = fixture();
+    client.octokit.rest.checks.listForRef = () => result({ check_runs: [
+      { id: 1, name: 'ci', app: { id: 1 }, status: latestPending ? 'completed' : 'queued',
+        conclusion: latestPending ? 'success' : null, started_at: latestPending ? '2026-01-01' : null },
+      { id: 2, name: 'ci', app: { id: 1 }, status: latestPending ? 'queued' : 'completed',
+        conclusion: latestPending ? null : 'success', started_at: latestPending ? null : '2026-01-02' }
+    ] });
+    expect((await fetchReviewSnapshot(client, identity)).checks.counts)
+      .toMatchObject({ passed: latestPending ? 0 : 1, pending: latestPending ? 1 : 0 });
+  });
 });

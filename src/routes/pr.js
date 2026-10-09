@@ -22,6 +22,7 @@ const { getGeneratedFilePatterns } = require('../git/gitattributes');
 const { getShaAbbrevLength, DEFAULT_SHA_ABBREV_LENGTH } = require('../git/sha-abbrev');
 const { normalizeRepository, resolveRenamedFile, resolveRenamedFileOld } = require('../utils/paths');
 const { mergeInstructions } = require('../utils/instructions');
+const { captureRunProtocol } = require('../utils/review-protocol');
 const Analyzer = require('../ai/analyzer');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs').promises;
@@ -66,7 +67,7 @@ const { getProviderClass, createProvider } = require('../ai/provider');
 const { CommentRepository } = require('../database');
 const { runExecutableAnalysis } = require('./executable-analysis');
 const analysesRouter = require('./analyses');
-const { worktreeLock } = require('../git/worktree-lock');
+const { WorktreeLockManager } = require('../git/worktree-lock');
 const router = express.Router();
 
 /**
@@ -555,10 +556,10 @@ router.post('/api/pr/:owner/:repo/:number/refresh', async (req, res) => {
     const worktreeManagerForLock = new GitWorktreeManager(db);
     const existingWorktreePath = await worktreeManagerForLock.getWorktreePath({ owner, repo, number: prNumber });
     if (existingWorktreePath) {
-      const lockState = worktreeLock.isLocked(existingWorktreePath);
+      const lockState = new WorktreeLockManager(db).isLocked(existingWorktreePath);
       if (lockState.locked) {
         return res.status(409).json({
-          error: 'Worktree is in use by stack analysis',
+          error: 'Worktree is in use by another operation',
           holderId: lockState.holderId
         });
       }
@@ -1512,7 +1513,7 @@ router.post('/api/parse-pr-url', (req, res) => {
 async function handleExecutablePRAnalysis(req, res, {
   reviewId, review, prNumber, owner, repo, repository, worktreePath, prMetadata,
   selectedProvider, selectedModel, repoInstructions, requestInstructions,
-  combinedInstructions, runId, analysisId, reviewRepo, poolLifecycle, providerOverrides
+  runId, analysisId, reviewRepo, poolLifecycle, providerOverrides
 }) {
   const prContext = {
     number: prNumber, owner, repo,
@@ -1543,7 +1544,7 @@ async function handleExecutablePRAnalysis(req, res, {
     registerProcessForCancellation
   }, {
     logLabel: `PR #${prNumber}`,
-    buildContext: (_r, { selectedModel: model, requestInstructions: customInstructions }) => ({
+    buildContext: (_r, { selectedModel: model }) => ({
       title: prMetadata.title || `PR #${prNumber}`,
       description: prMetadata.description || '',
       cwd: worktreePath,
@@ -1551,8 +1552,7 @@ async function handleExecutablePRAnalysis(req, res, {
       baseSha: prMetadata.base_sha || null,
       headSha: prMetadata.head_sha || null,
       baseBranch: prMetadata.base_branch || null,
-      headBranch: prMetadata.head_branch || null,
-      customInstructions: customInstructions || null
+      headBranch: prMetadata.head_branch || null
     }),
     buildHookPayload: () => ({
       mode: 'pr',
@@ -1710,12 +1710,12 @@ router.post('/api/pr/:owner/:repo/:number/analyses', async (req, res) => {
       });
     }
 
-    // Reject if worktree is locked by another operation (e.g. stack analysis)
+    // Reject before setup; the run repository checks again before insertion.
     if (worktreePath) {
-      const lockState = worktreeLock.isLocked(worktreePath);
+      const lockState = new WorktreeLockManager(db).isLocked(worktreePath);
       if (lockState.locked) {
         return res.status(409).json({
-          error: 'Worktree is in use by stack analysis',
+          error: 'Worktree is in use by another operation',
           holderId: lockState.holderId
         });
       }
@@ -1830,7 +1830,6 @@ router.post('/api/pr/:owner/:repo/:number/analyses', async (req, res) => {
         selectedModel: model,
         repoInstructions,
         requestInstructions,
-        combinedInstructions,
         runId,
         analysisId,
         reviewRepo,
@@ -1853,7 +1852,8 @@ router.post('/api/pr/:owner/:repo/:number/analyses', async (req, res) => {
       requestInstructions,
       headSha: prMetadata.head_sha || null,
       configType: 'single',
-      levelsConfig
+      levelsConfig,
+      protocol: captureRunProtocol(appConfig, { provider, model, tier, levels: levelsConfig, ...providerOverrides })
     });
 
     const initialStatus = {

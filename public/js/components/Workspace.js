@@ -26,6 +26,7 @@
   class Workspace {
     constructor() {
       this.runs = new Map();
+      this.activityEvents = null;
       this.reviews = [];
       this.contextVersion = 0;
       this.evidenceGeneration = 0;
@@ -44,10 +45,12 @@
       window.wsClient?.subscribe('index:analyses', message => {
         if (message.type === 'subscribed') { this.refresh().then(() => this.refresh()); return; }
         if (message.type !== 'activity' || message.run?.parentRunId) return;
-        if (this.identity && message.dbId && message.dbId !== this.identity.dbId) return;
+        if (this.identity && ((message.dbId && message.dbId !== this.identity.dbId)
+          || (message.instanceId && message.instanceId !== this.identity.instanceId))) return;
         const current = this.runs.get(message.run.analysisId);
         if (current && current.sequence >= message.run.sequence) return;
         this.runs.set(message.run.analysisId, { ...message.run, observation: settled.has(message.run.status) ? 'recorded' : 'live' });
+        this.activityEvents?.add(message.run.analysisId);
         this.renderActivity();
         this.notify(message.run);
       });
@@ -174,7 +177,7 @@
       this.register('local', 'Local reviews', () => navigate('/?tab=local-tab'));
       this.register('drafts', 'Saved drafts · ready to preview', () => navigate('/?view=drafts'));
       this.register('activity', 'Show analysis activity', () => this.showActivity());
-      this.register('protocol', 'Inspect effective review protocol', () => this.showProtocol());
+      this.register('protocol', 'Inspect effective review protocol', () => this.showProtocol(window.prManager?.analysisHistoryManager?.getSelectedRunId()));
       this.register('settings', 'Open settings', () => navigate('/settings'));
       this.register('theme', 'Change light / dark / system theme', () => document.querySelector('#theme-toggle')?.click());
       this.register('analyze', 'Configure analysis…', () => window.prManager.triggerAIAnalysis(), { available: () => !!window.prManager?.analysisConfigModal });
@@ -380,6 +383,8 @@
     async refresh() {
       if (this.refreshing) return this.refreshing;
       clearTimeout(this.timer);
+      const events = new Set();
+      this.activityEvents = events;
       this.refreshing = (async () => {
         try {
           const data = await json('/api/analyses/activity');
@@ -388,6 +393,7 @@
           if (previous && (previous.dbId !== data.dbId || previous.instanceId !== data.instanceId)) {
             this.contextVersion++;
             this.runs.clear();
+            events.clear();
             this.reviews = [];
             this.reviewsAt = 0;
             this.reviewLoad = null;
@@ -415,14 +421,15 @@
             const current = this.runs.get(run.analysisId);
             next.set(run.analysisId, current && current.sequence > run.sequence ? current : run);
           }
-          // Events that raced this snapshot remain authoritative until the next reconciliation.
-          for (const [id, run] of this.runs) if (!next.has(id) && new Date(run.lastEventAt) > new Date(data.observedAt)) next.set(id, run);
+          // Preserve events received during this request without relying on wall-clock ordering.
+          for (const [id, run] of this.runs) if (!next.has(id) && events.has(id)) next.set(id, run);
           this.runs = next;
           this.available = true;
           for (const run of this.runs.values()) this.notify(run);
         } catch { this.available = false; }
         finally {
           this.refreshing = null;
+          this.activityEvents = null;
           this.renderActivity();
           this.timer = setTimeout(() => this.refresh(), document.hidden ? 60000 : 15000);
         }
@@ -500,15 +507,32 @@
         content.replaceChildren();
         const defaults = receipt['Server defaults'] || {};
         const captured = receipt['Selected run (captured configuration)'];
+        const settingSources = receipt['Server setting sources'] || {};
+        const policy = receipt['Configured outgoing prose policy'] || {};
         const facts = node('dl');
         const fact = (label, value) => facts.append(node('dt', label), node('dd', value));
-        fact('Analysis default', `${defaults.provider || 'Unknown'} · ${defaults.model || 'unresolved default'}`);
-        fact('Public comment format', `${defaults.commentFormat || 'Unknown'} · external comments ${defaults.externalComments ? 'enabled' : 'disabled'}`);
+        fact('Single-provider default', `${defaults.provider || 'Unknown'} · ${defaults.model || 'unresolved default'}`);
+        if (defaults.councilId) fact('Configured default council', `${defaults.councilId} (${settingSources.default_council_id?.source || 'source not recorded'}); resolved when starting analysis, subject to repository and per-run overrides`);
+        fact('Public comment format', `${defaults.commentFormat || 'Unknown'} (${settingSources.comment_format?.source || 'source not recorded'}) · external comments ${defaults.externalComments ? 'enabled' : 'disabled'}`);
         fact('Chat configuration', `${defaults.chatProvider || 'Unknown'} · ${defaults.chatModel || 'provider default'} (separate from analysis)`);
+        fact('Writing profile', `${policy.profile || 'None configured'} (${policy.profileSource || 'source not recorded'})`);
+        const checks = policy.rules || [];
+        fact('Outgoing prose checks', checks.length
+          ? `${checks.filter(rule => rule.severity === 'blocking').length} blocking, ${checks.filter(rule => rule.severity === 'advisory').length} advisory; checked against selected text in the final publication preview`
+          : 'No structural prose checks configured; human judgment is still required');
         const sources = receipt['Configuration sources'] || [];
         fact('Loaded policy', receipt['Instruction content loaded']?.present ? 'Instruction content was loaded; see receipt for hashes and precedence' : 'No global instruction content loaded');
-        fact('Disk changes', sources.some(source => source.restartRequired) ? 'Restart required for future runs; current runs keep captured configuration' : 'No change detected in readable configuration sources');
-        if (captured) fact('Selected run', 'Captured configuration below describes this run, not current server defaults');
+        fact('Disk changes', sources.some(source => source.restartRequired) ? 'Restart required for future runs; current runs keep captured configuration'
+          : sources.some(source => source.availability === 'unavailable') ? 'Some sources could not be read; disk changes are unknown'
+            : 'No change detected in observed configuration sources');
+        if (captured) {
+          fact('Selected run', `${captured.provider || 'Unknown provider'} · ${captured.model || 'unresolved default'} · ${captured.status}`);
+          fact('Captured run policy', captured.protocol
+            ? `${captured.protocol.prosePolicy?.profile || 'No named profile'}; captured inputs, source hashes and per-run/voice overrides are in the receipt below`
+            : 'No protocol snapshot was recorded. Current server defaults do not describe this run');
+          const voices = receipt['Council voice receipts'] || [];
+          if (voices.length) fact('Council voices', voices.map(voice => `${voice.provider} · ${voice.model || 'unresolved default'} · ${voice.status}`).join('; '));
+        }
         content.append(facts, node('p', 'Instructions guide behavior; they are not an OS sandbox or proof of correctness. A configured default does not identify the served model.', { class: 'workspace-muted' }));
         const details = node('details');
         details.append(node('summary', 'Full protocol receipt'));

@@ -130,11 +130,11 @@ function buildVoiceContext(voice, idx, instructions, progressCallback, db, provi
  * @param {number|string} reviewId - Review ID
  * @param {string} worktreePath - Path to the git worktree
  * @param {Object} prMetadata - PR metadata
- * @param {Object} options - { analysisId, timeout, requestInstructions, progressCallback, logPrefix }
+ * @param {Object} options - { analysisId, timeout, instructions, progressCallback, logPrefix }
  * @returns {Promise<Object>} { suggestions, summary }
  */
 async function runExecutableVoice(voiceProvider, reviewId, worktreePath, prMetadata, options) {
-  const { analysisId, timeout, requestInstructions, progressCallback, logPrefix } = options;
+  const { analysisId, timeout, instructions, progressCallback, logPrefix } = options;
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pair-review-exec-'));
   try {
     const executableContext = {
@@ -149,7 +149,7 @@ async function runExecutableVoice(voiceProvider, reviewId, worktreePath, prMetad
       headBranch: prMetadata.head_branch || null,
       scopeStart: prMetadata.scopeStart || null,
       scopeEnd: prMetadata.scopeEnd || null,
-      customInstructions: [requestInstructions, options.reviewBaseline].filter(Boolean).join('\n\n') || null,
+      customInstructions: [mergeInstructions(instructions), options.reviewBaseline].filter(Boolean).join('\n\n') || null,
     };
 
     // Generate scoped diff file when provider expects diff_path
@@ -529,7 +529,8 @@ class Analyzer {
           repoInstructions,
           requestInstructions,
           headSha,
-          diff: diffSnapshot
+          diff: diffSnapshot,
+          protocol: options.protocol || null
         });
         logger.info(`${logPrefix}Created analysis_run record: ${runId}`);
       } catch (createError) {
@@ -3181,7 +3182,8 @@ File-level suggestions should NOT have a line number. They apply to the entire f
           headSha,
           diff: diffSnapshot,
           configType: 'council',
-          levelsConfig: enabledLevels
+          levelsConfig: enabledLevels,
+          protocol: options.protocol || null
         });
         logger.info(`[ReviewerCouncil] Created parent analysis_run: ${parentRunId}`);
       } catch (err) {
@@ -3224,7 +3226,7 @@ File-level suggestions should NOT have a line number. They apply to the entire f
       if (isExecutable) {
         const result = await runExecutableVoice(voiceProvider, reviewId, worktreePath, prMetadata, {
           analysisId, timeout: voiceTimeout,
-          requestInstructions: voiceRequestInstructions,
+          instructions: { ...instructions, requestInstructions: voiceRequestInstructions },
           reviewBaseline,
           progressCallback: voiceProgressCallback,
           logPrefix: `[${reviewerLabel}] `
@@ -3326,10 +3328,10 @@ File-level suggestions should NOT have a line number. They apply to the entire f
           provider: voice.provider,
           model: voice.model,
           tier: voiceTier,
-          customInstructions: instructions?.requestInstructions || null,  // Only request-level; global/repo stored in their own columns
+          customInstructions: voiceRequestInstructions,
           globalInstructions: instructions?.globalInstructions || null,
           repoInstructions: instructions?.repoInstructions || null,
-          requestInstructions: instructions?.requestInstructions || null,
+          requestInstructions: voiceRequestInstructions,
           headSha,
           diff: diffSnapshot,
           parentRunId,
@@ -3345,7 +3347,7 @@ File-level suggestions should NOT have a line number. They apply to the entire f
         if (isExecutable) {
           const result = await runExecutableVoice(voiceProvider, reviewId, worktreePath, prMetadata, {
             analysisId, timeout: voiceTimeout,
-            requestInstructions: voiceRequestInstructions,
+            instructions: { ...instructions, requestInstructions: voiceRequestInstructions },
             reviewBaseline,
             progressCallback: voiceProgressCallback,
             logPrefix: `[${reviewerLabel}] `

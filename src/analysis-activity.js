@@ -11,6 +11,7 @@ const instanceId = randomUUID();
 const context = new AsyncLocalStorage();
 const owners = new Map();
 const processCounts = new Map();
+let stopping = false;
 const setProcessCount = (id, count) => count ? processCounts.set(id, count) : processCounts.delete(id);
 const terminal = new Set(['completed', 'partial', 'failed', 'cancelled', 'interrupted']);
 const stages = { 1: 'Reading changed lines', 2: 'Reading file context', 3: 'Reading codebase', 4: 'Consolidating findings', exec: 'Running reviewer' };
@@ -71,6 +72,12 @@ const begin = (db, id) => {
 
 const update = (db, id, progress = {}) => {
   const previous = read(db, id);
+  if (previous?.entryPoint === 'result-import' && previous.instanceId === null) {
+    const row = db.prepare('SELECT total_suggestions FROM analysis_runs WHERE id = ?').get(id);
+    if (!row || row.total_suggestions === previous.suggestionsCount) return previous;
+    // Imported results have no observed executor; enrich counts, not lifecycle.
+    return save(db, { ...previous, suggestionsCount: row.total_suggestions, lastEventAt: new Date().toISOString() });
+  }
   if (!previous || previous.instanceId !== instanceId) return previous;
   // Late stream events cannot revive a settled run. Completion enrichment may refine it to partial.
   if (terminal.has(previous.status) && !['completed', 'failed', 'cancelled'].includes(progress.status)) return previous;
@@ -109,8 +116,28 @@ const requestCancellation = (db, id) => {
 
 const acknowledgeCancellation = id => progress(id, { status: 'cancelled' });
 
+// Shutdown belongs to this executor, never to another process sharing the DB.
+const cancelOwnedRuns = (acknowledged = false) => {
+  stopping = true;
+  for (const [id, owner] of owners) {
+    const db = owner.deref();
+    if (!db?.open) continue;
+    const state = read(db, id);
+    if (!state || state.instanceId !== instanceId || (terminal.has(state.status) && state.status !== 'cancelled')) continue;
+    if (!acknowledged) {
+      requestCancellation(db, id);
+    } else if (!processCounts.has(id)) {
+      db.prepare(`UPDATE analysis_runs SET status = 'cancelled',
+        completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
+        WHERE id = ? AND status <> 'cancelled'`).run(id);
+      if (state.status !== 'cancelled') update(db, id, { status: 'cancelled' });
+    }
+  }
+};
+
 const snapshot = db => {
   const rows = db.prepare(`SELECT a.id, a.review_id, a.status, a.provider, a.model, a.head_sha,
+    a.total_suggestions,
     a.started_at, a.completed_at, a.parent_run_id, a.activity_state, r.review_type, r.pr_number, r.repository
     FROM analysis_runs a JOIN reviews r ON r.id = a.review_id WHERE a.parent_run_id IS NULL
     AND (a.status = 'running' OR (a.activity_state IS NOT NULL AND
@@ -127,6 +154,7 @@ const snapshot = db => {
     };
     const owned = stored.instanceId === instanceId && owners.get(row.id)?.deref() === db;
     return { ...stored, observation: terminal.has(stored.status) ? 'recorded' : owned ? 'live' : 'unavailable',
+      suggestionsCount: stored.entryPoint === 'result-import' ? row.total_suggestions : stored.suggestionsCount,
       ...(terminal.has(stored.status) || owned ? {} : { status: 'unknown', stage: 'Owning executor is not observed on this instance' }) };
   });
   const draftCount = db.prepare(`SELECT COUNT(*) AS count FROM (${getDraftStateQuery()}) WHERE draft_count > 0 OR has_summary`).get().count;
@@ -154,5 +182,16 @@ const claimNotification = (db, id) => {
   return result.changes === 1;
 };
 
-module.exports = { acknowledgeCancellation, begin, claimNotification, context, identity, instanceId,
-  markSeen, progress, requestCancellation, setProcessCount, snapshot, terminal, update };
+// A recorded terminal status alone cannot acknowledge children still shutting
+// down. Unobserved nonterminal rows also block removal; absence of ownership is
+// not evidence that an executor stopped.
+const reviewInProgress = (db, reviewId) => db.prepare(
+  'SELECT id, status, activity_state FROM analysis_runs WHERE review_id = ?'
+).all(reviewId).some(row => {
+  const stored = parse(row.activity_state);
+  return processCounts.has(row.id) || !terminal.has(row.status)
+    || stored?.status && !terminal.has(stored.status);
+});
+
+module.exports = { acknowledgeCancellation, begin, cancelOwnedRuns, claimNotification, context, identity, instanceId,
+  isStopping: () => stopping, markSeen, progress, requestCancellation, reviewInProgress, setProcessCount, snapshot, terminal, update };

@@ -1,6 +1,11 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { once } from 'node:events';
+import { spawn } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { createTestDatabase } from '../utils/schema.js';
 const { createSubmissionHost } = require('../utils/submission-host');
@@ -44,7 +49,7 @@ describe('Manifest-bound native review publication', () => {
   afterEach(async () => {
     if (server) { const stopped = new Promise(resolve => server.close(resolve)); server.closeAllConnections(); await stopped; }
     await host?.close();
-    db?.close();
+    if (db?.open) db.close();
   });
 
   it('keeps the configured host link instead of an upstream API presentation URL', async () => {
@@ -87,6 +92,48 @@ describe('Manifest-bound native review publication', () => {
       .toEqual(manifest.comments.map(comment => ({ body: comment.body, file: comment.wire.path })));
     expect(remote.comments[1]).toMatchObject({ side: 'LEFT', startLine: 2, line: 4 });
     expect(db.prepare('SELECT status, included FROM comments WHERE id = ?').get(excluded)).toEqual({ status: 'active', included: 0 });
+  });
+
+  it('checks only selected prose while publishing technical Markdown byte for byte', async () => {
+    app.get('config').review_prose = { profile: 'Fixture style', rules: { 'long-dashes': 'advisory', 'terminal-period': 'advisory' } };
+    const body = 'This might fail\u2014under cancellation. Could we retain `literal.name.`?\n\n```suggestion\nconst label = \"keep\u2014this.\";\n```\n';
+    const id = await draft(body);
+    await draft('Excluded\u2014prose.', { included: false });
+    const manifest = await preview();
+    expect(manifest.prose.diagnostics).toMatchObject([{ key: db.prepare('SELECT draft_key FROM comments WHERE id = ?').get(id).draft_key, rule: 'long-dashes', severity: 'advisory' }]);
+    expect(manifest.prose.diagnostics).toHaveLength(1);
+    expect((await publish(manifest)).data.receipt.state).toBe('submitted');
+    expect([...host.state.reviews.values()][0].comments.map(comment => comment.body)).toEqual([body]);
+  });
+
+  it('preserves blocked prose until an explicit saved edit receives a new confirmation', async () => {
+    app.get('config').review_prose = { profile: 'Fixture style', rules: { 'terminal-period': 'blocking' } };
+    const id = await draft('Keep `literal.name.`.');
+    const blocked = await preview();
+    expect(blocked.prose.diagnostics).toMatchObject([{ rule: 'terminal-period', severity: 'blocking' }]);
+    expect((await publish(blocked)).status).toBe(409);
+    expect(host.state.calls).toEqual([]);
+    const original = db.prepare('SELECT * FROM comments WHERE id = ?').get(id);
+    expect(original.body).toBe('Keep `literal.name.`.');
+    const replacement = 'Could we keep `literal.name.`?';
+    await request(`/comments/${id}`, 'PUT', { body: replacement, expected_revision: original.revision, draft_key: original.draft_key });
+    expect((await publish(blocked)).status).toBe(409);
+    expect(host.state.calls).toEqual([]);
+    const accepted = await preview();
+    expect(accepted.prose.diagnostics).toEqual([]);
+    expect((await publish(accepted)).data.receipt.state).toBe('submitted');
+    expect([...host.state.reviews.values()][0].comments[0].body).toBe(replacement);
+  });
+
+  it('invalidates the old manifest when the effective outgoing policy changes', async () => {
+    await draft('Potential failure\u2014verify the trigger');
+    const original = await preview();
+    app.set('config', { ...app.get('config'), review_prose: { profile: 'New fixture style', rules: { 'long-dashes': 'advisory' } } });
+    const stale = await publish(original);
+    expect(stale.status).toBe(409);
+    expect(stale.data.manifest.prose).toMatchObject({ profile: 'New fixture style', diagnostics: [{ rule: 'long-dashes' }] });
+    expect(host.state.calls).toEqual([]);
+    expect((await publish(await preview())).data.receipt.state).toBe('submitted');
   });
 
   it.each(['body', 'head', 'account'])('invalidates authorization when %s changes after preview', async change => {
@@ -326,6 +373,99 @@ describe('Manifest-bound native review publication', () => {
     expect([...host.state.reviews.values()][0].comments.map(comment => comment.body)).toEqual(Array.from({ length: 11 }, (_, index) => `Host finding ${index}`));
     expect((await request('/submissions')).data.receipts.map(receipt => receipt.state).sort()).toEqual(['submitted', 'superseded']);
   });
+
+  it('resumes only unattempted comments after an executor dies between acknowledged batches', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'pair-review-publisher-crash-'));
+    let child, childClosed, inFlight, release, deadlineTimer;
+    try {
+      const bodies = Array.from({ length: 11 }, (_, index) => `Durable finding ${index}`);
+      for (const [index, body] of bodies.entries()) await draft(body, { line_start: index + 1 });
+      const filename = join(home, 'review.db');
+      await db.backup(filename);
+      db.close();
+      db = new (require('better-sqlite3'))(filename);
+      db.pragma('foreign_keys = ON');
+      app.set('db', db);
+      repo = new CommentRepository(db);
+
+      let reachedCheckpoint;
+      const checkpoint = new Promise(resolve => { reachedCheckpoint = resolve; });
+      const held = new Promise(resolve => { release = resolve; });
+      host.state.beforePullRead = () => {
+        if (host.state.batches === 1) {
+          reachedCheckpoint();
+          return held;
+        }
+      };
+      const script = `
+        const express = require('express');
+        const db = new (require('better-sqlite3'))(process.argv[1]);
+        db.pragma('foreign_keys = ON');
+        const app = express();
+        app.use(express.json());
+        app.set('db', db);
+        app.set('config', JSON.parse(process.argv[2]));
+        app.use(require('./src/routes/reviews'));
+        const server = app.listen(0, '127.0.0.1', () => {
+          process.send({ base: 'http://127.0.0.1:' + server.address().port + '/api/reviews/1' });
+        });
+      `;
+      child = spawn(process.execPath, ['-e', script, filename, JSON.stringify(app.get('config'))], {
+        cwd: fileURLToPath(new URL('../../', import.meta.url)),
+        env: { ...process.env, HOME: home, USERPROFILE: home },
+        stdio: ['ignore', 'ignore', 'pipe', 'ipc']
+      });
+      let stderr = '';
+      child.stderr.on('data', chunk => { stderr += chunk; });
+      childClosed = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal })));
+      const deadline = new Promise((resolve, reject) => {
+        deadlineTimer = setTimeout(() => reject(new Error(`Publisher did not reach its durable checkpoint: ${stderr}`)), 8000);
+      });
+      const [ready] = await Promise.race([once(child, 'message'), deadline]);
+      const manifest = await (await fetch(`${ready.base}/manifest`)).json();
+      inFlight = fetch(`${ready.base}/submit`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ digest: manifest.digest, mode: manifest.mode })
+      }).catch(() => null);
+      await Promise.race([checkpoint, deadline]);
+      const original = (await request('/submissions')).data.receipts[0];
+      expect(original.items.map(item => item.state)).toEqual([...Array(10).fill('accepted'), 'unattempted']);
+      expect(db.prepare('SELECT state, phase FROM submission_attempts WHERE id = ?').get(original.id))
+        .toEqual({ state: 'writing', phase: 'ready' });
+      child.kill('SIGKILL');
+      expect(await childClosed).toEqual({ code: null, signal: 'SIGKILL' });
+      await inFlight;
+      host.state.beforePullRead = null;
+      release();
+
+      const interrupted = (await request('/submissions')).data.receipts[0];
+      expect(interrupted).toMatchObject({ state: 'outcome_unknown', observation: 'not_observed' });
+      const reconciled = await request(`/submissions/${original.id}/reconcile`, 'POST', {});
+      expect(reconciled.data.receipt.state).toBe('outcome_unknown');
+      expect(host.state.calls.map(call => call.operation)).toEqual(['create', ...Array(10).fill('comment')]);
+
+      // A fresh explicit confirmation can claim the recorded safe boundary.
+      const resumed = await publish(await preview());
+      expect(resumed.status, JSON.stringify(resumed.data)).toBe(200);
+      expect(resumed.data.receipt.state).toBe('submitted');
+      expect(resumed.data.receipt.items.slice(0, 10).map(item => item.remoteId))
+        .toEqual(original.items.slice(0, 10).map(item => item.remoteId));
+      expect(host.state.calls.filter(call => call.operation === 'create')).toHaveLength(1);
+      expect(host.state.calls.filter(call => call.operation === 'submit')).toHaveLength(1);
+      expect([...host.state.reviews.values()][0].comments.map(comment => comment.body)).toEqual(bodies);
+      expect((await request('/submissions')).data.receipts.map(item => item.state).sort()).toEqual(['submitted', 'superseded']);
+    } finally {
+      clearTimeout(deadlineTimer);
+      host.state.beforePullRead = null;
+      release?.();
+      if (child?.pid && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      if (childClosed) await childClosed;
+      if (inFlight) await inFlight;
+      if (db?.open) db.close();
+      await rm(home, { recursive: true, force: true });
+    }
+  }, 12000);
+
   it('does not revoke an unobserved executor when read-only reconciliation finds a pending review', async () => {
     await draft('Still owned by another executor');
     const saved = await publish(await preview('draft'));

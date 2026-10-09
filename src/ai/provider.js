@@ -295,7 +295,7 @@ ${rawResponse}
 
       // Register process for cancellation tracking if analysisId provided
       if (analysisId && registerProcess) {
-        registerProcess(analysisId, proc, () => killChildSafely(proc, { shell: useShell }));
+        registerProcess(analysisId, proc, signal => killChildSafely(proc, { shell: useShell, signal }));
         logger.info(`${levelPrefix} Registered extraction process ${proc.pid} for analysis ${analysisId}`);
       }
 

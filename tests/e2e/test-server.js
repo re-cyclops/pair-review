@@ -355,6 +355,11 @@ async function startTestServer(port) {
   let analysisRunning = false;
   let analysisId = null;
   let analysisHasRun = false;
+  const { activeAnalyses, reviewToAnalysisId, broadcastProgress } = require('../../src/routes/shared');
+  const { broadcastReviewEvent } = require('../../src/events/review-events');
+  const ownedAnalyses = new Map();
+  const analysisTimers = new Set();
+  const analysis = { hold: false, complete: null };
 
   // Mock AI analysis endpoint - responds with mock suggestions
   app.post('/api/pr/:owner/:repo/:number/analyses', (req, res) => {
@@ -375,7 +380,7 @@ async function startTestServer(port) {
       .get(prNumber, repository);
 
     if (review && prMetadata) {
-      const aiRunId = `test-run-${Date.now()}`;
+      const aiRunId = analysisId;
       const now = new Date().toISOString();
 
       // Extract custom instructions from request body
@@ -400,11 +405,11 @@ async function startTestServer(port) {
         'Repository default instructions for testing',
         requestInstructions || 'Test custom instructions',
         'def456head',
-        'completed',
+        'running',
         mockAISuggestions.length,
         2,
         now,
-        now
+        null
       );
 
       // Insert mock AI suggestions into the database using review.id
@@ -433,6 +438,25 @@ async function startTestServer(port) {
         );
       }
     }
+    const runId = analysisId;
+    const running = { status: 'running', reviewId: review?.id, reviewType: 'pr', repository, prNumber,
+      progress: 'Analyzing', levels: { 1: { status: 'running' }, 2: { status: 'running' }, 3: { status: 'running' } } };
+    activeAnalyses.set(runId, running);
+    if (review) reviewToAnalysisId.set(review.id, runId);
+    ownedAnalyses.set(runId, review?.id);
+    broadcastProgress(runId, running);
+    const complete = () => {
+      if (activeAnalyses.get(runId)?.status !== 'running') return;
+      if (analysisId === runId) analysisRunning = false;
+      db.prepare('UPDATE analysis_runs SET status = ?, completed_at = ? WHERE id = ?')
+        .run('completed', new Date().toISOString(), runId);
+      const completed = { ...running, status: 'completed', progress: 'Analysis complete',
+        levels: { 1: { status: 'completed' }, 2: { status: 'completed' }, 3: { status: 'completed' } } };
+      activeAnalyses.set(runId, completed);
+      broadcastProgress(runId, completed);
+      if (review) broadcastReviewEvent(review.id, { type: 'review:analysis_completed' });
+    };
+    analysis.complete = complete;
 
     // Return immediately (analysis "started")
     res.json({
@@ -441,10 +465,11 @@ async function startTestServer(port) {
       message: 'AI analysis started in background'
     });
 
-    // Simulate analysis completion after configured duration
-    setTimeout(() => {
-      analysisRunning = false;
-    }, MOCK_ANALYSIS_DURATION_MS);
+    // Execution is synthetic; status lookup and progress use the real transport.
+    if (!analysis.hold) {
+      const timer = setTimeout(() => { analysisTimers.delete(timer); complete(); }, MOCK_ANALYSIS_DURATION_MS);
+      analysisTimers.add(timer);
+    }
   });
 
   // Test-only endpoint: seed a dismissed AI suggestion carrying a status_reason.
@@ -496,51 +521,6 @@ async function startTestServer(port) {
     );
 
     res.json({ id: Number(info.lastInsertRowid), reviewId: review.id });
-  });
-
-  // Mock SSE endpoint for analysis progress
-  app.get('/api/analyses/:id/progress', (req, res) => {
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive'
-    });
-
-    // Send initial connection
-    res.write('data: {"type":"connected"}\n\n');
-
-    // Send running status after short delay
-    setTimeout(() => {
-      res.write(`data: ${JSON.stringify({
-        type: 'progress',
-        status: 'running',
-        levels: {
-          1: { status: 'running', progress: 'Analyzing...' },
-          2: { status: 'running', progress: 'Analyzing...' },
-          3: { status: 'running', progress: 'Analyzing...' },
-          4: { status: 'pending', progress: 'Pending' }
-        },
-        progress: 'Running analysis...'
-      })}\n\n`);
-    }, 100);
-
-    // Send completion after configured duration
-    setTimeout(() => {
-      res.write(`data: ${JSON.stringify({
-        type: 'progress',
-        status: 'completed',
-        levels: {
-          1: { status: 'completed', progress: 'Complete' },
-          2: { status: 'completed', progress: 'Complete' },
-          3: { status: 'completed', progress: 'Complete' },
-          4: { status: 'completed', progress: 'Complete' }
-        },
-        progress: 'Analysis complete',
-        completedLevel: 3,
-        suggestionsCount: mockAISuggestions.length
-      })}\n\n`);
-      res.end();
-    }, MOCK_ANALYSIS_DURATION_MS);
   });
 
   // Mock analysis status check endpoint
@@ -884,7 +864,15 @@ async function startTestServer(port) {
 
   console.log(`E2E test server (worker) running on http://localhost:${port}`);
 
-  return { server, db, app, port, reviewHost, async close() {
+  return { server, db, app, port, reviewHost, analysis, async close() {
+    for (const timer of analysisTimers) clearTimeout(timer);
+    for (const [runId, reviewId] of ownedAnalyses) {
+      if (activeAnalyses.get(runId)?.status === 'running') {
+        broadcastProgress(runId, { ...activeAnalyses.get(runId), status: 'cancelled' });
+      }
+      activeAnalyses.delete(runId);
+      if (reviewToAnalysisId.get(reviewId) === runId) reviewToAnalysisId.delete(reviewId);
+    }
     ws.closeAll();
     const stopped = new Promise(resolve => server.close(resolve));
     server.closeAllConnections();

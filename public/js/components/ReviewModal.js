@@ -9,6 +9,12 @@ class ReviewModal {
     window.addEventListener('reviewDraftChanged', event => {
       if (event.detail.reviewId === this.reviewId) this.invalidate('Draft changed. Prepare a new final preview.');
     });
+    window.addEventListener('reviewDraftSaved', event => {
+      const { reviewId, comment } = event.detail;
+      if (reviewId !== this.reviewId || !comment) return;
+      const view = this.cards?.get(comment.draft_key);
+      if (view) view.provenance.textContent = `Draft ${comment.id} · revision ${comment.revision}`;
+    });
     document.addEventListener('review:comments_changed', event => {
       if (event.detail?.reviewId === this.reviewId && event.detail.sourceClientId !== window.prManager?._clientId) this.invalidate('Review state changed. Refresh saved drafts before another preview.');
     });
@@ -159,7 +165,8 @@ class ReviewModal {
       if (!comment) throw new Error(`Saved draft ${draft.id} is unavailable. Reload the preview.`);
       const card = node('article', null, { class: 'workspace-review-draft', 'data-draft-id': draft.id });
       const location = draft.wire.isFileLevel ? 'file' : `${draft.wire.side} ${draft.wire.start_line ? `${draft.wire.start_line}–` : ''}${draft.wire.line}`;
-      card.append(node('h4', `${draft.wire.path} · ${location}`), node('p', `Draft ${draft.id} · revision ${draft.revision}`, { class: 'workspace-review-provenance' }));
+      const provenance = node('p', `Draft ${draft.id} · revision ${draft.revision}`, { class: 'workspace-review-provenance' });
+      card.append(node('h4', `${draft.wire.path} · ${location}`), provenance);
       const includeLabel = node('label', 'Include in submission ');
       const include = node('input', null, { type: 'checkbox', 'aria-label': `Include draft ${draft.id} in submission` });
       include.checked = draft.included;
@@ -191,7 +198,7 @@ class ReviewModal {
       });
       deletion.append(cancelDeletion, confirmDeletion);
       card.append(this.button('Delete this local draft…', () => { deletion.hidden = false; cancelDeletion.focus(); }), deletion);
-      this.cards.set(draft.key, { card, textarea, include, anchorStatus });
+      this.cards.set(draft.key, { card, textarea, include, anchorStatus, provenance });
     }
     this.mode = node('select', null, { id: 'review-publication-mode' });
     this.mode.append(node('option', 'Publish completed review', { value: 'submit' }), node('option', 'Save pending review on host', { value: 'draft' }));
@@ -271,6 +278,9 @@ class ReviewModal {
       this.finalSection.append(node('p', 'Authoring view is out of date. Publication is disabled; no text was changed.'));
       return;
     }
+    for (const draft of manifest.drafts) {
+      this.cards.get(draft.key).provenance.textContent = `Draft ${draft.id} · revision ${draft.revision}`;
+    }
     this.count.textContent = `${manifest.count} selected saved comments`;
     this.applyCapabilities(manifest);
     if (manifest.target) {
@@ -283,6 +293,26 @@ class ReviewModal {
       node('p', 'The review body and selected comment editors above are the exact Markdown payloads. No footer, location prefix or attribution is appended. Editing invalidates this preview.'),
       node('p', `Checked ${manifest.fetchedAt} · manifest ${manifest.digest}`, { class: 'workspace-review-provenance' }));
     this.finalSection.append(node('p', 'Keep the pending host draft unchanged while publishing. Its final read and submission are not atomic; edits from another host client can race with publication.', { class: 'workspace-muted' }));
+    if (manifest.prose) {
+      const policy = manifest.prose;
+      const section = node('section', null, { 'aria-label': 'Outgoing draft policy' });
+      section.append(node('h4', `Prose policy: ${policy.profile || 'No named profile'}`),
+        node('p', policy.state === 'configured' ? policy.enforcement : 'No structural prose checks are configured. Exact text is still preserved.'));
+      for (const diagnostic of policy.diagnostics) {
+        const draft = manifest.comments.find(comment => comment.key === diagnostic.key);
+        const label = diagnostic.key === 'summary' ? 'Review body' : `Draft ${draft?.id ?? diagnostic.key}`;
+        section.append(node('p', `${diagnostic.severity === 'blocking' ? 'Blocking' : 'Advisory'} · ${label}: ${diagnostic.message} Source: ${diagnostic.source} (${diagnostic.layer || 'source not recorded'})`));
+        section.append(this.button(`Edit ${label.toLowerCase()}`, () => {
+          const textarea = diagnostic.key === 'summary' ? this.bodyInput : this.cards.get(diagnostic.key)?.textarea;
+          textarea?.scrollIntoView({ block: 'center' });
+          textarea?.focus({ preventScroll: true });
+        }));
+      }
+      const details = node('details');
+      details.append(node('summary', 'Exact outgoing policy receipt'), node('pre', JSON.stringify(policy, null, 2)));
+      section.append(details);
+      this.finalSection.append(section);
+    }
     for (const draft of manifest.drafts) {
       const view = this.cards.get(draft.key);
       view.anchorStatus.replaceChildren();

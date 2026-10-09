@@ -10,6 +10,7 @@ const workspaceSource = readFileSync(new URL('../../public/js/components/Workspa
 const evidenceSource = readFileSync(new URL('../../public/js/components/ReviewEvidence.js', import.meta.url), 'utf8');
 let db, server, base, dom, workspace, clock, failOlder, identity, holdNext, recentRequests;
 let snapshot, holdSnapshot, snapshotRequests;
+let activityRuns, activityObservedAt, holdActivity, activityUnavailable, onActivity;
 
 beforeEach(async () => {
   db = createTestDatabase();
@@ -22,9 +23,18 @@ beforeEach(async () => {
   snapshot = { headSha: 'old-head', availability: 'known' };
   holdSnapshot = null;
   snapshotRequests = 0;
+  activityRuns = [];
+  activityObservedAt = '2026-10-08T00:00:00.000Z';
+  holdActivity = null;
+  activityUnavailable = false;
   const app = express();
   app.set('db', db);
-  app.get('/api/analyses/activity', (req, res) => res.json({ ...identity, runs: [], observedAt: new Date().toISOString() }));
+  app.get('/api/analyses/activity', (req, res) => {
+    if (activityUnavailable) return res.status(503).json({ error: 'Activity temporarily unavailable' });
+    const value = { ...identity, runs: activityRuns, observedAt: activityObservedAt };
+    if (holdActivity) { const hold = holdActivity; holdActivity = null; hold(() => res.json(value)); }
+    else res.json(value);
+  });
   app.get('/api/reviews/recent', (req, res, next) => {
     if (failOlder && req.query.before) return res.status(503).json({ error: 'History temporarily unavailable' });
     if (holdNext) {
@@ -49,6 +59,7 @@ beforeEach(async () => {
   clock = Date.now();
   win.Date.now = () => clock;
   win.HTMLElement.prototype.scrollIntoView = () => {};
+  win.wsClient = { subscribe: (channel, listener) => { onActivity = listener; }, connect() {} };
   win.fetch = (input, options) => {
     const url = new URL(input, base);
     if (url.pathname === '/api/reviews/recent') { url.searchParams.set('limit', '2'); recentRequests++; }
@@ -146,5 +157,71 @@ describe('Saved review discovery', () => {
     await older;
     expect(workspace.currentSnapshot.headSha).toBe('new-head');
     expect(workspace.currentReview.id).toBe(6);
+  });
+});
+
+describe('Activity stream reconciliation', () => {
+  const run = (overrides = {}) => ({
+    analysisId: 'observed-run', reviewId: 6, repository: 'test/repo', prNumber: 6,
+    reviewType: 'pr', status: 'running', observation: 'live', stage: 'Reading changed lines',
+    sequence: 1, startedAt: '2026-10-08T00:00:00.000Z', lastEventAt: activityObservedAt,
+    ...overrides
+  });
+  const event = (value, source = identity) => onActivity({ type: 'activity', ...source, run: value });
+  const delayedRefresh = async () => {
+    let release, captured;
+    const capture = new Promise(resolve => { captured = resolve; });
+    holdActivity = send => { release = send; captured(); };
+    const pending = workspace.refresh();
+    await capture;
+    return { release, pending };
+  };
+
+  it('keeps a newer completion when duplicate and out-of-order events race a running snapshot', async () => {
+    activityRuns = [run()];
+    const delayed = await delayedRefresh();
+    event(run({ status: 'completed', sequence: 4 }));
+    event(run({ status: 'running', sequence: 3 }));
+    event(run({ status: 'failed', sequence: 4 }));
+    delayed.release();
+    await delayed.pending;
+    expect(workspace.runs.get('observed-run')).toMatchObject({ status: 'completed', sequence: 4 });
+    expect(workspace.activityButton.textContent).toContain('1 unread result');
+    expect(workspace.activityButton.textContent).toContain('No active analyses observed');
+  });
+
+  it('keeps a newly observed run absent from an older snapshot in the same millisecond', async () => {
+    const delayed = await delayedRefresh();
+    event(run());
+    delayed.release();
+    await delayed.pending;
+    expect(workspace.runs.get('observed-run')).toMatchObject({ status: 'running', observation: 'live' });
+    expect(workspace.activityButton.textContent).toContain('1 analysis running');
+    // An authoritative later snapshot may remove it; do not retain ghost runs forever.
+    await workspace.refresh();
+    expect(workspace.runs.has('observed-run')).toBe(false);
+  });
+
+  it.each(['instanceId', 'dbId'])('rejects an event queued from a previous %s', async field => {
+    activityRuns = [run({ status: 'completed', sequence: 4, observation: 'recorded' })];
+    await workspace.refresh();
+    event(run({ sequence: 100 }), { ...identity, [field]: 'previous-context' });
+    expect(workspace.runs.get('observed-run')).toMatchObject({ status: 'completed', sequence: 4 });
+    expect(workspace.activityButton.textContent).toContain('No active analyses observed');
+  });
+
+  it('retains last state while disconnected and reports idle only after successful reconciliation', async () => {
+    activityRuns = [run()];
+    await workspace.refresh();
+    dom.window.dispatchEvent(new dom.window.Event('wsDisconnected'));
+    expect(workspace.activityButton.textContent).toContain('Activity unavailable');
+    activityUnavailable = true;
+    await workspace.refresh();
+    expect(workspace.runs.get('observed-run').status).toBe('running');
+    expect(workspace.activityButton.textContent).toContain('Activity unavailable');
+    activityUnavailable = false;
+    activityRuns = [];
+    await workspace.refresh();
+    expect(workspace.activityButton.textContent).toContain('No active analyses observed');
   });
 });

@@ -224,9 +224,9 @@ function createExecutableProviderClass(id, config) {
       // The cancellation owner must reap the shell's process group and preserve the cancellation reason.
       let cancelled = false;
       if (analysisId && registerProcess) {
-        registerProcess(analysisId, child, () => {
+        registerProcess(analysisId, child, signal => {
           cancelled = true;
-          return killChildSafely(child, { shell: this.useShell });
+          return killChildSafely(child, { shell: this.useShell, signal });
         });
         logger.info(`[${id}] Registered process ${pid} for analysis ${analysisId}`);
       }

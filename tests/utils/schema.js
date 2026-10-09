@@ -142,6 +142,16 @@ const SCHEMA_SQL = {
     )
   `,
 
+  worktree_locks: `
+    CREATE TABLE IF NOT EXISTS worktree_locks (
+      path TEXT PRIMARY KEY,
+      holder_id TEXT NOT NULL,
+      repository TEXT,
+      pr_number INTEGER,
+      locked_at TEXT NOT NULL
+    )
+  `,
+
   analysis_runs: `
     CREATE TABLE IF NOT EXISTS analysis_runs (
       id TEXT PRIMARY KEY,
@@ -167,6 +177,7 @@ const SCHEMA_SQL = {
       level_outcomes TEXT,
       activity_state TEXT,
       review_baseline TEXT,
+      protocol_snapshot TEXT,
       scope_start TEXT,
       scope_end TEXT,
       FOREIGN KEY (review_id) REFERENCES reviews(id) ON DELETE CASCADE

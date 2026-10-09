@@ -905,7 +905,7 @@ class RepoSettingsPage {
    * @param {string} worktreeId
    */
   async deleteWorktree(worktreeId) {
-    if (!confirm('Delete this worktree? This removes it from disk and cannot be undone.')) return;
+    if (!confirm('Remove this checkout from disk? Local history, drafts, and remote reviews stay unchanged. Active work is not cancelled; dirty, shared, or busy checkouts are retained.')) return;
 
     try {
       const response = await fetch(`/api/repos/${this.owner}/${this.repo}/worktrees/${worktreeId}`, {
@@ -929,7 +929,7 @@ class RepoSettingsPage {
     const count = this.worktreeData && this.worktreeData.worktrees
       ? this.worktreeData.worktrees.length
       : 0;
-    if (!confirm(`Delete all ${count} worktree(s)? This removes them from disk and cannot be undone.`)) return;
+    if (!confirm(`Remove ${count} checkout(s) from disk? Local history, drafts, and remote reviews stay unchanged. Active work is not cancelled; dirty, shared, or busy checkouts are retained.`)) return;
 
     try {
       const response = await fetch(`/api/repos/${this.owner}/${this.repo}/worktrees`, {
@@ -940,7 +940,7 @@ class RepoSettingsPage {
         throw new Error(data.error || 'Failed to delete worktrees');
       }
       const data = await response.json();
-      this.showToast('success', `Deleted ${data.deleted} worktree(s)`);
+      this.showToast(data.failed ? 'error' : 'success', `Removed ${data.deleted} checkout(s).${data.failed ? ` Retained ${data.failed}: ${(data.errors || []).map(item => `${item.id}: ${item.error}`).join(' ')}` : ' Local history and remote reviews unchanged.'}`);
       await this.loadWorktrees();
     } catch (error) {
       this.showToast('error', 'Failed to delete worktrees: ' + error.message);

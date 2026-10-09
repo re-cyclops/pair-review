@@ -21,6 +21,7 @@ const { getTierForModel } = require('../ai/provider');
 const { v4: uuidv4 } = require('uuid');
 const logger = require('../utils/logger');
 const { broadcastReviewEvent } = require('../events/review-events');
+const { captureRunProtocol } = require('../utils/review-protocol');
 const { fireHooks, hasHooks } = require('../hooks/hook-runner');
 const { buildAnalysisStartedPayload, buildAnalysisCompletedPayload, getCachedUser } = require('../hooks/payloads');
 const path = require('path');
@@ -515,7 +516,8 @@ async function launchCouncilAnalysis(db, modeContext, councilConfig, councilId, 
     requestInstructions,
     headSha: headSha || null,
     configType,
-    levelsConfig
+    levelsConfig,
+    protocol: captureRunProtocol(modeConfig || {}, { ...councilConfig, providerOverrides, providerOverridesMap })
   });
 
   if (councilId) {

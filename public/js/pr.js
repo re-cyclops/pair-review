@@ -7727,6 +7727,7 @@ class PRManager {
         document.documentElement.style.setProperty('--sidebar-width', widthValue);
         if (collapse) {
           sidebar.classList.add('collapsed');
+          if (sidebar.contains(document.activeElement)) collapsedBtn.focus();
         } else {
           sidebar.classList.remove('collapsed');
         }
@@ -7919,7 +7920,10 @@ class PRManager {
     btn.disabled = true;
 
     // Revert to normal after 2 seconds
-    setTimeout(() => this.resetButton(), 2000);
+    const analysisId = this.currentAnalysisId;
+    setTimeout(() => {
+      if (this.currentAnalysisId === analysisId) this.resetButton();
+    }, 2000);
   }
 
   /**

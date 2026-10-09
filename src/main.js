@@ -23,6 +23,7 @@ const { resolveReviewConfig } = require('./review-config');
 const { GlobalSettingsService } = require('./settings/global-settings-service');
 const { redirectConsoleToStderr } = require('./mcp-stdio');
 const { getChangedFiles } = require('./routes/executable-analysis');
+const { captureRunProtocol } = require('./utils/review-protocol');
 const { safeParseJson } = require('./utils/safe-parse-json');
 const { includesBranch, parseScopeArg, VALID_SCOPE_RANGES, EMPTY_SCOPE_MESSAGE } = require('./local-scope');
 const { storePRData, resolvePrHostBinding, registerRepositoryLocation, findRepositoryPath } = require('./setup/pr-setup');
@@ -1793,7 +1794,9 @@ async function runHeadlessAnalysis(db, config, {
       prMetadata,
       changedFiles,
       instructions,
-      githubClient
+      githubClient,
+      protocol: captureRunProtocol(config, { ...reviewConfig.councilConfig,
+        providerOverrides: councilProviderOverrides, providerOverridesMap: councilProviderOverridesMap })
     });
     return { runId: result.runId, result };
   }
@@ -1808,7 +1811,7 @@ async function runHeadlessAnalysis(db, config, {
     null,
     instructions,
     changedFiles,
-    { githubClient, runId }
+    { githubClient, runId, protocol: captureRunProtocol(config, { provider: reviewConfig.provider, model: reviewConfig.model, ...providerOverrides }) }
   );
   return { runId, result };
 }

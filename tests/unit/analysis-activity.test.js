@@ -40,9 +40,27 @@ describe('durable activity', () => {
     expect(activity.snapshot(db).runs[0]).toMatchObject({ status: 'partial', suggestionsCount: 3 });
   });
 
+  it('keeps a council partial when another voice completes after a nested stage failure', async () => {
+    await start('council', { configType: 'council' });
+    await start('failed-voice', { parentRunId: 'council' });
+    await start('completed-voice', { parentRunId: 'council' });
+    await repo.update('failed-voice', { status: 'failed' });
+    await repo.update('completed-voice', { status: 'completed', totalSuggestions: 2 });
+    await repo.update('council', {
+      status: 'completed', totalSuggestions: 2,
+      levelOutcomes: { reviewers: { first: { 1: 'success', 2: 'failed' }, second: { 1: 'success', 2: 'success' } } }
+    });
+    shared.broadcastProgress('council', { status: 'completed', levels: {} });
+    expect(activity.snapshot(db).runs).toEqual([
+      expect.objectContaining({ runId: 'council', status: 'partial', suggestionsCount: 2, observation: 'recorded' })
+    ]);
+  });
+
   it('does not infer liveness or failure from a stale database row', async () => {
     await start('old');
-    db.prepare("UPDATE analysis_runs SET started_at = '2020-01-01', activity_state = json_set(activity_state, '$.instanceId', 'previous-process') WHERE id = 'old'").run();
+    db.prepare("UPDATE analysis_runs SET started_at = '2020-01-01', activity_state = json_set(activity_state, '$.lastEventAt', '2020-01-01T00:00:00.000Z') WHERE id = 'old'").run();
+    expect(activity.snapshot(db).runs[0]).toMatchObject({ status: 'running', observation: 'live', lastEventAt: '2020-01-01T00:00:00.000Z' });
+    db.prepare("UPDATE analysis_runs SET activity_state = json_set(activity_state, '$.instanceId', 'previous-process') WHERE id = 'old'").run();
     expect(activity.snapshot(db).runs[0]).toMatchObject({ status: 'unknown', observation: 'unavailable' });
     expect(db.prepare("SELECT status FROM analysis_runs WHERE id = 'old'").get().status).toBe('running');
   });
@@ -111,8 +129,18 @@ describe('durable activity', () => {
     expect(activity.claimNotification(db, 'ack-race')).toBe(false);
   });
 
-  it('does not misrepresent imported findings as an observed AI execution', async () => {
+  it('keeps imported result counts current without claiming observed execution', async () => {
+    const events = [];
+    vi.spyOn(require('../../src/ws'), 'broadcast').mockImplementation((channel, event) => {
+      if (channel === 'index:analyses') events.push(event.run);
+    });
     await start('imported', { status: 'completed' });
-    expect(activity.snapshot(db).runs[0]).toMatchObject({ status: 'completed', startedAt: null, instanceId: null, entryPoint: 'result-import' });
+    await repo.update('imported', { totalSuggestions: 2, filesAnalyzed: 1 });
+    const expected = { status: 'completed', startedAt: null, instanceId: null, entryPoint: 'result-import', suggestionsCount: 2 };
+    expect(events.at(-1)).toMatchObject(expected);
+    expect(activity.snapshot(db).runs[0]).toMatchObject(expected);
+    // Receipts written before count enrichment must still reflect saved results.
+    db.prepare("UPDATE analysis_runs SET activity_state = json_set(activity_state, '$.suggestionsCount', 0) WHERE id = 'imported'").run();
+    expect(activity.snapshot(db).runs[0]).toMatchObject(expected);
   });
 });

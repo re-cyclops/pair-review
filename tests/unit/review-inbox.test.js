@@ -142,4 +142,21 @@ describe('Inbox read ownership', () => {
     expect(record.approvals.textContent).not.toContain('previous-account');
     expect(record.snapshot.headSha).toBe('current-head');
   });
+
+  it('keeps incomplete CI visible in uncertainty and attention filters until a complete passing read', () => {
+    record.snapshot = {
+      fetchedAt: new Date().toISOString(), viewer: { needsYou: false },
+      approvals: { availability: 'known' }, requests: { availability: 'known' },
+      policy: { availability: 'known' }, threads: { availability: 'known' },
+      checks: { availability: 'partial', counts: { passed: 1, failed: 0, actionRequired: 0, cancelled: 0 } }
+    };
+    for (const filter of ['unknown', 'failed-ci']) {
+      inbox.view.value = filter;
+      inbox.view.dispatchEvent(new dom.window.Event('change'));
+      expect(record.row.hidden).toBe(false);
+    }
+    record.snapshot.checks.availability = 'known';
+    inbox.applyFilters(true);
+    expect(record.row.hidden).toBe(true);
+  });
 });

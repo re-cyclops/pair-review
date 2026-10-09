@@ -23,7 +23,7 @@ function getDbPath() {
 /**
  * Current schema version - increment this when adding new migrations
  */
-const CURRENT_SCHEMA_VERSION = 60;
+const CURRENT_SCHEMA_VERSION = 62;
 
 /**
  * Database schema SQL statements
@@ -153,6 +153,16 @@ const SCHEMA_SQL = {
     )
   `,
 
+  worktree_locks: `
+    CREATE TABLE IF NOT EXISTS worktree_locks (
+      path TEXT PRIMARY KEY,
+      holder_id TEXT NOT NULL,
+      repository TEXT,
+      pr_number INTEGER,
+      locked_at TEXT NOT NULL
+    )
+  `,
+
   repo_settings: `
     CREATE TABLE IF NOT EXISTS repo_settings (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -201,6 +211,7 @@ const SCHEMA_SQL = {
       level_outcomes TEXT,
       activity_state TEXT,
       review_baseline TEXT,
+      protocol_snapshot TEXT,
       scope_start TEXT,
       scope_end TEXT,
       FOREIGN KEY (review_id) REFERENCES reviews(id) ON DELETE CASCADE
@@ -2444,6 +2455,12 @@ const MIGRATIONS = {
         db.prepare('UPDATE pr_metadata SET pr_data = ? WHERE rowid = ?').run(JSON.stringify(data), row.metadata_id);
       }
     })();
+  },
+  61: (db) => {
+    if (tableExists(db, 'analysis_runs') && !columnExists(db, 'analysis_runs', 'protocol_snapshot')) db.exec('ALTER TABLE analysis_runs ADD COLUMN protocol_snapshot TEXT');
+  },
+  62: (db) => {
+    db.exec(SCHEMA_SQL.worktree_locks);
   }
 };
 
@@ -3350,10 +3367,16 @@ class WorktreePoolRepository {
         WHERE current_pr_number = ? AND repository = ? COLLATE NOCASE
           AND status IN ('in_use', 'available')
       `).get(prNumber, repository);
+      if (!entry && this.db.prepare(`SELECT 1 FROM worktree_pool
+        WHERE current_pr_number = ? AND repository = ? COLLATE NOCASE AND status IN ('switching', 'creating')`)
+        .get(prNumber, repository)) {
+        throw Object.assign(new Error('This checkout is still being prepared. Wait for that operation to settle.'), { statusCode: 409 });
+      }
       if (entry) {
+        require('./review-removal').assertCheckoutAvailable(this.db, entry.path, { repository, prNumber });
         const now = new Date().toISOString();
         this.db.prepare(
-          `UPDATE worktree_pool SET status = 'in_use', current_pr_number = ?, last_switched_at = ?, current_review_id = NULL WHERE id = ?`
+          `UPDATE worktree_pool SET status = 'switching', current_pr_number = ?, last_switched_at = ?, current_review_id = NULL WHERE id = ?`
         ).run(prNumber, now, entry.id);
       }
       return entry || null;
@@ -3371,13 +3394,14 @@ class WorktreePoolRepository {
    */
   async claimAvailable(repository) {
     const claimTx = this.db.transaction(() => {
+      const { WorktreeLockManager } = require('./git/worktree-lock');
+      const locks = new WorktreeLockManager(this.db);
       const entry = this.db.prepare(`
         SELECT id, repository, path, status, current_pr_number, last_switched_at, last_fetched_at, created_at
         FROM worktree_pool
         WHERE repository = ? COLLATE NOCASE AND status = 'available'
         ORDER BY last_switched_at ASC NULLS FIRST
-        LIMIT 1
-      `).get(repository);
+      `).all(repository).find(candidate => !locks.isLocked(candidate.path).locked);
       if (entry) {
         this.db.prepare(
           `UPDATE worktree_pool SET status = 'switching' WHERE id = ?`
@@ -5304,10 +5328,10 @@ class ReviewRepository {
    * @returns {Promise<boolean>} True if a record was deleted
    */
   async deleteLocalSession(reviewId) {
-    const result = await run(this.db, `
-      DELETE FROM reviews WHERE id = ? AND review_type = 'local'
-    `, [reviewId]);
-    return result.changes > 0;
+    return this.db.transaction(() => {
+      require('./review-removal').assertReviewIdle(this.db, reviewId);
+      return this.db.prepare("DELETE FROM reviews WHERE id = ? AND review_type = 'local'").run(reviewId).changes > 0;
+    }).immediate();
   }
 
   /**
@@ -5339,38 +5363,26 @@ class ReviewRepository {
    * @returns {Promise<boolean>} True if review was deleted
    */
   async deleteWithRelatedData(reviewId, { prNumber = null, repository = null } = {}) {
-    return withTransaction(this.db, async () => {
-      // Delete the review row — FK cascades handle related tables
-      const result = await run(this.db, 'DELETE FROM reviews WHERE id = ?', [reviewId]);
-
+    return this.db.transaction(() => {
+      require('./review-removal').assertReviewIdle(this.db, reviewId);
+      const metadata = prNumber != null && repository
+        ? this.db.prepare('SELECT host FROM pr_metadata WHERE pr_number = ? AND repository = ? COLLATE NOCASE').get(prNumber, repository)
+        : null;
+      const result = this.db.prepare('DELETE FROM reviews WHERE id = ?').run(reviewId);
       if (result.changes === 0) return false;
-
-      // Clean up orphaned pr_metadata and github_pr_cache if this was a PR review
       if (prNumber != null && repository) {
-        const remaining = await queryOne(this.db, `
-          SELECT COUNT(*) as cnt FROM reviews
-          WHERE pr_number = ? AND repository = ? COLLATE NOCASE
-        `, [prNumber, repository]);
-
-        if (remaining.cnt === 0) {
-          await run(this.db, `
-            DELETE FROM pr_metadata
-            WHERE pr_number = ? AND repository = ? COLLATE NOCASE
-          `, [prNumber, repository]);
-
-          // Parse owner/repo for github_pr_cache
+        const remaining = this.db.prepare('SELECT 1 FROM reviews WHERE pr_number = ? AND repository = ? COLLATE NOCASE LIMIT 1').get(prNumber, repository);
+        if (!remaining) {
+          this.db.prepare('DELETE FROM pr_metadata WHERE pr_number = ? AND repository = ? COLLATE NOCASE').run(prNumber, repository);
           const parts = repository.split('/');
-          if (parts.length === 2) {
-            await run(this.db, `
-              DELETE FROM github_pr_cache
-              WHERE owner = ? AND repo = ? AND number = ?
-            `, [parts[0], parts[1], prNumber]);
+          if (parts.length === 2 && metadata) {
+            this.db.prepare('DELETE FROM github_pr_cache WHERE owner = ? AND repo = ? AND number = ? AND host IS ?')
+              .run(parts[0], parts[1], prNumber, metadata.host ?? null);
           }
         }
       }
-
       return true;
-    });
+    }).immediate();
   }
 }
 
@@ -5570,19 +5582,29 @@ class AnalysisRunRepository {
    * @param {string} [runInfo.headSha] - Git HEAD SHA at the time of analysis (PR head commit or local HEAD)
    * @param {string} [runInfo.diff] - Unified diff snapshot at the time of analysis
    * @param {string} [runInfo.status='running'] - Initial status (default 'running'; pass 'completed' for externally-produced results)
+   * @param {Object|null} [runInfo.protocol] - Effective run protocol; child runs inherit their parent's snapshot
    * @returns {Promise<Object>} Created analysis run record
    */
-  async create({ id, reviewId, provider = null, model = null, tier = null, customInstructions = null, globalInstructions = null, repoInstructions = null, requestInstructions = null, headSha = null, diff = null, status = 'running', parentRunId = null, configType = 'single', levelsConfig = null, scopeStart = null, scopeEnd = null }) {
+  async create({ id, reviewId, provider = null, model = null, tier = null, customInstructions = null, globalInstructions = null, repoInstructions = null, requestInstructions = null, headSha = null, diff = null, status = 'running', parentRunId = null, configType = 'single', levelsConfig = null, scopeStart = null, scopeEnd = null, protocol = null }) {
+    if (activity.isStopping()) {
+      throw Object.assign(new Error('Executor is shutting down'), { status: 503, isCancellation: true });
+    }
     const isTerminal = ['completed', 'failed', 'cancelled'].includes(status);
     const completedAt = isTerminal ? 'CURRENT_TIMESTAMP' : 'NULL';
     const levelsConfigJson = levelsConfig ? JSON.stringify(levelsConfig) : null;
-    const baseline = parentRunId
-      ? (await queryOne(this.db, 'SELECT review_baseline FROM analysis_runs WHERE id = ?', [parentRunId]))?.review_baseline || null
-      : (await queryOne(this.db, "SELECT json_extract(review_progress, '$.reviewed') AS baseline FROM reviews WHERE id = ?", [reviewId]))?.baseline || null;
-    await run(this.db, `
-      INSERT INTO analysis_runs (id, review_id, provider, model, tier, custom_instructions, global_instructions, repo_instructions, request_instructions, head_sha, diff, status, completed_at, parent_run_id, config_type, levels_config, scope_start, scope_end, review_baseline)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${completedAt}, ?, ?, ?, ?, ?, ?)
-    `, [id, reviewId, provider, model, tier, customInstructions, globalInstructions, repoInstructions, requestInstructions, headSha, diff, status, parentRunId, configType, levelsConfigJson, scopeStart, scopeEnd, baseline]);
+    const protocolJson = protocol ? JSON.stringify(protocol) : null;
+    this.db.transaction(() => {
+      require('./review-removal').assertReviewAvailable(this.db, reviewId);
+      const parent = parentRunId
+        ? this.db.prepare('SELECT review_baseline, protocol_snapshot FROM analysis_runs WHERE id = ?').get(parentRunId)
+        : null;
+      const baseline = parentRunId ? parent?.review_baseline || null
+        : this.db.prepare("SELECT json_extract(review_progress, '$.reviewed') AS baseline FROM reviews WHERE id = ?").get(reviewId)?.baseline || null;
+      this.db.prepare(`
+        INSERT INTO analysis_runs (id, review_id, provider, model, tier, custom_instructions, global_instructions, repo_instructions, request_instructions, head_sha, diff, status, completed_at, parent_run_id, config_type, levels_config, scope_start, scope_end, review_baseline, protocol_snapshot)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${completedAt}, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, reviewId, provider, model, tier, customInstructions, globalInstructions, repoInstructions, requestInstructions, headSha, diff, status, parentRunId, configType, levelsConfigJson, scopeStart, scopeEnd, baseline, parentRunId ? parent?.protocol_snapshot || null : protocolJson);
+    }).immediate();
     activity.begin(this.db, id);
 
     // Query back the inserted row to return actual database values (including timestamps)
@@ -5674,7 +5696,7 @@ class AnalysisRunRepository {
     const columns = [
       'id', 'review_id', 'provider', 'model', 'tier', 'custom_instructions', 'global_instructions', 'repo_instructions', 'request_instructions',
       'head_sha', 'summary', 'status', 'total_suggestions', 'files_analyzed', 'started_at', 'completed_at',
-      'parent_run_id', 'config_type', 'levels_config', 'level_outcomes', 'review_baseline'
+      'parent_run_id', 'config_type', 'levels_config', 'level_outcomes', 'review_baseline', 'protocol_snapshot'
     ];
     if (includeDiff) {
       columns.splice(columns.indexOf('head_sha') + 1, 0, 'diff'); // Insert diff after head_sha
@@ -5702,7 +5724,7 @@ class AnalysisRunRepository {
     const columns = [
       'id', 'review_id', 'provider', 'model', 'tier', 'custom_instructions', 'global_instructions', 'repo_instructions', 'request_instructions',
       'head_sha', 'summary', 'status', 'total_suggestions', 'files_analyzed', 'started_at', 'completed_at',
-      'parent_run_id', 'config_type', 'levels_config', 'level_outcomes', 'review_baseline'
+      'parent_run_id', 'config_type', 'levels_config', 'level_outcomes', 'review_baseline', 'protocol_snapshot'
     ];
     if (includeDiff) {
       columns.splice(columns.indexOf('head_sha') + 1, 0, 'diff'); // Insert diff after head_sha
@@ -5740,7 +5762,7 @@ class AnalysisRunRepository {
     const columns = [
       'id', 'review_id', 'provider', 'model', 'tier', 'custom_instructions', 'global_instructions', 'repo_instructions', 'request_instructions',
       'head_sha', 'summary', 'status', 'total_suggestions', 'files_analyzed', 'started_at', 'completed_at',
-      'parent_run_id', 'config_type', 'levels_config', 'level_outcomes'
+      'parent_run_id', 'config_type', 'levels_config', 'level_outcomes', 'review_baseline', 'protocol_snapshot'
     ];
     if (includeDiff) {
       columns.splice(columns.indexOf('head_sha') + 1, 0, 'diff'); // Insert diff after head_sha
@@ -5767,7 +5789,7 @@ class AnalysisRunRepository {
     return query(this.db, `
       SELECT id, review_id, provider, model, tier, custom_instructions, global_instructions, repo_instructions, request_instructions,
              head_sha, summary, status, total_suggestions, files_analyzed, started_at, completed_at,
-             parent_run_id, config_type, levels_config, level_outcomes
+             parent_run_id, config_type, levels_config, level_outcomes, review_baseline, protocol_snapshot
       FROM analysis_runs
       WHERE parent_run_id = ?
       ORDER BY started_at ASC

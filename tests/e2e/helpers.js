@@ -346,13 +346,10 @@ async function seedAISuggestions(page, {
     { timeout: statusTimeout }
   );
 
-  // Reload suggestions and wait for them to appear in the DOM
-  await page.evaluate(async () => {
-    if (window.prManager?.loadAISuggestions) {
-      await window.prManager.analysisHistoryManager?.refresh({ switchToNew: true });
-      await window.prManager.loadAISuggestions();
-    }
-  });
+  // Start the interaction test from the persisted result, not a manual render
+  // racing a queued completion event from the seeding request.
+  await page.reload();
+  await waitForDiffToRender(page);
 
   // Wait for at least one AI suggestion to render
   await page.waitForSelector(suggestionSelector, { timeout: 5000 });
