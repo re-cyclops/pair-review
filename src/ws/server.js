@@ -1,6 +1,7 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
 const { WebSocketServer } = require('ws');
 const logger = require('../utils/logger');
+const { allowedUpgrade } = require('../utils/loopback-security');
 
 const HEARTBEAT_INTERVAL = 30000;
 
@@ -18,6 +19,10 @@ function attachWebSocket(httpServer, db, poolLifecycle) {
   wss = new WebSocketServer({ noServer: true });
 
   httpServer.on('upgrade', (request, socket, head) => {
+    if (!allowedUpgrade(request)) {
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      return;
+    }
     const { pathname } = new URL(request.url, `http://${request.headers.host}`);
     if (pathname !== '/ws') {
       socket.destroy();
@@ -55,6 +60,7 @@ function attachWebSocket(httpServer, db, poolLifecycle) {
 
       if (action === 'subscribe') {
         ws._topics.add(topic);
+        if (topic === 'index:analyses') ws.send(JSON.stringify({ topic, type: 'subscribed' }));
 
         // Track pool worktree usage for review topics
         if (topic.startsWith('review:') && poolLifecycle) {

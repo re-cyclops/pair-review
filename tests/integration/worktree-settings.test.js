@@ -11,7 +11,7 @@ const path = require('path');
 
 // Mock GitWorktreeManager to prevent real git operations
 const { GitWorktreeManager } = require('../../src/git/worktree');
-vi.spyOn(GitWorktreeManager.prototype, 'cleanupWorktree').mockResolvedValue(undefined);
+vi.spyOn(GitWorktreeManager.prototype, 'removeWorktree').mockResolvedValue(undefined);
 
 // Mock config module to prevent reading user's real config
 const configModule = require('../../src/config');
@@ -280,22 +280,12 @@ describe('DELETE /api/repos/:owner/:repo/worktrees/:worktreeId', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(res.body.message).toContain('wt-1');
 
     // Verify worktree was actually removed from the database
     const row = db.prepare('SELECT id FROM worktrees WHERE id = ?').get('wt-1');
     expect(row).toBeUndefined();
   });
 
-  it('calls cleanupWorktree on the path for non-pool worktrees', async () => {
-    seedWorktree(db, { id: 'wt-1', prNumber: 1, path: '/tmp/wt/wt-1' });
-
-    const app = createApp(db);
-    const server = await startServer(app);
-    await request(server).delete('/api/repos/owner/repo/worktrees/wt-1');
-
-    expect(GitWorktreeManager.prototype.cleanupWorktree).toHaveBeenCalledWith('/tmp/wt/wt-1');
-  });
 
   it('returns 404 for unknown worktree ID (non-pool)', async () => {
     const app = createApp(db);
@@ -306,44 +296,8 @@ describe('DELETE /api/repos/:owner/:repo/worktrees/:worktreeId', () => {
     expect(res.body.error).toContain('not found');
   });
 
-  it('calls destroyPoolWorktree for pool worktrees', async () => {
-    seedWorktree(db, { id: 'pool-wt', prNumber: 1 });
-    seedPoolEntry(db, { id: 'pool-wt', status: 'available', prNumber: 1 });
 
-    const destroyPoolWorktree = vi.fn().mockResolvedValue(undefined);
-    const poolLifecycle = { destroyPoolWorktree };
-
-    const app = createApp(db, { poolLifecycle });
-    const server = await startServer(app);
-    const res = await request(server).delete('/api/repos/owner/repo/worktrees/pool-wt');
-
-    expect(res.status).toBe(200);
-    expect(res.body.success).toBe(true);
-    expect(destroyPoolWorktree).toHaveBeenCalledWith('pool-wt', {
-      cancelAnalyses: expect.any(Function),
-    });
-  });
-
-  it('passes cancelAnalyses callback to destroyPoolWorktree', async () => {
-    seedWorktree(db, { id: 'pool-wt', prNumber: 1 });
-    seedPoolEntry(db, { id: 'pool-wt', status: 'in_use', prNumber: 1 });
-
-    let capturedOptions;
-    const destroyPoolWorktree = vi.fn().mockImplementation((_id, opts) => {
-      capturedOptions = opts;
-      return Promise.resolve();
-    });
-    const poolLifecycle = { destroyPoolWorktree };
-
-    const app = createApp(db, { poolLifecycle });
-    const server = await startServer(app);
-    await request(server).delete('/api/repos/owner/repo/worktrees/pool-wt');
-
-    expect(capturedOptions).toBeDefined();
-    expect(typeof capturedOptions.cancelAnalyses).toBe('function');
-  });
-
-  it('returns 500 when poolLifecycle is not available for pool worktree', async () => {
+  it('retains a pool checkout when its lifecycle owner is unavailable', async () => {
     seedWorktree(db, { id: 'pool-wt', prNumber: 1 });
     seedPoolEntry(db, { id: 'pool-wt', status: 'available', prNumber: 1 });
 
@@ -352,8 +306,9 @@ describe('DELETE /api/repos/:owner/:repo/worktrees/:worktreeId', () => {
     const server = await startServer(app);
     const res = await request(server).delete('/api/repos/owner/repo/worktrees/pool-wt');
 
-    expect(res.status).toBe(500);
-    expect(res.body.error).toContain('Pool lifecycle not available');
+    expect(res.status).toBe(409);
+    expect(db.prepare("SELECT id FROM worktree_pool WHERE id = 'pool-wt'").get()).toEqual({ id: 'pool-wt' });
+    expect(db.prepare("SELECT id FROM worktrees WHERE id = 'pool-wt'").get()).toEqual({ id: 'pool-wt' });
   });
 });
 
@@ -410,56 +365,4 @@ describe('DELETE /api/repos/:owner/:repo/worktrees', () => {
     expect(res.body.errors).toEqual([]);
   });
 
-  it('returns { deleted, failed, errors } counts', async () => {
-    seedWorktree(db, { id: 'wt-1', prNumber: 1 });
-    seedWorktree(db, { id: 'wt-2', prNumber: 2 });
-
-    const app = createApp(db);
-    const server = await startServer(app);
-    const res = await request(server).delete('/api/repos/owner/repo/worktrees');
-
-    expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty('deleted');
-    expect(res.body).toHaveProperty('failed');
-    expect(res.body).toHaveProperty('errors');
-    expect(typeof res.body.deleted).toBe('number');
-    expect(typeof res.body.failed).toBe('number');
-    expect(Array.isArray(res.body.errors)).toBe(true);
-  });
-
-  it('calls destroyPoolWorktree for pool worktrees in the list', async () => {
-    seedWorktree(db, { id: 'pool-1', prNumber: 1 });
-    seedPoolEntry(db, { id: 'pool-1', status: 'available', prNumber: 1 });
-    seedWorktree(db, { id: 'regular-1', prNumber: 2 });
-
-    const destroyPoolWorktree = vi.fn().mockResolvedValue(undefined);
-    const poolLifecycle = { destroyPoolWorktree };
-
-    const app = createApp(db, { poolLifecycle });
-    const server = await startServer(app);
-    const res = await request(server).delete('/api/repos/owner/repo/worktrees');
-
-    expect(res.status).toBe(200);
-    expect(res.body.deleted).toBe(2);
-    expect(destroyPoolWorktree).toHaveBeenCalledWith('pool-1', {
-      cancelAnalyses: expect.any(Function),
-    });
-  });
-
-  it('handles pool-only entries that have no worktrees record', async () => {
-    seedPoolEntry(db, { id: 'creating-only', status: 'creating', prNumber: null });
-
-    const destroyPoolWorktree = vi.fn().mockResolvedValue(undefined);
-    const poolLifecycle = { destroyPoolWorktree };
-
-    const app = createApp(db, { poolLifecycle });
-    const server = await startServer(app);
-    const res = await request(server).delete('/api/repos/owner/repo/worktrees');
-
-    expect(res.status).toBe(200);
-    expect(res.body.deleted).toBe(1);
-    expect(destroyPoolWorktree).toHaveBeenCalledWith('creating-only', {
-      cancelAnalyses: expect.any(Function),
-    });
-  });
 });

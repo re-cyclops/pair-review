@@ -88,7 +88,14 @@ class WorktreePoolLifecycle {
           await this._worktreeRepo.delete(existingPool.id);
         } else {
           logger.info(`Pool worktree ${existingPool.id} already assigned to PR #${prInfo.prNumber}, refreshing`);
-          return this._refreshPoolWorktree(existingPool, worktreeRecord, prInfo, prData);
+          try {
+            return await this._refreshPoolWorktree(existingPool, worktreeRecord, prInfo, prData);
+          } catch (error) {
+            // The refresh has settled; do not leave its transitional claim
+            // behind when Git rejects it.
+            await this._poolRepo.markInUse(existingPool.id, prInfo.prNumber);
+            throw error;
+          }
         }
       } else {
         logger.warn(`Orphaned pool entry ${existingPool.id} -- removing`);
@@ -481,6 +488,9 @@ class WorktreePoolLifecycle {
    * @param {string} worktreeId - Pool worktree ID
    */
   async releaseForDeletion(worktreeId) {
+    if (this._usageTracker.getActiveAnalyses(worktreeId).size) {
+      throw Object.assign(new Error('Cannot release an active checkout; wait for analysis termination acknowledgement'), { statusCode: 409 });
+    }
     this._usageTracker.clearWorktree(worktreeId);
     await this._poolRepo.markAvailable(worktreeId);
   }
@@ -499,40 +509,34 @@ class WorktreePoolLifecycle {
   }
 
   /**
-   * Permanently destroy a pool worktree: cancel active analyses, clear
-   * in-memory tracking, remove from disk, and delete from both DB tables.
+   * Permanently destroy an idle pool worktree. Removal never cancels analyses
+   * and never discards the registry after a failed filesystem operation.
    *
    * Unlike releaseForDeletion (which merely marks the slot available),
    * this removes the worktree entirely. The pool will create a replacement
    * when the next acquireForPR call triggers reserveSlot.
    *
    * @param {string} worktreeId - Pool worktree ID
-   * @param {Object} [options={}]
-   * @param {Function} [options.cancelAnalyses] - Async callback(worktreeId, analysisIdSet) to cancel running analyses
    */
-  async destroyPoolWorktree(worktreeId, { cancelAnalyses } = {}) {
+  async destroyPoolWorktree(worktreeId) {
     const poolEntry = await this._poolRepo.getPoolEntry(worktreeId);
     if (poolEntry && (poolEntry.status === 'creating' || poolEntry.status === 'switching')) {
-      throw new Error(`Cannot delete worktree ${worktreeId}: currently ${poolEntry.status}`);
+      throw Object.assign(new Error(`Cannot delete worktree ${worktreeId}: currently ${poolEntry.status}`), { statusCode: 409 });
     }
 
     const activeIds = this._usageTracker.getActiveAnalyses(worktreeId);
-    if (activeIds.size > 0 && cancelAnalyses) {
-      await cancelAnalyses(worktreeId, activeIds);
+    if (activeIds.size > 0) {
+      throw Object.assign(new Error(`Cannot delete worktree ${worktreeId}: analysis is still active`), { statusCode: 409 });
+    }
+
+    const record = await this._worktreeRepo.findById(worktreeId);
+    const worktreePath = record?.path || poolEntry?.path;
+    if (worktreePath) {
+      const mgr = new this._GitWorktreeManager(this.db);
+      await mgr.removeWorktree(worktreePath);
     }
 
     this._usageTracker.clearWorktree(worktreeId);
-
-    const record = await this._worktreeRepo.findById(worktreeId);
-    if (record && record.path) {
-      try {
-        const mgr = new this._GitWorktreeManager(this.db);
-        await mgr.cleanupWorktree(record.path);
-      } catch (err) {
-        logger.warn(`Could not clean up pool worktree ${worktreeId} from disk: ${err.message}`);
-      }
-    }
-
     await this._poolRepo.delete(worktreeId);
     await this._worktreeRepo.delete(worktreeId);
     logger.info(`Destroyed pool worktree ${worktreeId}`);

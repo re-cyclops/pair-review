@@ -341,6 +341,9 @@ class AIPanel {
         this.isCollapsed = true;
         if (this.panel) {
             this.panel.classList.add('collapsed');
+            if (this.panel.contains(document.activeElement)) {
+                document.getElementById('ai-panel-toggle')?.focus();
+            }
         }
         // Set CSS variable to 0 so width calculations don't reserve space
         document.documentElement.style.setProperty('--ai-panel-width', '0px');
@@ -1686,6 +1689,7 @@ class AIPanel {
                         <span class="finding-title">${this.escapeHtml(title)}</span>
                         ${category || finding.severity ? `<span class="finding-meta">${category ? `<span class="finding-category">${this.escapeHtml(category)}</span>` : ''}${finding.severity ? `<span class="severity-badge severity-${finding.severity}">${this.escapeHtml(finding.severity.toUpperCase())}</span>` : ''}</span>` : ''}
                         ${fileName ? `<span class="finding-location">${this.escapeHtml(fileName)}</span>` : ''}
+                        ${window.SuggestionUI?.buildRevisionWarningHtml?.(finding.revision) || ''}
                         ${dismissalReason ? `<span class="finding-dismissal-reason">${this.escapeHtml(this.truncateText(dismissalReason, 60))}</span>` : ''}
                     </div>
                 </button>

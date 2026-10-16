@@ -113,7 +113,6 @@ function createTestSuggestionManager(prManagerConfig = {}) {
     userComments: [],
     ...prManagerConfig
   };
-  sm._isDisplayingSuggestions = false;
   return sm;
 }
 

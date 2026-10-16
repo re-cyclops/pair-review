@@ -3,7 +3,9 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs').promises;
 const fsSync = require('fs');
+const { randomUUID } = require('crypto');
 const { getConfigDir } = require('./config');
+const activity = require('./analysis-activity');
 
 let dbPath = null;
 
@@ -21,7 +23,7 @@ function getDbPath() {
 /**
  * Current schema version - increment this when adding new migrations
  */
-const CURRENT_SCHEMA_VERSION = 55;
+const CURRENT_SCHEMA_VERSION = 62;
 
 /**
  * Database schema SQL statements
@@ -48,7 +50,12 @@ const SCHEMA_SQL = {
       local_base_branch TEXT,
       local_head_branch TEXT,
       local_scope_start TEXT DEFAULT 'unstaged',
-      local_scope_end TEXT DEFAULT 'untracked'
+      local_scope_end TEXT DEFAULT 'untracked',
+      draft_body TEXT NOT NULL DEFAULT '',
+      draft_event TEXT NOT NULL DEFAULT 'COMMENT' CHECK(draft_event IN ('COMMENT', 'APPROVE', 'REQUEST_CHANGES')),
+      draft_revision INTEGER NOT NULL DEFAULT 1,
+      associated_pr TEXT,
+      review_progress TEXT NOT NULL DEFAULT '{}'
     )
   `,
 
@@ -99,6 +106,10 @@ const SCHEMA_SQL = {
       is_raw INTEGER DEFAULT 0,
 
       severity TEXT,
+      draft_key TEXT,
+      revision INTEGER NOT NULL DEFAULT 1,
+      included INTEGER NOT NULL DEFAULT 1 CHECK(included IN (0, 1)),
+      deleted_at TEXT,
 
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -139,6 +150,16 @@ const SCHEMA_SQL = {
       created_at TEXT NOT NULL,
       last_accessed_at TEXT NOT NULL,
       UNIQUE(pr_number, repository)
+    )
+  `,
+
+  worktree_locks: `
+    CREATE TABLE IF NOT EXISTS worktree_locks (
+      path TEXT PRIMARY KEY,
+      holder_id TEXT NOT NULL,
+      repository TEXT,
+      pr_number INTEGER,
+      locked_at TEXT NOT NULL
     )
   `,
 
@@ -188,6 +209,9 @@ const SCHEMA_SQL = {
       config_type TEXT DEFAULT 'single',
       levels_config TEXT,
       level_outcomes TEXT,
+      activity_state TEXT,
+      review_baseline TEXT,
+      protocol_snapshot TEXT,
       scope_start TEXT,
       scope_end TEXT,
       FOREIGN KEY (review_id) REFERENCES reviews(id) ON DELETE CASCADE
@@ -317,6 +341,19 @@ const SCHEMA_SQL = {
       collection TEXT NOT NULL,
       host TEXT,
       fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `,
+
+  github_collection_observations: `
+    CREATE TABLE IF NOT EXISTS github_collection_observations (
+      collection TEXT NOT NULL,
+      source TEXT NOT NULL,
+      credential_hash TEXT,
+      fetched_at TEXT,
+      availability TEXT NOT NULL DEFAULT 'unavailable',
+      error TEXT,
+      request_id TEXT,
+      PRIMARY KEY (collection, source)
     )
   `,
 
@@ -2363,6 +2400,67 @@ const MIGRATIONS = {
       console.log('  pool_fetch_owner column already present; nothing to do');
     }
     console.log('Migration to schema version 55 complete');
+  },
+  56: (db) => {
+    db.transaction(() => {
+      if (tableExists(db, 'analysis_runs') && !columnExists(db, 'analysis_runs', 'activity_state')) {
+        db.exec('ALTER TABLE analysis_runs ADD COLUMN activity_state TEXT');
+      }
+    })();
+  },
+  57: (db) => {
+    db.transaction(() => {
+      const additions = {
+        comments: { draft_key: 'TEXT', revision: 'INTEGER NOT NULL DEFAULT 1', included: 'INTEGER NOT NULL DEFAULT 1 CHECK(included IN (0, 1))', deleted_at: 'TEXT' },
+        reviews: { draft_body: "TEXT NOT NULL DEFAULT ''", draft_event: "TEXT NOT NULL DEFAULT 'COMMENT' CHECK(draft_event IN ('COMMENT', 'APPROVE', 'REQUEST_CHANGES'))", draft_revision: 'INTEGER NOT NULL DEFAULT 1' }
+      };
+      for (const [table, columns] of Object.entries(additions)) {
+        if (!tableExists(db, table)) continue;
+        for (const [column, definition] of Object.entries(columns)) {
+          if (!columnExists(db, table, column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+        }
+      }
+      if (tableExists(db, 'comments')) {
+        db.exec("UPDATE comments SET draft_key = lower(hex(randomblob(16))) WHERE source = 'user' AND draft_key IS NULL");
+      }
+      initializeDraftTracking(db);
+    })();
+  },
+  58: (db) => {
+    db.transaction(() => {
+      if (tableExists(db, 'reviews') && !columnExists(db, 'reviews', 'associated_pr')) db.exec('ALTER TABLE reviews ADD COLUMN associated_pr TEXT');
+      if (tableExists(db, 'reviews') && tableExists(db, 'comments')) require('./review-submission').initializeSubmissionState(db);
+    })();
+  },
+  59: (db) => {
+    db.exec(SCHEMA_SQL.github_collection_observations);
+  },
+  60: (db) => {
+    db.transaction(() => {
+      if (tableExists(db, 'reviews') && !columnExists(db, 'reviews', 'review_progress')) db.exec("ALTER TABLE reviews ADD COLUMN review_progress TEXT NOT NULL DEFAULT '{}'");
+      if (tableExists(db, 'analysis_runs') && !columnExists(db, 'analysis_runs', 'review_baseline')) db.exec('ALTER TABLE analysis_runs ADD COLUMN review_baseline TEXT');
+      if (!tableExists(db, 'reviews') || !tableExists(db, 'pr_metadata')) return;
+      for (const row of db.prepare(`SELECT p.rowid AS metadata_id, p.pr_data, r.id AS review_id FROM pr_metadata p
+        LEFT JOIN reviews r ON r.repository = p.repository COLLATE NOCASE AND r.pr_number = p.pr_number`).all()) {
+        let data;
+        try { data = JSON.parse(row.pr_data); } catch { continue; }
+        if (!data || !Object.hasOwn(data, 'viewedFiles')) continue;
+        // Legacy marks have no content/revision evidence; preserve them as
+        // unverified history rather than silently certifying the current head.
+        if (row.review_id && Array.isArray(data.viewedFiles)) {
+          db.prepare("UPDATE reviews SET review_progress = json_set(review_progress, '$.legacyFiles', json(?)) WHERE id = ?")
+            .run(JSON.stringify(data.viewedFiles.filter(file => typeof file === 'string')), row.review_id);
+        }
+        delete data.viewedFiles;
+        db.prepare('UPDATE pr_metadata SET pr_data = ? WHERE rowid = ?').run(JSON.stringify(data), row.metadata_id);
+      }
+    })();
+  },
+  61: (db) => {
+    if (tableExists(db, 'analysis_runs') && !columnExists(db, 'analysis_runs', 'protocol_snapshot')) db.exec('ALTER TABLE analysis_runs ADD COLUMN protocol_snapshot TEXT');
+  },
+  62: (db) => {
+    db.exec(SCHEMA_SQL.worktree_locks);
   }
 };
 
@@ -2410,6 +2508,39 @@ function runVersionedMigrations(db) {
       console.warn(`Warning: No migration defined for version ${version}`);
     }
   }
+}
+
+// Keep revision changes atomic even when re-anchoring or publication updates rows
+// through another repository. New identities prevent stale editors targeting a
+// reused integer comment ID.
+function initializeDraftTracking(db) {
+  if (!tableExists(db, 'comments') || !tableExists(db, 'reviews')) return;
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_comments_draft_key ON comments(draft_key);
+    CREATE TRIGGER IF NOT EXISTS comments_draft_created AFTER INSERT ON comments
+    WHEN NEW.source = 'user'
+    BEGIN
+      UPDATE comments SET draft_key = COALESCE(NEW.draft_key, lower(hex(randomblob(16)))) WHERE id = NEW.id;
+      UPDATE reviews SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.review_id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS comments_draft_changed
+    AFTER UPDATE OF body, file, line_start, line_end, side, diff_position, commit_sha, is_file_level, status, included, deleted_at ON comments
+    WHEN NEW.source = 'user' AND (
+      NEW.body IS NOT OLD.body OR NEW.file IS NOT OLD.file OR
+      NEW.line_start IS NOT OLD.line_start OR NEW.line_end IS NOT OLD.line_end OR
+      NEW.side IS NOT OLD.side OR NEW.diff_position IS NOT OLD.diff_position OR
+      NEW.commit_sha IS NOT OLD.commit_sha OR NEW.is_file_level IS NOT OLD.is_file_level OR
+      NEW.status IS NOT OLD.status OR NEW.included IS NOT OLD.included OR NEW.deleted_at IS NOT OLD.deleted_at)
+    BEGIN
+      UPDATE comments SET revision = OLD.revision + 1, updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+      UPDATE reviews SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.review_id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS reviews_draft_changed AFTER UPDATE OF draft_body, draft_event ON reviews
+    WHEN NEW.draft_body IS NOT OLD.draft_body OR NEW.draft_event IS NOT OLD.draft_event
+    BEGIN
+      UPDATE reviews SET draft_revision = OLD.draft_revision + 1, updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+    END;
+  `);
 }
 
 /**
@@ -2468,6 +2599,8 @@ function setupSchema(db) {
   for (const sql of INDEX_SQL) {
     db.exec(sql);
   }
+  initializeDraftTracking(db);
+  require('./review-submission').initializeSubmissionState(db);
 
   console.log(isFreshInstall
     ? `Created new database at: ${getDbPath()}`
@@ -3234,10 +3367,16 @@ class WorktreePoolRepository {
         WHERE current_pr_number = ? AND repository = ? COLLATE NOCASE
           AND status IN ('in_use', 'available')
       `).get(prNumber, repository);
+      if (!entry && this.db.prepare(`SELECT 1 FROM worktree_pool
+        WHERE current_pr_number = ? AND repository = ? COLLATE NOCASE AND status IN ('switching', 'creating')`)
+        .get(prNumber, repository)) {
+        throw Object.assign(new Error('This checkout is still being prepared. Wait for that operation to settle.'), { statusCode: 409 });
+      }
       if (entry) {
+        require('./review-removal').assertCheckoutAvailable(this.db, entry.path, { repository, prNumber });
         const now = new Date().toISOString();
         this.db.prepare(
-          `UPDATE worktree_pool SET status = 'in_use', current_pr_number = ?, last_switched_at = ?, current_review_id = NULL WHERE id = ?`
+          `UPDATE worktree_pool SET status = 'switching', current_pr_number = ?, last_switched_at = ?, current_review_id = NULL WHERE id = ?`
         ).run(prNumber, now, entry.id);
       }
       return entry || null;
@@ -3255,13 +3394,14 @@ class WorktreePoolRepository {
    */
   async claimAvailable(repository) {
     const claimTx = this.db.transaction(() => {
+      const { WorktreeLockManager } = require('./git/worktree-lock');
+      const locks = new WorktreeLockManager(this.db);
       const entry = this.db.prepare(`
         SELECT id, repository, path, status, current_pr_number, last_switched_at, last_fetched_at, created_at
         FROM worktree_pool
         WHERE repository = ? COLLATE NOCASE AND status = 'available'
         ORDER BY last_switched_at ASC NULLS FIRST
-        LIMIT 1
-      `).get(repository);
+      `).all(repository).find(candidate => !locks.isLocked(candidate.path).locked);
       if (entry) {
         this.db.prepare(
           `UPDATE worktree_pool SET status = 'switching' WHERE id = ?`
@@ -3661,21 +3801,24 @@ class CommentRepository {
     type = 'comment',
     title = null,
     parent_id = null,
-    author = 'Current User'
+    author = 'Current User',
+    draft_key = randomUUID(),
+    included = true
   }) {
     // Validate required fields
-    if (!review_id || !file || !line_start || !body) {
+    if (!review_id || !file || !line_start || typeof body !== 'string' || !body.trim()) {
       throw new Error('Missing required fields: review_id, file, line_start, body');
     }
 
     // Validate side
     const validSide = side === 'LEFT' ? 'LEFT' : 'RIGHT';
 
-    const result = await run(this.db, `
+    await run(this.db, `
       INSERT INTO comments (
         review_id, source, author, file, line_start, line_end, diff_position, side, commit_sha,
-        type, title, body, status, parent_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        type, title, body, status, parent_id, draft_key, included
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(draft_key) DO NOTHING
     `, [
       review_id,
       'user',
@@ -3688,12 +3831,14 @@ class CommentRepository {
       commit_sha,
       type,
       title,
-      body.trim(),
+      body,
       'active',
-      parent_id
+      parent_id,
+      draft_key,
+      Number(included)
     ]);
 
-    return result.lastID;
+    return this._createdDraft(draft_key, { review_id, file, line_start, line_end: line_end || line_start, diff_position, side: validSide, body, commit_sha, parent_id, is_file_level: 0, included: Number(included) });
   }
 
   /**
@@ -3717,18 +3862,21 @@ class CommentRepository {
     type = 'comment',
     title = null,
     parent_id = null,
-    author = 'Current User'
+    author = 'Current User',
+    draft_key = randomUUID(),
+    included = true
   }) {
     // Validate required fields
-    if (!review_id || !file || !body) {
+    if (!review_id || !file || typeof body !== 'string' || !body.trim()) {
       throw new Error('Missing required fields: review_id, file, body');
     }
 
-    const result = await run(this.db, `
+    await run(this.db, `
       INSERT INTO comments (
         review_id, source, author, file, line_start, line_end, diff_position, side, commit_sha,
-        type, title, body, status, parent_id, is_file_level
-      ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, 1)
+        type, title, body, status, parent_id, is_file_level, draft_key, included
+      ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      ON CONFLICT(draft_key) DO NOTHING
     `, [
       review_id,
       'user',
@@ -3737,12 +3885,25 @@ class CommentRepository {
       commit_sha,
       type,
       title,
-      body.trim(),
+      body,
       'active',
-      parent_id
+      parent_id,
+      draft_key,
+      Number(included)
     ]);
 
-    return result.lastID;
+    return this._createdDraft(draft_key, { review_id, file, body, commit_sha, parent_id, is_file_level: 1, included: Number(included) });
+  }
+
+  _createdDraft(key, expected) {
+    const current = this.db.prepare('SELECT * FROM comments WHERE draft_key = ?').get(key);
+    if (!current || current.deleted_at || current.status === 'submitted' ||
+        Object.entries(expected).some(([field, value]) => current[field] !== value)) {
+      throw Object.assign(new Error('This draft identity already has different content. Recover or create a new draft.'), {
+        statusCode: 409, code: 'DRAFT_CONFLICT', current: current?.review_id === expected.review_id ? current : null
+      });
+    }
+    return current.id;
   }
 
   /**
@@ -3752,7 +3913,7 @@ class CommentRepository {
    * @param {string} editedBody - The adopted/edited comment body
    * @returns {Promise<number>} Created user comment ID
    */
-  async adoptSuggestion(suggestionId, editedBody) {
+  async adoptSuggestion(suggestionId, editedBody, draft = null) {
     // Validate inputs
     if (!suggestionId || !editedBody || !editedBody.trim()) {
       throw new Error('Missing required fields: suggestionId, editedBody');
@@ -3771,6 +3932,14 @@ class CommentRepository {
       throw new Error('This suggestion has already been processed');
     }
 
+    if (draft) {
+      const existing = await this.getComment(draft.id, 'user');
+      if (!existing || existing.review_id !== suggestion.review_id || existing.parent_id !== Number(suggestionId)) {
+        throw Object.assign(new Error('Draft does not belong to this suggestion'), { statusCode: 409 });
+      }
+      await this.updateComment(existing.id, { body: editedBody, included: true, draft_key: draft.draft_key, expected_revision: draft.revision });
+      return existing.id;
+    }
 
     // Create user comment preserving metadata from the suggestion
     const result = await run(this.db, `
@@ -3791,7 +3960,7 @@ class CommentRepository {
       suggestion.commit_sha,
       'comment',
       suggestion.title,
-      editedBody.trim(),
+      editedBody,
       'active',
       suggestionId,
       suggestion.is_file_level || 0
@@ -3867,29 +4036,28 @@ class CommentRepository {
   }
 
   /**
-   * Update a user comment's body
-   * @param {number} id - Comment ID
-   * @param {string} body - New comment body
-   * @returns {Promise<boolean>} True if updated successfully
+   * Compare-and-swap a user's draft. Text is stored verbatim; trimming can change
+   * Markdown code blocks. A conflict returns the current record without writing.
    */
-  async updateComment(id, body) {
-    if (!body || !body.trim()) {
-      throw new Error('Comment body cannot be empty');
+  async updateComment(id, { body, included, expected_revision, draft_key }) {
+    if (body !== undefined && (typeof body !== 'string' || !body.trim())) {
+      throw Object.assign(new Error('Comment body cannot be empty'), { statusCode: 400 });
     }
-
-    // Verify it's a user comment
-    const comment = await this.getComment(id, 'user');
-    if (!comment) {
-      throw new Error('User comment not found');
-    }
-
-    const result = await run(this.db, `
-      UPDATE comments
-      SET body = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `, [body.trim(), id]);
-
-    return result.changes > 0;
+    return this.db.transaction(() => {
+      const current = this.db.prepare("SELECT * FROM comments WHERE id = ? AND source = 'user'").get(id);
+      if (!current) throw Object.assign(new Error('User comment not found'), { statusCode: 404 });
+      if (!Number.isInteger(expected_revision) || expected_revision < 1 || typeof draft_key !== 'string') {
+        throw Object.assign(new Error('A draft identity and expected revision are required'), { statusCode: 428, code: 'DRAFT_PRECONDITION_REQUIRED' });
+      }
+      if (current.revision !== expected_revision || current.draft_key !== draft_key || current.deleted_at || current.status === 'submitted') {
+        throw Object.assign(new Error('This draft changed in another editor. Your text has not been overwritten.'), {
+          statusCode: 409, code: 'DRAFT_CONFLICT', current
+        });
+      }
+      this.db.prepare('UPDATE comments SET body = ?, included = ? WHERE id = ? AND draft_key = ? AND revision = ?')
+        .run(body === undefined ? current.body : body, included === undefined ? current.included : Number(included), id, draft_key, expected_revision);
+      return this.db.prepare('SELECT * FROM comments WHERE id = ?').get(id);
+    })();
   }
 
   /**
@@ -3991,6 +4159,7 @@ class CommentRepository {
     return await query(this.db, `
       SELECT
         id,
+        review_id, draft_key, revision, included, commit_sha, deleted_at,
         source,
         author,
         file,
@@ -4008,7 +4177,7 @@ class CommentRepository {
         created_at,
         updated_at
       FROM comments
-      WHERE review_id = ? AND source = 'user' AND ${statusFilter}
+      WHERE review_id = ? AND source = 'user' AND deleted_at IS NULL AND ${statusFilter}
       ORDER BY file, line_start, created_at
     `, [reviewId]);
   }
@@ -4073,7 +4242,7 @@ class CommentRepository {
   async restoreComment(id) {
     // Verify it's a user comment with inactive status
     const comment = await queryOne(this.db, `
-      SELECT id, status FROM comments WHERE id = ? AND source = 'user'
+      SELECT id, status FROM comments WHERE id = ? AND source = 'user' AND deleted_at IS NULL
     `, [id]);
 
     if (!comment) {
@@ -4671,7 +4840,7 @@ class ReviewRepository {
       SELECT id, pr_number, repository, status, review_id,
              created_at, updated_at, submitted_at, review_data, custom_instructions, summary,
              review_type, local_path, local_head_sha,
-             local_scope_start, local_scope_end, local_base_branch
+             local_scope_start, local_scope_end, local_base_branch, associated_pr
       FROM reviews
       WHERE id = ?
     `, [id]);
@@ -4768,6 +4937,14 @@ class ReviewRepository {
   async updateAfterSubmission(id, { event, reviewData }) {
     const now = new Date().toISOString();
     const status = event === 'DRAFT' ? 'draft' : 'submitted';
+    const existing = await this.getReview(id);
+    const existingData = existing?.review_data && typeof existing.review_data === 'object' && !Array.isArray(existing.review_data)
+      ? existing.review_data
+      : {};
+    const submittedData = reviewData && typeof reviewData === 'object' && !Array.isArray(reviewData)
+      ? reviewData
+      : {};
+    const mergedReviewData = { ...existingData, ...submittedData };
 
     // Note: reviews.review_id is legacy and no longer written.
     // GitHub review IDs are now tracked in the github_reviews table.
@@ -4776,7 +4953,7 @@ class ReviewRepository {
         UPDATE reviews
         SET status = ?, updated_at = ?, review_data = ?
         WHERE id = ?
-      `, [status, now, JSON.stringify(reviewData), id]);
+      `, [status, now, JSON.stringify(mergedReviewData), id]);
 
       return result.changes > 0;
     } else {
@@ -4784,7 +4961,7 @@ class ReviewRepository {
         UPDATE reviews
         SET status = ?, updated_at = ?, submitted_at = ?, review_data = ?
         WHERE id = ?
-      `, [status, now, now, JSON.stringify(reviewData), id]);
+      `, [status, now, now, JSON.stringify(mergedReviewData), id]);
 
       return result.changes > 0;
     }
@@ -5159,10 +5336,10 @@ class ReviewRepository {
    * @returns {Promise<boolean>} True if a record was deleted
    */
   async deleteLocalSession(reviewId) {
-    const result = await run(this.db, `
-      DELETE FROM reviews WHERE id = ? AND review_type = 'local'
-    `, [reviewId]);
-    return result.changes > 0;
+    return this.db.transaction(() => {
+      require('./review-removal').assertReviewIdle(this.db, reviewId);
+      return this.db.prepare("DELETE FROM reviews WHERE id = ? AND review_type = 'local'").run(reviewId).changes > 0;
+    }).immediate();
   }
 
   /**
@@ -5194,38 +5371,26 @@ class ReviewRepository {
    * @returns {Promise<boolean>} True if review was deleted
    */
   async deleteWithRelatedData(reviewId, { prNumber = null, repository = null } = {}) {
-    return withTransaction(this.db, async () => {
-      // Delete the review row — FK cascades handle related tables
-      const result = await run(this.db, 'DELETE FROM reviews WHERE id = ?', [reviewId]);
-
+    return this.db.transaction(() => {
+      require('./review-removal').assertReviewIdle(this.db, reviewId);
+      const metadata = prNumber != null && repository
+        ? this.db.prepare('SELECT host FROM pr_metadata WHERE pr_number = ? AND repository = ? COLLATE NOCASE').get(prNumber, repository)
+        : null;
+      const result = this.db.prepare('DELETE FROM reviews WHERE id = ?').run(reviewId);
       if (result.changes === 0) return false;
-
-      // Clean up orphaned pr_metadata and github_pr_cache if this was a PR review
       if (prNumber != null && repository) {
-        const remaining = await queryOne(this.db, `
-          SELECT COUNT(*) as cnt FROM reviews
-          WHERE pr_number = ? AND repository = ? COLLATE NOCASE
-        `, [prNumber, repository]);
-
-        if (remaining.cnt === 0) {
-          await run(this.db, `
-            DELETE FROM pr_metadata
-            WHERE pr_number = ? AND repository = ? COLLATE NOCASE
-          `, [prNumber, repository]);
-
-          // Parse owner/repo for github_pr_cache
+        const remaining = this.db.prepare('SELECT 1 FROM reviews WHERE pr_number = ? AND repository = ? COLLATE NOCASE LIMIT 1').get(prNumber, repository);
+        if (!remaining) {
+          this.db.prepare('DELETE FROM pr_metadata WHERE pr_number = ? AND repository = ? COLLATE NOCASE').run(prNumber, repository);
           const parts = repository.split('/');
-          if (parts.length === 2) {
-            await run(this.db, `
-              DELETE FROM github_pr_cache
-              WHERE owner = ? AND repo = ? AND number = ?
-            `, [parts[0], parts[1], prNumber]);
+          if (parts.length === 2 && metadata) {
+            this.db.prepare('DELETE FROM github_pr_cache WHERE owner = ? AND repo = ? AND number = ? AND host IS ?')
+              .run(parts[0], parts[1], prNumber, metadata.host ?? null);
           }
         }
       }
-
       return true;
-    });
+    }).immediate();
   }
 }
 
@@ -5425,16 +5590,30 @@ class AnalysisRunRepository {
    * @param {string} [runInfo.headSha] - Git HEAD SHA at the time of analysis (PR head commit or local HEAD)
    * @param {string} [runInfo.diff] - Unified diff snapshot at the time of analysis
    * @param {string} [runInfo.status='running'] - Initial status (default 'running'; pass 'completed' for externally-produced results)
+   * @param {Object|null} [runInfo.protocol] - Effective run protocol; child runs inherit their parent's snapshot
    * @returns {Promise<Object>} Created analysis run record
    */
-  async create({ id, reviewId, provider = null, model = null, tier = null, customInstructions = null, globalInstructions = null, repoInstructions = null, requestInstructions = null, headSha = null, diff = null, status = 'running', parentRunId = null, configType = 'single', levelsConfig = null, scopeStart = null, scopeEnd = null }) {
+  async create({ id, reviewId, provider = null, model = null, tier = null, customInstructions = null, globalInstructions = null, repoInstructions = null, requestInstructions = null, headSha = null, diff = null, status = 'running', parentRunId = null, configType = 'single', levelsConfig = null, scopeStart = null, scopeEnd = null, protocol = null }) {
+    if (activity.isStopping()) {
+      throw Object.assign(new Error('Executor is shutting down'), { status: 503, isCancellation: true });
+    }
     const isTerminal = ['completed', 'failed', 'cancelled'].includes(status);
     const completedAt = isTerminal ? 'CURRENT_TIMESTAMP' : 'NULL';
     const levelsConfigJson = levelsConfig ? JSON.stringify(levelsConfig) : null;
-    await run(this.db, `
-      INSERT INTO analysis_runs (id, review_id, provider, model, tier, custom_instructions, global_instructions, repo_instructions, request_instructions, head_sha, diff, status, completed_at, parent_run_id, config_type, levels_config, scope_start, scope_end)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${completedAt}, ?, ?, ?, ?, ?)
-    `, [id, reviewId, provider, model, tier, customInstructions, globalInstructions, repoInstructions, requestInstructions, headSha, diff, status, parentRunId, configType, levelsConfigJson, scopeStart, scopeEnd]);
+    const protocolJson = protocol ? JSON.stringify(protocol) : null;
+    this.db.transaction(() => {
+      require('./review-removal').assertReviewAvailable(this.db, reviewId);
+      const parent = parentRunId
+        ? this.db.prepare('SELECT review_baseline, protocol_snapshot FROM analysis_runs WHERE id = ?').get(parentRunId)
+        : null;
+      const baseline = parentRunId ? parent?.review_baseline || null
+        : this.db.prepare("SELECT json_extract(review_progress, '$.reviewed') AS baseline FROM reviews WHERE id = ?").get(reviewId)?.baseline || null;
+      this.db.prepare(`
+        INSERT INTO analysis_runs (id, review_id, provider, model, tier, custom_instructions, global_instructions, repo_instructions, request_instructions, head_sha, diff, status, completed_at, parent_run_id, config_type, levels_config, scope_start, scope_end, review_baseline, protocol_snapshot)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${completedAt}, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, reviewId, provider, model, tier, customInstructions, globalInstructions, repoInstructions, requestInstructions, headSha, diff, status, parentRunId, configType, levelsConfigJson, scopeStart, scopeEnd, baseline, parentRunId ? parent?.protocol_snapshot || null : protocolJson);
+    }).immediate();
+    activity.begin(this.db, id);
 
     // Query back the inserted row to return actual database values (including timestamps)
     return await this.getById(id);
@@ -5509,6 +5688,7 @@ class AnalysisRunRepository {
       SET ${setClauses.join(', ')}
       ${whereClause}
     `, params);
+    if (result.changes) activity.update(this.db, id, { status: updates.status, levels: updates.levelOutcomes });
 
     return result.changes > 0;
   }
@@ -5524,7 +5704,7 @@ class AnalysisRunRepository {
     const columns = [
       'id', 'review_id', 'provider', 'model', 'tier', 'custom_instructions', 'global_instructions', 'repo_instructions', 'request_instructions',
       'head_sha', 'summary', 'status', 'total_suggestions', 'files_analyzed', 'started_at', 'completed_at',
-      'parent_run_id', 'config_type', 'levels_config', 'level_outcomes'
+      'parent_run_id', 'config_type', 'levels_config', 'level_outcomes', 'review_baseline', 'protocol_snapshot'
     ];
     if (includeDiff) {
       columns.splice(columns.indexOf('head_sha') + 1, 0, 'diff'); // Insert diff after head_sha
@@ -5552,7 +5732,7 @@ class AnalysisRunRepository {
     const columns = [
       'id', 'review_id', 'provider', 'model', 'tier', 'custom_instructions', 'global_instructions', 'repo_instructions', 'request_instructions',
       'head_sha', 'summary', 'status', 'total_suggestions', 'files_analyzed', 'started_at', 'completed_at',
-      'parent_run_id', 'config_type', 'levels_config', 'level_outcomes'
+      'parent_run_id', 'config_type', 'levels_config', 'level_outcomes', 'review_baseline', 'protocol_snapshot'
     ];
     if (includeDiff) {
       columns.splice(columns.indexOf('head_sha') + 1, 0, 'diff'); // Insert diff after head_sha
@@ -5590,7 +5770,7 @@ class AnalysisRunRepository {
     const columns = [
       'id', 'review_id', 'provider', 'model', 'tier', 'custom_instructions', 'global_instructions', 'repo_instructions', 'request_instructions',
       'head_sha', 'summary', 'status', 'total_suggestions', 'files_analyzed', 'started_at', 'completed_at',
-      'parent_run_id', 'config_type', 'levels_config', 'level_outcomes'
+      'parent_run_id', 'config_type', 'levels_config', 'level_outcomes', 'review_baseline', 'protocol_snapshot'
     ];
     if (includeDiff) {
       columns.splice(columns.indexOf('head_sha') + 1, 0, 'diff'); // Insert diff after head_sha
@@ -5617,7 +5797,7 @@ class AnalysisRunRepository {
     return query(this.db, `
       SELECT id, review_id, provider, model, tier, custom_instructions, global_instructions, repo_instructions, request_instructions,
              head_sha, summary, status, total_suggestions, files_analyzed, started_at, completed_at,
-             parent_run_id, config_type, levels_config, level_outcomes
+             parent_run_id, config_type, levels_config, level_outcomes, review_baseline, protocol_snapshot
       FROM analysis_runs
       WHERE parent_run_id = ?
       ORDER BY started_at ASC
@@ -6410,6 +6590,7 @@ module.exports = {
   getSchemaVersion,
   CURRENT_SCHEMA_VERSION,
   getDbPath,
+  initializeDraftTracking,
   WorktreeRepository,
   WorktreePoolRepository,
   RepoSettingsRepository,

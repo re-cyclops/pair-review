@@ -271,26 +271,17 @@ async function globalSetup() {
   const { GitWorktreeManager } = require('../../src/git/worktree');
   const configModule = require('../../src/config');
 
-  // Mock GitHub client
-  GitHubClient.prototype.fetchPullRequest = async () => mockGitHubResponses.fetchPullRequest;
+  // Use the same disposable HTTP host as the per-worker fixture.
+  const { createSubmissionHost } = require('../utils/submission-host');
+  const reviewHost = await createSubmissionHost({
+    repository: 'test-owner/test-repo', head: mockGitHubResponses.fetchPullRequest.head_sha,
+    base: mockGitHubResponses.fetchPullRequest.base_sha, author: mockGitHubResponses.fetchPullRequest.author,
+    pr: mockGitHubResponses.fetchPullRequest, diff: mockWorktreeResponses.generateUnifiedDiff
+  });
+  const originalBuildOctokit = GitHubClient.prototype._buildOctokit;
+  const hostTransport = new GitHubClient({ apiHost: reviewHost.baseUrl, token: 'synthetic-e2e-only' }).octokit;
+  GitHubClient.prototype._buildOctokit = () => hostTransport;
   GitHubClient.prototype.repositoryExists = async () => true;
-  GitHubClient.prototype.getPendingReviewForUser = async () => null; // No pending draft in tests
-  GitHubClient.prototype.getReviewById = async () => null; // No review lookup needed in tests
-  GitHubClient.prototype.createReviewGraphQL = async () => ({
-    id: 'PRR_test12345',
-    databaseId: 12345,
-    html_url: 'https://github.com/test-owner/test-repo/pull/1#review-12345',
-    state: 'APPROVED',
-    comments_count: 0,
-    submitted_at: new Date().toISOString()
-  });
-  GitHubClient.prototype.createDraftReviewGraphQL = async () => ({
-    id: 'PRR_test12346',
-    databaseId: 12346,
-    html_url: 'https://github.com/test-owner/test-repo/pull/1#review-12346',
-    state: 'PENDING',
-    comments_count: 0
-  });
 
   // Mock worktree manager
   GitWorktreeManager.prototype.getWorktreePath = async () => mockWorktreeResponses.getWorktreePath;
@@ -714,7 +705,7 @@ async function globalSetup() {
     const port = BASE_PORT + attempt;
     try {
       await new Promise((resolve, reject) => {
-        server = app.listen(port, () => resolve());
+        server = app.listen(port, '127.0.0.1', () => resolve());
         server.on('error', (err) => reject(err));
       });
       // Success — store the chosen port so Playwright tests can find it
@@ -742,7 +733,14 @@ async function globalSetup() {
       app.set('config', e2eGlobalSettings.buildEffectiveConfig());
       app.set('globalSettings', e2eGlobalSettings);
       console.log(`E2E test server running on http://localhost:${port}`);
-      return;
+      return async () => {
+        const stopped = new Promise(resolve => server.close(resolve));
+        server.closeAllConnections();
+        await stopped;
+        await reviewHost.close();
+        db.close();
+        GitHubClient.prototype._buildOctokit = originalBuildOctokit;
+      };
     } catch (err) {
       if (err.code === 'EADDRINUSE') {
         console.log(`Port ${port} in use, trying ${port + 1}...`);

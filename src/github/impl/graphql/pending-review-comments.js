@@ -1,22 +1,9 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
-const logger = require('../../../utils/logger');
-const { isComplexityError } = require('../../errors');
 
-/**
- * GraphQL implementation of the pending-review-comments area.
- *
- * Adds inline comments (line-level, range-level, and file-level) to an
- * already-pending review. Uses the `addPullRequestReviewThread` mutation
- * batched together for throughput, with adaptive batch sizing that halves
- * on GitHub complexity errors.
- *
- * The return shape (success count, failed flag, failedDetails) is the
- * same shape `GitHubClient.addCommentsInBatches` historically returned;
- * callers depend on that exact shape for cleanup and error reporting.
- */
-
-const MIN_BATCH_SIZE = 1;
-const DEFAULT_BATCH_SIZE = 10;
+// One mutation per call. The durable publisher records intent before invoking
+// this boundary and stores every returned alias receipt before another batch.
+// A GraphQL error (including a resolver error with data) is not evidence that
+// the other aliases had no effect. Never replay an uncertain mutation.
 
 /**
  * Build the GraphQL mutation text for a batch of comments. Aliases each
@@ -39,13 +26,13 @@ function buildBatchMutation(batch) {
             subjectType: FILE
             body: ${JSON.stringify(comment.body)}
           }) {
-            thread { id }
+            thread { id comments(first: 1) { nodes { id databaseId } } }
           }
         `;
     }
 
     const side = comment.side || 'RIGHT';
-    const startLineField = comment.start_line ? `startLine: ${comment.start_line}\n                ` : '';
+    const startLineField = comment.start_line ? `startLine: ${comment.start_line}\n                startSide: ${comment.start_side || side}\n                ` : '';
     return `
           comment${index}: addPullRequestReviewThread(input: {
             pullRequestId: $prId
@@ -55,7 +42,7 @@ function buildBatchMutation(batch) {
             side: ${side}
             body: ${JSON.stringify(comment.body)}
           }) {
-            thread { id }
+            thread { id comments(first: 1) { nodes { id databaseId } } }
           }
         `;
   }).join('\n');
@@ -67,164 +54,30 @@ function buildBatchMutation(batch) {
     `;
 }
 
-/**
- * Add comments to a pending review in batches, with adaptive batch sizing
- * on GitHub complexity errors. Sequential, with one retry per batch.
- *
- * @param {Object} octokit - Octokit instance (must expose .graphql)
- * @param {string} prNodeId - GraphQL node ID for the PR
- * @param {string} reviewId - GraphQL node ID for the pending review
- * @param {Array} comments - Array of comments with path, line (optional), side, body, isFileLevel
- * @param {number} [batchSize=10] - Initial batch size
- * @returns {Promise<{successCount: number, failed: boolean, failedDetails: string[]}>}
- */
-async function addCommentsInBatches(octokit, prNodeId, reviewId, comments, batchSize = DEFAULT_BATCH_SIZE) {
-  if (comments.length === 0) {
-    return { successCount: 0, failed: false, failedDetails: [] };
+async function addCommentBatch(octokit, prNodeId, reviewId, comments) {
+  if (!comments.length) return { receipts: [] };
+  let data;
+  let failure;
+  try {
+    data = await octokit.graphql(buildBatchMutation(comments), { prId: prNodeId, reviewId });
+  } catch (error) {
+    data = error.data;
+    failure = error;
   }
-
-  let currentBatchSize = batchSize;
-  let remaining = comments.slice();
-  let totalSuccessful = 0;
-  const failedDetails = [];
-  let batchNumber = 0;
-
-  logger.info(`Adding ${comments.length} comments in batches of up to ${currentBatchSize}`);
-
-  while (remaining.length > 0) {
-    batchNumber++;
-    const batch = remaining.slice(0, currentBatchSize);
-    logger.info(`Adding comments batch ${batchNumber} (${batch.length} comments, ${remaining.length} remaining)...`);
-
-    const batchMutation = buildBatchMutation(batch);
-
-    // Try the batch, with one retry on failure
-    let batchResult = null;
-    let batchError = null;
-    let retryAttempt = 0;
-    const maxRetries = 1;
-    let reducedBatchSize = false;
-
-    while (retryAttempt <= maxRetries) {
-      try {
-        batchResult = await octokit.graphql(batchMutation, {
-          prId: prNodeId,
-          reviewId
-        });
-        batchError = null;
-        break;
-      } catch (error) {
-        batchError = error;
-
-        // Complexity/cost limit: halve batch size and re-attempt
-        if (isComplexityError(error)) {
-          const newSize = Math.max(MIN_BATCH_SIZE, Math.floor(currentBatchSize / 2));
-          if (newSize < currentBatchSize) {
-            logger.warn(
-              `Batch ${batchNumber} hit complexity limit (size ${currentBatchSize}), ` +
-              `reducing batch size to ${newSize}`
-            );
-            currentBatchSize = newSize;
-            reducedBatchSize = true;
-            break;
-          }
-          // Already at the minimum - fall through to normal retry logic
-        }
-
-        if (retryAttempt < maxRetries) {
-          logger.warn(`Batch ${batchNumber} failed, retrying... (${error.message})`);
-          retryAttempt++;
-          // Fixed 1-second delay before a single retry. Backoff has no benefit
-          // with maxRetries=1; either it works on retry or we clean up.
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        } else {
-          logger.error(`Batch ${batchNumber} failed after retry: ${error.message}`);
-          break;
-        }
-      }
-    }
-
-    if (reducedBatchSize) {
-      // Re-attempt the same remaining slice with the smaller batch size.
-      continue;
-    }
-
-    if (batchError) {
-      // Build a map of per-comment errors from the GraphQL errors array.
-      // Each GraphQL error has a `path` like ["comment0"] that maps to the
-      // mutation alias, letting us match errors to specific comments.
-      const perCommentErrors = {};
-      if (batchError.errors && Array.isArray(batchError.errors)) {
-        for (const err of batchError.errors) {
-          if (err.path && err.path.length > 0) {
-            const alias = err.path[0];
-            perCommentErrors[alias] = err.message || 'Unknown error';
-          }
-        }
-      }
-
-      if (batchError.data) {
-        logger.warn(`GraphQL returned partial results with errors: ${JSON.stringify(batchError.errors || batchError.message)}`);
-        let batchSuccessful = 0;
-        for (let i = 0; i < batch.length; i++) {
-          const commentResult = batchError.data[`comment${i}`];
-          if (commentResult && commentResult.thread && commentResult.thread.id) {
-            batchSuccessful++;
-          } else {
-            const ghError = perCommentErrors[`comment${i}`] || 'No error details available';
-            const location = `${batch[i].path}:${batch[i].line || 'file-level'}`;
-            logger.warn(`Comment ${i} in batch ${batchNumber} failed to add: ${location} - ${ghError}`);
-            failedDetails.push(`${location} - ${ghError}`);
-          }
-        }
-        if (batchSuccessful < batch.length) {
-          logger.error(`CRITICAL: Batch ${batchNumber} had ${batch.length - batchSuccessful} failures`);
-          return { successCount: totalSuccessful + batchSuccessful, failed: true, failedDetails };
-        }
-        logger.info(`Batch ${batchNumber} complete (recovered from partial error): ${batchSuccessful} comments added`);
-        totalSuccessful += batchSuccessful;
-      } else {
-        const totalError = batchError.message || 'Unknown error';
-        logger.error(`CRITICAL: Batch ${batchNumber} failed completely: ${totalError}`);
-        for (let i = 0; i < batch.length; i++) {
-          const ghError = perCommentErrors[`comment${i}`] || totalError;
-          const location = `${batch[i].path}:${batch[i].line || 'file-level'}`;
-          failedDetails.push(`${location} - ${ghError}`);
-        }
-        return { successCount: totalSuccessful, failed: true, failedDetails };
-      }
-    } else if (batchResult) {
-      let batchSuccessful = 0;
-      for (let i = 0; i < batch.length; i++) {
-        const commentResult = batchResult[`comment${i}`];
-        if (commentResult && commentResult.thread && commentResult.thread.id) {
-          batchSuccessful++;
-        } else {
-          const location = `${batch[i].path}:${batch[i].line || 'file-level'}`;
-          logger.warn(`Comment ${i} in batch ${batchNumber} failed to add: ${location} - No error details available`);
-          failedDetails.push(`${location} - No error details available`);
-        }
-      }
-
-      if (batchSuccessful < batch.length) {
-        logger.error(`CRITICAL: Batch ${batchNumber} had ${batch.length - batchSuccessful} failures`);
-        return { successCount: totalSuccessful + batchSuccessful, failed: true, failedDetails };
-      }
-
-      totalSuccessful += batchSuccessful;
-      logger.info(`Batch ${batchNumber} complete: ${batchSuccessful} comments added`);
-    }
-
-    remaining = remaining.slice(batch.length);
-  }
-
-  logger.info(`All batches complete: ${totalSuccessful} total comments added`);
-  return { successCount: totalSuccessful, failed: false, failedDetails };
+  const receipts = comments.map((_comment, index) => {
+    const thread = data?.[`comment${index}`]?.thread;
+    const remote = thread?.comments?.nodes?.[0];
+    const error = failure?.errors?.find(item => item.path?.[0] === `comment${index}`)?.message;
+    return {
+      index,
+      state: remote?.id ? 'accepted' : 'unknown',
+      remoteId: remote?.id || null,
+      remoteDatabaseId: remote?.databaseId == null ? null : String(remote.databaseId),
+      threadId: thread?.id || null,
+      error: remote?.id ? null : error || failure?.message || 'The host returned no stable comment receipt'
+    };
+  });
+  return { receipts };
 }
 
-module.exports = {
-  addCommentsInBatches,
-  buildBatchMutation,
-  MIN_BATCH_SIZE,
-  DEFAULT_BATCH_SIZE
-};
+module.exports = { addCommentBatch, buildBatchMutation };

@@ -12,6 +12,7 @@ import { describe, it, expect, vi } from 'vitest';
 const {
   probeServer,
   runDelegatedAnalysis,
+  waitForAnalysis,
   setupLocal,
   launchAnalysis,
   buildLaunchRequest,
@@ -289,30 +290,19 @@ describe('runDelegatedAnalysis — happy paths', () => {
 });
 
 describe('runDelegatedAnalysis — failure and resilience', () => {
-  it('server-death mid-poll: consecutive status failures + non-terminal DB row → throws', async () => {
-    let statusPolls = 0;
-    const fetch = vi.fn(async (url, opts) => {
-      const method = opts?.method || 'GET';
-      if (method === 'POST' && url.endsWith('/api/setup/local')) return jsonRes(200, { setupId: 's4' });
-      if (url.includes('/api/setup/s4/status')) return jsonRes(200, { status: 'complete', reviewId: 1, reviewUrl: '/local/1' });
-      if (method === 'POST' && url.endsWith('/api/local/1/analyses')) return jsonRes(200, { analysisId: 'a4', runId: 'r4' });
-      if (url.includes('/api/analyses/a4/status')) { statusPolls++; throw new Error('ECONNRESET'); }
-      throw new Error(`unexpected ${method} ${url}`);
-    });
-    // DB row still 'running' → the server truly died mid-run.
-    const deps = baseDeps({ fetch, getRunStatus: vi.fn(async () => 'running') });
+  it('keeps a disconnected run unknown until durable state proves its outcome', async () => {
+    let persistedStatus = 'running';
+    const fetch = vi.fn(async () => { throw new Error('ECONNRESET'); });
+    const deps = baseDeps({ fetch, getRunStatus: async () => persistedStatus });
+    const outcome = await waitForAnalysis(deps, 'http://localhost:7247', 'a4', 'r4', {});
+    expect(outcome).toMatchObject({ status: 'unknown', error: expect.any(String) });
+    expect(fetch).toHaveBeenCalledTimes(MAX_CONSECUTIVE_POLL_FAILURES);
+    expect(fetch.mock.calls.every(([, options]) => options.method === 'GET')).toBe(true);
 
-    await expect(runDelegatedAnalysis({
-      baseUrl: 'http://localhost:7247',
-      mode: 'local',
-      reviewConfig: { type: 'single', provider: 'claude', model: 'opus' },
-      customInstructions: null,
-      localPath: '/repo',
-      db: {},
-      _deps: deps,
-    })).rejects.toThrow(/unreachable|died|failed/i);
-
-    expect(statusPolls).toBeGreaterThanOrEqual(MAX_CONSECUTIVE_POLL_FAILURES);
+    // The same unavailable connection must not hide a subsequently recorded result.
+    persistedStatus = 'completed';
+    expect(await waitForAnalysis(deps, 'http://localhost:7247', 'a4', 'r4', {}))
+      .toEqual({ status: 'completed' });
   });
 
   it('status 404 with a terminal DB row: completes from the DB (run finished, entry shed)', async () => {

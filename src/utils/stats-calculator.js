@@ -1,10 +1,8 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
 /**
  * Stats Calculator Utility
- * Calculates AI suggestion stats for display in the summary modal.
- *
- * This utility provides a shared implementation for calculating stats
- * from AI suggestions, used by both PR mode (analysis.js) and local mode (local.js).
+ * Calculates AI suggestion statistics and unfinished local draft state.
+ * Shared by PR/local views, discovery and the activity surface.
  */
 
 /**
@@ -82,7 +80,22 @@ function getStatsQuery(runId = null) {
   }
 }
 
+// The manifest and all local-work indicators must agree on unfinished comments.
+const USER_DRAFT_CONDITION = "c.source = 'user' AND c.status IN ('active', 'draft') AND c.deleted_at IS NULL";
+
+function getDraftStateQuery() {
+  return `SELECT r.id AS review_id,
+    (SELECT COUNT(*) FROM comments c WHERE c.review_id = r.id AND ${USER_DRAFT_CONDITION}) AS draft_count,
+    ((r.draft_body != '' OR r.draft_event != 'COMMENT') AND NOT EXISTS (
+      SELECT 1 FROM submission_attempts a WHERE a.review_id = r.id AND a.state = 'submitted'
+        AND json_extract(a.manifest, '$.bodyRevision') = r.draft_revision
+    )) AS has_summary
+    FROM reviews r`;
+}
+
 module.exports = {
   calculateStats,
-  getStatsQuery
+  getStatsQuery,
+  getDraftStateQuery,
+  USER_DRAFT_CONDITION
 };

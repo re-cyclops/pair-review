@@ -214,23 +214,20 @@ function createExecutableProviderClass(id, config) {
           ...process.env,
           ...this.extraEnv
         },
-        shell: this.useShell
+        shell: this.useShell,
+        detached: this.useShell
       });
 
       const pid = child.pid;
       logger.info(`[${id}] Spawned process: PID ${pid}`);
 
-      // Register for cancellation tracking.
-      // Wrap the child's kill method so we can detect when the process is
-      // killed externally (e.g., via shared.killProcesses on user cancel).
+      // The cancellation owner must reap the shell's process group and preserve the cancellation reason.
       let cancelled = false;
       if (analysisId && registerProcess) {
-        const originalKill = child.kill.bind(child);
-        child.kill = (...args) => {
+        registerProcess(analysisId, child, signal => {
           cancelled = true;
-          return originalKill(...args);
-        };
-        registerProcess(analysisId, child);
+          return killChildSafely(child, { shell: this.useShell, signal });
+        });
         logger.info(`[${id}] Registered process ${pid} for analysis ${analysisId}`);
       }
 
@@ -269,10 +266,7 @@ function createExecutableProviderClass(id, config) {
             if (stderr.trim()) {
               logger.warn(`[${id}] stderr before timeout: ${stderr.trim().slice(0, 2000)}`);
             }
-            // Not `shell: this.useShell`: this spawn is not `detached`, so
-            // group-kill would ESRCH and leave the child running — and it
-            // would bypass the kill wrapper above that records `cancelled`.
-            killChildSafely(child, { logPrefix: `[${id}]` });
+            killChildSafely(child, { logPrefix: `[${id}]`, shell: this.useShell });
           }, timeout);
         }
 

@@ -118,7 +118,7 @@ describe('Review Cleanup', () => {
       expect(runs).toHaveLength(0);
     });
 
-    it('should cascade to chat_sessions and chat_messages', async () => {
+    it('retains active chat history and cascades only after its session closes', async () => {
       const reviewId = await createAgedReview({ prNumber: 1 });
 
       await run(db, `
@@ -131,6 +131,11 @@ describe('Review Cleanup', () => {
         INSERT INTO chat_messages (session_id, role, content)
         VALUES (?, 'user', 'hello')
       `, [session.id]);
+
+      await expect(reviewRepo.deleteWithRelatedData(reviewId, { prNumber: 1, repository: 'owner/repo' }))
+        .rejects.toMatchObject({ statusCode: 409 });
+      expect(await queryOne(db, 'SELECT content FROM chat_messages WHERE session_id = ?', [session.id])).toEqual({ content: 'hello' });
+      await run(db, "UPDATE chat_sessions SET status = 'closed' WHERE id = ?", [session.id]);
 
       await reviewRepo.deleteWithRelatedData(reviewId, { prNumber: 1, repository: 'owner/repo' });
 
@@ -190,8 +195,11 @@ describe('Review Cleanup', () => {
       expect(metadata).not.toBeUndefined();
     });
 
-    it('should clean up github_pr_cache when last review for PR is deleted', async () => {
+    it('cleans only the recorded host cache when the last review is removed', async () => {
       const reviewId = await createAgedReview({ prNumber: 10, repository: 'acme/widgets' });
+      await run(db, "INSERT INTO pr_metadata (pr_number, repository) VALUES (10, 'acme/widgets')", []);
+      await run(db, `INSERT INTO github_pr_cache (owner, repo, number, collection, host)
+        VALUES ('acme', 'widgets', 10, 'review-requests', 'https://other.example.invalid/api')`, []);
 
       await run(db, `
         INSERT INTO github_pr_cache (owner, repo, number, title, collection)
@@ -201,9 +209,10 @@ describe('Review Cleanup', () => {
       await reviewRepo.deleteWithRelatedData(reviewId, { prNumber: 10, repository: 'acme/widgets' });
 
       const cache = await queryOne(db, `
-        SELECT * FROM github_pr_cache WHERE owner = 'acme' AND repo = 'widgets' AND number = 10
+        SELECT * FROM github_pr_cache WHERE owner = 'acme' AND repo = 'widgets' AND number = 10 AND host IS NULL
       `, []);
       expect(cache).toBeUndefined();
+      expect(await query(db, 'SELECT host FROM github_pr_cache', [])).toEqual([{ host: 'https://other.example.invalid/api' }]);
     });
 
     it('should work for local reviews (no prNumber)', async () => {

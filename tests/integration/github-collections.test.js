@@ -43,15 +43,6 @@ function createTestApp(db, config = {}) {
   return app;
 }
 
-/**
- * Insert a test row into github_pr_cache
- */
-async function insertCachedPR(db, { owner, repo, number, title, author, updated_at, html_url, state, collection }) {
-  await run(db,
-    'INSERT INTO github_pr_cache (owner, repo, number, title, author, updated_at, html_url, state, collection) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    [owner, repo, number, title, author, updated_at, html_url, state, collection]
-  );
-}
 
 // ============================================================================
 // GitHub Collections Route Tests
@@ -62,6 +53,29 @@ describe('GitHub Collections Routes', () => {
   let app;
   let server;
 
+  // Populate ownership through the real refresh route before seeding rows used
+  // by cache ordering/link tests. Legacy rows without an observation are unsafe.
+  async function insertCachedPR(db, pr) {
+    if (!db.prepare('SELECT 1 FROM github_collection_observations WHERE collection = ?').get(pr.collection)) {
+      const identity = GitHubClient.prototype.getAuthenticatedUser.getMockImplementation();
+      const search = GitHubClient.prototype.searchPullRequests.getMockImplementation();
+      const list = vi.spyOn(GitHubClient.prototype, 'listOpenPullRequests').mockResolvedValue([]);
+      GitHubClient.prototype.getAuthenticatedUser.mockResolvedValue({ login: 'fixture-reviewer' });
+      GitHubClient.prototype.searchPullRequests.mockResolvedValue([]);
+      try {
+        const [collection, team] = pr.collection.split(':');
+        const response = await request(server).post(`/api/github/${collection}/refresh`).query(team ? { team } : {});
+        expect(response.status).toBe(200);
+      } finally {
+        GitHubClient.prototype.getAuthenticatedUser.mockImplementation(identity);
+        GitHubClient.prototype.searchPullRequests.mockImplementation(search);
+        list.mockRestore();
+      }
+    }
+    await run(db, 'INSERT INTO github_pr_cache (owner, repo, number, title, author, updated_at, html_url, state, collection) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [pr.owner, pr.repo, pr.number, pr.title, pr.author, pr.updated_at, pr.html_url, pr.state, pr.collection]);
+  }
+
   beforeEach(async () => {
     db = createTestDatabase();
     app = createTestApp(db, {
@@ -71,6 +85,9 @@ describe('GitHub Collections Routes', () => {
     });
     server = await listenOnLoopback(app);
     vi.clearAllMocks();
+    configModule.getGitHubToken.mockReturnValue('test-token');
+    GitHubClient.prototype.getAuthenticatedUser.mockResolvedValue({ login: 'fixture-reviewer' });
+    GitHubClient.prototype.searchPullRequests.mockResolvedValue([]);
   });
 
   afterEach(async () => {
@@ -78,6 +95,170 @@ describe('GitHub Collections Routes', () => {
     if (db) {
       closeTestDatabase(db);
     }
+  });
+
+  it('keeps personal requests and effective change requests without resurrecting an already approved PR', async () => {
+    configModule.getGitHubToken.mockReturnValue('test-token');
+    GitHubClient.prototype.getAuthenticatedUser.mockResolvedValue({ login: 'reviewer' });
+    const pr = number => ({ owner: 'example', repo: 'project', number, title: `Review ${number}`,
+      author: number === 4 ? 'reviewer' : 'author', state: 'open',
+      updated_at: '2026-01-01T00:00:00Z', html_url: `https://github.com/example/project/pull/${number}` });
+    GitHubClient.prototype.searchPullRequests.mockImplementation(async query =>
+      query.includes('reviewed-by:') ? [2, 3, 4, 5, 6].map(pr) : [pr(1)]);
+    const opinion = (id, login, state) => ({ id, user: { login }, state, submitted_at: `2026-01-0${id}T00:00:00Z` });
+    const histories = {
+      2: [opinion(1, 'reviewer', 'CHANGES_REQUESTED'), opinion(2, 'reviewer', 'COMMENTED')],
+      3: [opinion(1, 'reviewer', 'APPROVED'), opinion(2, 'someone-else', 'CHANGES_REQUESTED')],
+      6: [opinion(1, 'reviewer', 'CHANGES_REQUESTED'), opinion(2, 'reviewer', 'DISMISSED')]
+    };
+    const transport = vi.spyOn(GitHubClient.prototype, '_buildOctokit').mockReturnValue({ rest: { pulls: {
+      listReviews: async ({ pull_number }) => {
+        if (pull_number === 5) throw Object.assign(new Error('Permission denied'), { status: 403 });
+        return { data: histories[pull_number] || [], headers: {} };
+      }
+    } } });
+    try {
+      const response = await request(server).post('/api/github/review-requests/refresh');
+      expect(response.status).toBe(200);
+      expect(response.body.prs.map(pr => pr.number).sort()).toEqual([1, 2, 5]);
+      expect(response.body.hosts).toContainEqual(expect.objectContaining({ repo: 'example/project#5', ok: false }));
+      const cached = await request(server).get('/api/github/review-requests');
+      expect(cached.body.prs.map(pr => pr.number).sort()).toEqual([1, 2, 5]);
+      GitHubClient.prototype.getAuthenticatedUser.mockRejectedValue(Object.assign(new Error('Denied'), { status: 403 }));
+      const denied = await request(server).post('/api/github/review-requests/refresh');
+      expect(denied.status).toBe(403);
+      expect(denied.body.availability).toBe('stale');
+      expect((await request(server).get('/api/github/review-requests')).body.prs.map(pr => pr.number).sort()).toEqual([1, 2, 5]);
+    } finally { transport.mockRestore(); }
+  });
+
+  it('does not return another credential context’s cached queue after an account change', async () => {
+    configModule.getGitHubToken.mockReturnValue('first-fixture-credential');
+    GitHubClient.prototype.getAuthenticatedUser.mockResolvedValue({ login: 'first-reviewer' });
+    GitHubClient.prototype.searchPullRequests.mockResolvedValue([{
+      owner: 'example', repo: 'private-project', number: 42, title: 'First account review',
+      author: 'first-reviewer', updated_at: '2026-01-01T00:00:00Z',
+      html_url: 'https://github.com/example/private-project/pull/42', state: 'open'
+    }]);
+    const refreshed = await request(server).post('/api/github/my-prs/refresh');
+    expect(refreshed.status).toBe(200);
+    expect((await request(server).get('/api/github/my-prs')).body.prs.map(pr => pr.number)).toEqual([42]);
+    configModule.getGitHubToken.mockReturnValue('second-fixture-credential');
+    const changed = await request(server).get('/api/github/my-prs');
+    expect(changed.body.prs).toEqual([]);
+    expect(changed.body.availability).toBe('unavailable');
+    expect(GitHubClient.prototype.getAuthenticatedUser).toHaveBeenCalledTimes(1);
+  });
+
+  it('distinguishes a successfully empty queue from an unobserved cache', async () => {
+    configModule.getGitHubToken.mockReturnValue('empty-fixture-credential');
+    const absent = await request(server).get('/api/github/my-prs');
+    expect(absent.body.availability).toBe('unavailable');
+    GitHubClient.prototype.getAuthenticatedUser.mockResolvedValue({ login: 'reviewer' });
+    GitHubClient.prototype.searchPullRequests.mockResolvedValue([]);
+    const refreshed = await request(server).post('/api/github/my-prs/refresh');
+    expect(refreshed.status).toBe(200);
+    const known = await request(server).get('/api/github/my-prs');
+    expect(known.body).toMatchObject({ prs: [], availability: 'known', fetched_at: expect.any(String) });
+  });
+
+  it.each([false, true])('does not let an older account refresh replace newer rows or freshness (fails: %s)', async fails => {
+    let release;
+    let started;
+    const gate = new Promise(resolve => { release = resolve; });
+    const reading = new Promise(resolve => { started = resolve; });
+    const pr = (number, author) => ({ owner: 'example', repo: 'project', number, title: `Review ${number}`, author,
+      state: 'open', updated_at: '2026-01-01T00:00:00Z', html_url: `https://github.com/example/project/pull/${number}` });
+    GitHubClient.prototype.getAuthenticatedUser.mockImplementation(function () {
+      return Promise.resolve({ login: this.token === 'old-fixture' ? 'old-account' : 'new-account' });
+    });
+    GitHubClient.prototype.searchPullRequests.mockImplementation(async function () {
+      if (this.token !== 'old-fixture') return [pr(2, 'new-account')];
+      started();
+      await gate;
+      if (fails) throw Object.assign(new Error('Late account failure'), { status: 429 });
+      return [pr(1, 'old-account')];
+    });
+    configModule.getGitHubToken.mockReturnValue('old-fixture');
+    const older = request(server).post('/api/github/my-prs/refresh').then(response => response);
+    await reading;
+    let newer;
+    try {
+      configModule.getGitHubToken.mockReturnValue('new-fixture');
+      newer = await request(server).post('/api/github/my-prs/refresh');
+      expect(newer.body.prs.map(pr => pr.number)).toEqual([2]);
+    } finally { release(); }
+    expect((await older).body.prs).toEqual([]);
+    const cached = await request(server).get('/api/github/my-prs');
+    expect(cached.body.prs.map(pr => pr.number)).toEqual([2]);
+    expect(cached.body.availability).toBe('known');
+    expect(cached.body.fetched_at).toBe(newer.body.fetched_at);
+  });
+
+  it.each(['identity', 'queue'])('binds a native credential change to the identity actually read (%s)', async stage => {
+    configModule.getGitHubToken.mockReturnValue('initial-fixture');
+    const change = client => {
+      client.token = 'renewed-fixture';
+      configModule.getGitHubToken.mockReturnValue('renewed-fixture');
+    };
+    GitHubClient.prototype.getAuthenticatedUser.mockImplementation(function () {
+      if (stage === 'identity') change(this);
+      return Promise.resolve({ login: 'reviewer' });
+    });
+    GitHubClient.prototype.searchPullRequests.mockImplementation(async function () {
+      if (stage === 'queue') change(this);
+      return [{ owner: 'example', repo: 'project', number: 42, title: 'Account-scoped result', author: 'reviewer',
+        state: 'open', updated_at: '2026-01-01T00:00:00Z', html_url: 'https://github.com/example/project/pull/42' }];
+    });
+    const refreshed = await request(server).post('/api/github/my-prs/refresh');
+    expect(refreshed.status).toBe(stage === 'identity' ? 200 : 409);
+    const cached = await request(server).get('/api/github/my-prs');
+    expect(cached.body.prs.map(pr => pr.number)).toEqual(stage === 'identity' ? [42] : []);
+    expect(cached.body.availability).toBe(stage === 'identity' ? 'known' : 'unavailable');
+  });
+
+  it('coalesces overlapping refreshes of the same credential context', async () => {
+    let release;
+    let started;
+    let both;
+    let requests = 0;
+    const gate = new Promise(resolve => { release = resolve; });
+    const reading = new Promise(resolve => { started = resolve; });
+    const received = new Promise(resolve => { both = resolve; });
+    const observe = req => { if (req.method === 'POST' && ++requests === 2) both(); };
+    server.on('request', observe);
+    GitHubClient.prototype.searchPullRequests.mockImplementation(async () => { started(); await gate; return []; });
+    const first = request(server).post('/api/github/my-prs/refresh').then(response => response);
+    await reading;
+    const second = request(server).post('/api/github/my-prs/refresh').then(response => response);
+    try { await received; } finally { release(); server.off('request', observe); }
+    const responses = await Promise.all([first, second]);
+    expect(responses.map(response => response.body.availability)).toEqual(['known', 'known']);
+    expect(GitHubClient.prototype.searchPullRequests).toHaveBeenCalledTimes(1);
+    expect(responses[0].body.fetched_at).toBe(responses[1].body.fetched_at);
+  });
+
+  it('does not reuse cached rows through conflicting case-aliased host credentials', async () => {
+    configModule.getGitHubToken.mockReturnValue(null);
+    const apiHost = 'https://host.example.invalid';
+    const first = { api_host: apiHost, token: 'first-fixture' };
+    app.set('config', { repos: { 'Example/Project': first } });
+    const list = vi.spyOn(GitHubClient.prototype, 'listOpenPullRequests').mockResolvedValue([{
+      owner: 'example', repo: 'project', number: 42, title: 'Scoped queue', author: 'fixture-reviewer',
+      state: 'open', updated_at: '2026-01-01T00:00:00Z', html_url: `${apiHost}/example/project/pull/42`
+    }]);
+    try {
+      const initial = await request(server).post('/api/github/my-prs/refresh');
+      expect(initial.body.prs.map(pr => pr.number)).toEqual([42]);
+      app.set('config', { repos: {
+        'Example/Project': first,
+        'example/project': { api_host: apiHost, token: 'second-fixture' }
+      } });
+      const ambiguous = await request(server).get('/api/github/my-prs');
+      expect(ambiguous.body.prs).toEqual([]);
+      expect(ambiguous.body.availability).toBe('unavailable');
+      expect(list).toHaveBeenCalledTimes(1);
+    } finally { list.mockRestore(); }
   });
 
   // ==========================================================================
@@ -125,6 +306,7 @@ describe('GitHub Collections Routes', () => {
         repos: {
           'shop/world': {
             api_host: apiHost,
+            token: 'alt-fixture-token',
             exclusive: false,
             links: {
               external: {
@@ -250,6 +432,7 @@ describe('GitHub Collections Routes', () => {
         repos: {
           'acme/platform': {
             api_host: apiHost,
+            token: 'alt-fixture-token',
             url_pattern: '^https://meteorite\\.example/(?<owner>[^/]+)/(?<repo>[^/]+)/pull/(?<number>\\d+)',
             links: {
               external: {
@@ -263,10 +446,10 @@ describe('GitHub Collections Routes', () => {
         }
       });
       await insertCachedPR(db, {
-        owner: 'shop', repo: 'world', number: 8,
+        owner: 'acme', repo: 'platform', number: 8,
         title: 'A Meteorite PR', author: 'alice',
         updated_at: '2026-08-21T18:00:00Z',
-        html_url: 'https://meteorite.example/shop/world/pull/8',
+        html_url: 'https://meteorite.example/acme/platform/pull/8',
         state: 'open', collection: 'review-requests'
       });
       await run(db, 'UPDATE github_pr_cache SET host = ? WHERE number = ?', [apiHost, 8]);
@@ -338,7 +521,6 @@ describe('GitHub Collections Routes', () => {
 
       expect(res.status).toBe(401);
       expect(res.body.success).toBe(false);
-      expect(res.body.error).toContain('token not configured');
     });
 
     it('should refresh cache with data from GitHub on success', async () => {
@@ -436,40 +618,14 @@ describe('GitHub Collections Routes', () => {
       expect(myPrs[0].number).toBe(50);
     });
 
-    it('should return 401 when GitHub API returns 401 auth error', async () => {
-      configModule.getGitHubToken.mockReturnValue('invalid-token');
-      const authError = new Error('Bad credentials');
-      authError.status = 401;
-      GitHubClient.prototype.getAuthenticatedUser.mockRejectedValue(authError);
-
-      const res = await request(server).post('/api/github/review-requests/refresh');
-
-      expect(res.status).toBe(401);
-      expect(res.body.success).toBe(false);
-      expect(res.body.error).toContain('invalid or expired');
-    });
-
-    it('should return 401 when GitHub API returns 403 auth error', async () => {
-      configModule.getGitHubToken.mockReturnValue('bad-token');
-      const forbiddenError = new Error('Forbidden');
-      forbiddenError.status = 403;
-      GitHubClient.prototype.getAuthenticatedUser.mockRejectedValue(forbiddenError);
-
-      const res = await request(server).post('/api/github/review-requests/refresh');
-
-      expect(res.status).toBe(401);
-      expect(res.body.success).toBe(false);
-      expect(res.body.error).toContain('invalid or expired');
-    });
-
-    it('should return 500 on unexpected errors', async () => {
+    it('reports a host outage without certifying an empty queue', async () => {
       configModule.getGitHubToken.mockReturnValue('test-token');
       GitHubClient.prototype.getAuthenticatedUser.mockRejectedValue(new Error('Network timeout'));
 
       const res = await request(server).post('/api/github/review-requests/refresh');
 
-      expect(res.status).toBe(500);
-      expect(res.body.success).toBe(false);
+      expect(res.status).toBe(503);
+      expect(res.body).toMatchObject({ success: false, prs: [], availability: 'unavailable', fetched_at: null });
     });
   });
 
@@ -570,7 +726,6 @@ describe('GitHub Collections Routes', () => {
 
       expect(res.status).toBe(401);
       expect(res.body.success).toBe(false);
-      expect(res.body.error).toContain('token not configured');
     });
 
     it('should refresh cache with data from GitHub on success', async () => {
@@ -655,41 +810,6 @@ describe('GitHub Collections Routes', () => {
       expect(reviewRequests[0].number).toBe(60);
     });
 
-    it('should return 401 when GitHub API returns 401 auth error', async () => {
-      configModule.getGitHubToken.mockReturnValue('invalid-token');
-      const authError = new Error('Bad credentials');
-      authError.status = 401;
-      GitHubClient.prototype.getAuthenticatedUser.mockRejectedValue(authError);
-
-      const res = await request(server).post('/api/github/my-prs/refresh');
-
-      expect(res.status).toBe(401);
-      expect(res.body.success).toBe(false);
-      expect(res.body.error).toContain('invalid or expired');
-    });
-
-    it('should return 401 when GitHub API returns 403 auth error', async () => {
-      configModule.getGitHubToken.mockReturnValue('bad-token');
-      const forbiddenError = new Error('Forbidden');
-      forbiddenError.status = 403;
-      GitHubClient.prototype.getAuthenticatedUser.mockRejectedValue(forbiddenError);
-
-      const res = await request(server).post('/api/github/my-prs/refresh');
-
-      expect(res.status).toBe(401);
-      expect(res.body.success).toBe(false);
-      expect(res.body.error).toContain('invalid or expired');
-    });
-
-    it('should return 500 on unexpected errors', async () => {
-      configModule.getGitHubToken.mockReturnValue('test-token');
-      GitHubClient.prototype.getAuthenticatedUser.mockRejectedValue(new Error('Something broke'));
-
-      const res = await request(server).post('/api/github/my-prs/refresh');
-
-      expect(res.status).toBe(500);
-      expect(res.body.success).toBe(false);
-    });
   });
 
   // ==========================================================================
@@ -741,7 +861,6 @@ describe('GitHub Collections Routes', () => {
 
       expect(res.status).toBe(401);
       expect(res.body.success).toBe(false);
-      expect(res.body.error).toContain('token not configured');
     });
 
     it('should query for team requests excluding direct requests', async () => {
@@ -922,28 +1041,6 @@ describe('GitHub Collections Routes', () => {
       expect(reviewRequests[0].number).toBe(50);
     });
 
-    it('should return 401 when GitHub API returns 403 auth error', async () => {
-      configModule.getGitHubToken.mockReturnValue('bad-token');
-      const forbiddenError = new Error('Forbidden');
-      forbiddenError.status = 403;
-      GitHubClient.prototype.getAuthenticatedUser.mockRejectedValue(forbiddenError);
-
-      const res = await request(server).post('/api/github/team-reviews/refresh');
-
-      expect(res.status).toBe(401);
-      expect(res.body.success).toBe(false);
-      expect(res.body.error).toContain('invalid or expired');
-    });
-
-    it('should return 500 on unexpected errors', async () => {
-      configModule.getGitHubToken.mockReturnValue('test-token');
-      GitHubClient.prototype.getAuthenticatedUser.mockRejectedValue(new Error('Network timeout'));
-
-      const res = await request(server).post('/api/github/team-reviews/refresh');
-
-      expect(res.status).toBe(500);
-      expect(res.body.success).toBe(false);
-    });
   });
 
   // ==========================================================================
@@ -996,6 +1093,7 @@ describe('GitHub Collections Routes', () => {
         if (pullsStatus && pullsStatus >= 400) return res.status(pullsStatus).json({ message: 'alt pulls failed' });
         res.json(pulls || ALT_PULLS);
       });
+      altApp.get('/repos/:owner/:repo/pulls/:number/reviews', (req, res) => res.json([]));
       altServer = await listenOnLoopback(altApp);
       apiHost = `http://127.0.0.1:${altServer.address().port}`;
       return apiHost;
@@ -1062,7 +1160,10 @@ describe('GitHub Collections Routes', () => {
       expect(res.body.prs.some(p => p.number === 102 || p.number === 103)).toBe(false);
 
       // Per-host status reported, additive and honest.
-      expect(res.body.hosts).toEqual([{ host: apiHost, repo: 'altorg/altrepo', ok: true }]);
+      expect(res.body.hosts).toEqual([
+        expect.objectContaining({ host: null, ok: true, availability: 'known' }),
+        expect.objectContaining({ host: apiHost, repo: 'altorg/altrepo', ok: true, availability: 'known' })
+      ]);
 
       // Persisted with host column.
       const dbRows = await query(db, "SELECT number, host FROM github_pr_cache WHERE collection = 'my-prs' ORDER BY number", []);
@@ -1097,6 +1198,22 @@ describe('GitHub Collections Routes', () => {
       expect(numbers).toEqual([103]); // only the team-requested PR
     });
 
+    it('retains the last successful host rows and freshness when that host becomes unavailable', async () => {
+      await startAltHost();
+      await useAltRepo();
+      mockGithub('ghuser', []);
+      const first = await request(server).post('/api/github/my-prs/refresh');
+      expect(first.body.prs.map(pr => pr.number)).toEqual([101]);
+      await run(db, "UPDATE github_pr_cache SET fetched_at = '2026-01-01T00:00:00Z' WHERE host = ?", [apiHost]);
+      await closeServer(altServer);
+      altServer = null;
+      const unavailable = await request(server).post('/api/github/my-prs/refresh');
+      expect(unavailable.status).toBe(200);
+      expect(unavailable.body.prs.map(pr => pr.number)).toEqual([101]);
+      expect(unavailable.body.prs[0].fetched_at).toBe('2026-01-01T00:00:00Z');
+      expect(unavailable.body.hosts).toContainEqual(expect.objectContaining({ host: apiHost, ok: false }));
+    });
+
     it('keeps github rows intact and reports the error when an alt host fails', async () => {
       await startAltHost({ pullsStatus: 500 });
       await useAltRepo();
@@ -1119,9 +1236,8 @@ describe('GitHub Collections Routes', () => {
       expect(res.body.prs[0].host).toBeNull();
 
       // The alt host failure is surfaced, not swallowed.
-      expect(res.body.hosts).toHaveLength(1);
-      expect(res.body.hosts[0]).toMatchObject({ host: apiHost, repo: 'altorg/altrepo', ok: false });
-      expect(res.body.hosts[0].error).toBeTruthy();
+      expect(res.body.availability).toBe('partial');
+      expect(res.body.hosts).toContainEqual(expect.objectContaining({ host: apiHost, repo: 'altorg/altrepo', ok: false, availability: 'unavailable' }));
 
       // Cache holds only the github row.
       const dbRows = await query(db, "SELECT number, host FROM github_pr_cache WHERE collection = 'my-prs'", []);
@@ -1137,7 +1253,7 @@ describe('GitHub Collections Routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(res.body.hosts[0].ok).toBe(false);
+      expect(res.body.hosts).toContainEqual(expect.objectContaining({ host: apiHost, ok: false, availability: 'unavailable' }));
     });
 
     it('retrying refresh does not duplicate alt-host rows', async () => {
@@ -1183,8 +1299,8 @@ describe('GitHub Collections Routes', () => {
       // github.com search never ran without a token.
       expect(GitHubClient.prototype.searchPullRequests).not.toHaveBeenCalled();
       // Both sources reported: github skipped, alt host ok.
-      expect(res.body.hosts).toContainEqual({ host: null, repo: null, ok: false, error: 'no github.com token configured' });
-      expect(res.body.hosts).toContainEqual({ host: apiHost, repo: 'altorg/altrepo', ok: true });
+      expect(res.body.hosts).toContainEqual(expect.objectContaining({ host: null, ok: false, availability: 'unavailable' }));
+      expect(res.body.hosts).toContainEqual(expect.objectContaining({ host: apiHost, repo: 'altorg/altrepo', ok: true, availability: 'known' }));
 
       // Persisted alt row present; no github rows.
       const dbRows = await query(db, "SELECT number, host FROM github_pr_cache WHERE collection = 'my-prs'", []);
@@ -1205,22 +1321,10 @@ describe('GitHub Collections Routes', () => {
 
       expect(res.status).toBe(401);
       expect(res.body.success).toBe(false);
-      expect(res.body.error).toContain('token not configured');
       // No probe attempted against the token-less repo.
       expect(GitHubClient.prototype.getAuthenticatedUser).not.toHaveBeenCalled();
     });
 
-    it('omits the hosts field for a healthy github-only install (backward compatible)', async () => {
-      // Default outer app has a github token and no repos.
-      configModule.getGitHubToken.mockReturnValue('test-token');
-      GitHubClient.prototype.getAuthenticatedUser.mockResolvedValue({ login: 'ghuser', name: '', avatar_url: '' });
-      GitHubClient.prototype.searchPullRequests.mockResolvedValue([]);
-
-      const res = await request(server).post('/api/github/my-prs/refresh');
-
-      expect(res.status).toBe(200);
-      expect(res.body).not.toHaveProperty('hosts');
-    });
 
     it('reports a token-less alt repo without probing or error-logging', async () => {
       // Repo has api_host but no repo-scoped credentials → empty-token binding.
@@ -1250,9 +1354,7 @@ describe('GitHub Collections Routes', () => {
       expect(res.body.prs).toHaveLength(1);
       expect(res.body.prs[0].number).toBe(11);
       // Per-host status surfaced with the config-gap reason.
-      expect(res.body.hosts).toEqual([
-        { host: missingCredHost, repo: 'altorg/altrepo', ok: false, error: 'no credentials configured' }
-      ]);
+      expect(res.body.hosts).toContainEqual(expect.objectContaining({ host: missingCredHost, repo: 'altorg/altrepo', ok: false, availability: 'unavailable' }));
       // No probe happened: getAuthenticatedUser called once (github only), and
       // no error-level log for a mere config gap.
       expect(GitHubClient.prototype.getAuthenticatedUser).toHaveBeenCalledTimes(1);
@@ -1285,9 +1387,8 @@ describe('GitHub Collections Routes', () => {
       expect(res.status).toBe(200);
       expect(res.body.prs).toHaveLength(1);
       expect(res.body.prs[0].number).toBe(9);
-      expect(res.body.hosts).toHaveLength(1);
-      expect(res.body.hosts[0]).toMatchObject({ host: apiHost, repo: 'weird-monorepo-key', ok: false });
-      expect(res.body.hosts[0].error).toMatch(/owner\/repo/);
+      expect(res.body.hosts).toContainEqual(expect.objectContaining({ host: apiHost, repo: null, ok: false, availability: 'unavailable' }));
+      expect(JSON.stringify(res.body)).not.toContain('weird-monorepo-key');
     });
   });
 });

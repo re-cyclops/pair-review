@@ -30,6 +30,10 @@ const { buildFileLineCountMap, validateSuggestionLineNumbers } = require('../uti
 const { GIT_DIFF_FLAGS } = require('../git/diff-flags');
 const { generateScopedDiff, findMergeBase } = require('../local-review');
 const { scopeIncludes } = require('../local-scope');
+const { baselineInstructions } = require('../review-progress');
+const { safeParseJson } = require('../utils/safe-parse-json');
+const { mergeInstructions } = require('../utils/instructions');
+const { captureRunProtocol } = require('../utils/review-protocol');
 
 /**
  * Generate a diff for the executable provider and write it to a file.
@@ -233,7 +237,7 @@ function validateSuggestions(suggestions, validFiles, fileLineCountMap) {
  * @param {Function} shared.broadcastReviewEvent
  * @param {Function} shared.registerProcessForCancellation
  * @param {object}   callbacks         Mode-specific behaviour
- * @param {Function} callbacks.buildContext      (review, { selectedModel, requestInstructions }) => executableContext object
+ * @param {Function} callbacks.buildContext      (review, { selectedModel }) => executableContext object
  * @param {Function} callbacks.buildHookPayload  (review, extra) => object merged into hook payload
  * @param {Function} callbacks.onSuccess         (db, runId, { suggestions, summary }) => Promise
  * @param {string}   callbacks.logLabel          e.g. "Review #5" or "PR #42"
@@ -258,6 +262,9 @@ async function runExecutableAnalysis(req, res, params, shared, callbacks) {
   const db = req.app.get('db');
   const analysisRunRepo = new AnalysisRunRepository(db);
   const commentRepo = new CommentRepository(db);
+  const config = req.app.get('config') || {};
+  const globalInstructions = config.globalInstructions || null;
+  const customInstructions = mergeInstructions({ globalInstructions, repoInstructions, requestInstructions });
 
   // 1. Create analysis run record
   try {
@@ -267,11 +274,13 @@ async function runExecutableAnalysis(req, res, params, shared, callbacks) {
       provider: selectedProvider,
       model: selectedModel,
       tier: 'thorough',
+      globalInstructions,
       repoInstructions,
       requestInstructions,
       headSha: headSha || null,
       configType: 'single',
-      levelsConfig: null
+      levelsConfig: null,
+      protocol: captureRunProtocol(config, { provider: selectedProvider, model: selectedModel, tier: 'thorough', ...providerOverrides })
     });
   } catch (error) {
     logger.error('Failed to create analysis run record:', error);
@@ -306,7 +315,7 @@ async function runExecutableAnalysis(req, res, params, shared, callbacks) {
   // cleans up the hold (the .finally() inside the async IIFE only covers errors after it starts).
   const poolLifecycle = params.poolLifecycle;
   let poolWorktreeId;
-  const analysisHookConfig = req.app.get('config') || {};
+  const analysisHookConfig = config;
   const hookPayloadFields = buildHookPayload(review, {});
   try {
     poolWorktreeId = await poolLifecycle?.startAnalysis(reviewId, analysisId);
@@ -345,11 +354,14 @@ async function runExecutableAnalysis(req, res, params, shared, callbacks) {
       const provider = createProvider(selectedProvider, selectedModel, providerOverrides);
 
       const executableContext = {
-        ...buildContext(review, { selectedModel, requestInstructions }),
+        ...buildContext(review, { selectedModel }),
+        customInstructions,
         outputDir: tmpDir,
         // Use resolved CLI model (cli_model || id) instead of raw model ID; null suppresses model
         model: provider.resolvedModel !== undefined ? provider.resolvedModel : (provider.model || null)
       };
+      executableContext.customInstructions = [executableContext.customInstructions,
+        baselineInstructions(safeParseJson((await analysisRunRepo.getById(runId))?.review_baseline))].filter(Boolean).join('\n\n') || null;
       const cwd = executableContext.cwd || process.cwd();
 
       // Only generate a diff file when the provider's context_args maps diff_path to a CLI flag
@@ -391,7 +403,7 @@ async function runExecutableAnalysis(req, res, params, shared, callbacks) {
         cwd,
         timeout: provider.timeout || 600000,
         analysisId,
-        registerProcess: (id, proc) => registerProcessForCancellation(id, proc),
+        registerProcess: registerProcessForCancellation,
         onStreamEvent
       });
 

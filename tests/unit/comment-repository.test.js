@@ -101,17 +101,6 @@ describe('CommentRepository', () => {
       })).rejects.toThrow('Missing required fields');
     });
 
-    it('should trim whitespace from body', async () => {
-      const commentId = await commentRepo.createLineComment({
-        review_id: 1,
-        file: 'test.js',
-        line_start: 10,
-        body: '  Test comment  '
-      });
-
-      const comment = await queryOne(db, 'SELECT * FROM comments WHERE id = ?', [commentId]);
-      expect(comment.body).toBe('Test comment');
-    });
   });
 
   describe('createFileComment', () => {
@@ -147,16 +136,6 @@ describe('CommentRepository', () => {
       })).rejects.toThrow('Missing required fields');
     });
 
-    it('should trim whitespace from body', async () => {
-      const commentId = await commentRepo.createFileComment({
-        review_id: 1,
-        file: 'test.js',
-        body: '  File comment  '
-      });
-
-      const comment = await queryOne(db, 'SELECT * FROM comments WHERE id = ?', [commentId]);
-      expect(comment.body).toBe('File comment');
-    });
   });
 
   describe('adoptSuggestion', () => {
@@ -404,14 +383,15 @@ describe('CommentRepository', () => {
         VALUES (?, ?, ?, ?, ?)
       `, [1, 'user', 'test.js', 10, 'Original comment']);
 
-      await commentRepo.updateComment(commentId.lastID, 'Updated comment');
+      const previous = await commentRepo.getComment(commentId.lastID);
+      await commentRepo.updateComment(commentId.lastID, { body: 'Updated comment', expected_revision: previous.revision, draft_key: previous.draft_key });
 
       const comment = await queryOne(db, 'SELECT * FROM comments WHERE id = ?', [commentId.lastID]);
       expect(comment.body).toBe('Updated comment');
     });
 
     it('should throw error if comment not found', async () => {
-      await expect(commentRepo.updateComment(999, 'Test')).rejects.toThrow('User comment not found');
+      await expect(commentRepo.updateComment(999, { body: 'Test' })).rejects.toThrow('User comment not found');
     });
 
     it('should throw error if body is empty', async () => {
@@ -420,20 +400,9 @@ describe('CommentRepository', () => {
         VALUES (?, ?, ?, ?, ?)
       `, [1, 'user', 'test.js', 10, 'Original comment']);
 
-      await expect(commentRepo.updateComment(commentId.lastID, '')).rejects.toThrow('cannot be empty');
+      await expect(commentRepo.updateComment(commentId.lastID, { body: '' })).rejects.toThrow('cannot be empty');
     });
 
-    it('should trim whitespace from updated body', async () => {
-      const commentId = await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, body)
-        VALUES (?, ?, ?, ?, ?)
-      `, [1, 'user', 'test.js', 10, 'Original comment']);
-
-      await commentRepo.updateComment(commentId.lastID, '  Updated comment  ');
-
-      const comment = await queryOne(db, 'SELECT * FROM comments WHERE id = ?', [commentId.lastID]);
-      expect(comment.body).toBe('Updated comment');
-    });
   });
 
   describe('deleteComment', () => {

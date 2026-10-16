@@ -283,7 +283,7 @@ class CursorAgentProvider extends AIProvider {
 
       // Register process for cancellation tracking if analysisId provided
       if (analysisId && registerProcess) {
-        registerProcess(analysisId, agent);
+        registerProcess(analysisId, agent, signal => killChildSafely(agent, { shell: this.useShell, signal }));
         logger.info(`${levelPrefix} Registered process ${pid} for analysis ${analysisId}`);
       }
 

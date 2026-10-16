@@ -410,7 +410,7 @@ class ClaudeProvider extends AIProvider {
 
       // Register process for cancellation tracking if analysisId provided
       if (analysisId && registerProcess) {
-        registerProcess(analysisId, claude);
+        registerProcess(analysisId, claude, signal => killChildSafely(claude, { shell: this.useShell, signal }));
         logger.info(`${levelPrefix} Registered process ${pid} for analysis ${analysisId}`);
       }
 

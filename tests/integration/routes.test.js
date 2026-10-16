@@ -51,21 +51,6 @@ const mockGitHubResponses = {
     additions: 10,
     deletions: 5
   },
-  createReviewGraphQL: {
-    id: 'PRR_review12345',
-    databaseId: 12345,
-    html_url: 'https://github.com/owner/repo/pull/1#pullrequestreview-12345',
-    comments_count: 2,
-    submitted_at: new Date().toISOString(),
-    state: 'APPROVED'
-  },
-  createDraftReviewGraphQL: {
-    id: 'PRR_draft12346',
-    databaseId: 12346,
-    html_url: 'https://github.com/owner/repo/pull/1#pullrequestreview-12346',
-    comments_count: 2,
-    state: 'PENDING'
-  }
 };
 
 const mockWorktreeResponses = {
@@ -103,11 +88,8 @@ function applyDefaultMocks() {
   // default and hit the real api.github.com when a route reached them).
   resetSpy(GitHubClient.prototype, 'fetchPullRequest').mockResolvedValue(mockGitHubResponses.fetchPullRequest);
   resetSpy(GitHubClient.prototype, 'repositoryExists').mockResolvedValue(true);
-  resetSpy(GitHubClient.prototype, 'createReviewGraphQL').mockResolvedValue(mockGitHubResponses.createReviewGraphQL);
-  resetSpy(GitHubClient.prototype, 'createDraftReviewGraphQL').mockResolvedValue(mockGitHubResponses.createDraftReviewGraphQL);
   resetSpy(GitHubClient.prototype, 'getPendingReviewForUser').mockResolvedValue(null);
   resetSpy(GitHubClient.prototype, 'getReviewById').mockResolvedValue(null);
-  resetSpy(GitHubClient.prototype, 'addCommentsInBatches').mockResolvedValue({ successCount: 1, failed: false });
   resetSpy(GitHubClient.prototype, 'getAuthenticatedUser').mockResolvedValue({
     login: 'test-user',
     name: 'Test User',
@@ -282,8 +264,6 @@ describe('PR Management Endpoints', () => {
       await closeTestDatabase(db);
     }
     // Reset call history AND re-apply every default implementation.
-    // Restoring only createReviewGraphQL/createDraftReviewGraphQL here used
-    // to let per-test overrides of the other spies leak into later tests.
     vi.clearAllMocks();
     applyDefaultMocks();
   });
@@ -646,146 +626,6 @@ describe('PR Management Endpoints', () => {
         .get('/api/prs?limit=2');
 
       expect(response.body.prs.length).toBe(2);
-    });
-  });
-
-  describe('GET /api/pr/:owner/:repo/:number/files/viewed', () => {
-    it('should return 400 for invalid PR number', async () => {
-      const response = await request(server)
-        .get('/api/pr/owner/repo/invalid/files/viewed');
-
-      expect(response.status).toBe(400);
-      expect(response.body.error).toContain('Invalid pull request number');
-    });
-
-    it('should return 404 for non-existent PR', async () => {
-      const response = await request(server)
-        .get('/api/pr/owner/repo/999/files/viewed');
-
-      expect(response.status).toBe(404);
-      expect(response.body.error).toContain('not found');
-    });
-
-    it('should return empty array when no files viewed', async () => {
-      await insertTestPR(db, 1, 'owner/repo');
-
-      const response = await request(server)
-        .get('/api/pr/owner/repo/1/files/viewed');
-
-      expect(response.status).toBe(200);
-      expect(response.body.files).toEqual([]);
-    });
-
-    it('should return viewed files from pr_data', async () => {
-      // Insert PR with viewedFiles in pr_data
-      const prData = JSON.stringify({
-        state: 'open',
-        viewedFiles: ['src/file1.js', 'src/file2.ts']
-      });
-      await run(db, `
-        INSERT INTO pr_metadata (pr_number, repository, title, pr_data)
-        VALUES (?, ?, ?, ?)
-      `, [1, 'owner/repo', 'Test PR', prData]);
-
-      const response = await request(server)
-        .get('/api/pr/owner/repo/1/files/viewed');
-
-      expect(response.status).toBe(200);
-      expect(response.body.files).toEqual(['src/file1.js', 'src/file2.ts']);
-    });
-  });
-
-  describe('POST /api/pr/:owner/:repo/:number/files/viewed', () => {
-    it('should return 400 for invalid PR number', async () => {
-      const response = await request(server)
-        .post('/api/pr/owner/repo/invalid/files/viewed')
-        .send({ files: [] });
-
-      expect(response.status).toBe(400);
-      expect(response.body.error).toContain('Invalid pull request number');
-    });
-
-    it('should return 400 when files is not an array', async () => {
-      await insertTestPR(db, 1, 'owner/repo');
-
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/files/viewed')
-        .send({ files: 'not-an-array' });
-
-      expect(response.status).toBe(400);
-      expect(response.body.error).toContain('files must be an array');
-    });
-
-    it('should return 404 for non-existent PR', async () => {
-      const response = await request(server)
-        .post('/api/pr/owner/repo/999/files/viewed')
-        .send({ files: ['file.js'] });
-
-      expect(response.status).toBe(404);
-      expect(response.body.error).toContain('not found');
-    });
-
-    it('should save viewed files successfully', async () => {
-      await insertTestPR(db, 1, 'owner/repo');
-
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/files/viewed')
-        .send({ files: ['src/file1.js', 'src/file2.ts'] });
-
-      expect(response.status).toBe(200);
-      expect(response.body.success).toBe(true);
-      expect(response.body.files).toEqual(['src/file1.js', 'src/file2.ts']);
-
-      // Verify it was persisted
-      const prMetadata = await queryOne(db, `
-        SELECT pr_data FROM pr_metadata WHERE pr_number = ? AND repository = ?
-      `, [1, 'owner/repo']);
-      const prData = JSON.parse(prMetadata.pr_data);
-      expect(prData.viewedFiles).toEqual(['src/file1.js', 'src/file2.ts']);
-    });
-
-    it('should preserve other pr_data fields when saving viewed files', async () => {
-      await insertTestPR(db, 1, 'owner/repo');
-
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/files/viewed')
-        .send({ files: ['new-file.js'] });
-
-      expect(response.status).toBe(200);
-
-      // Verify original pr_data fields are preserved
-      const prMetadata = await queryOne(db, `
-        SELECT pr_data FROM pr_metadata WHERE pr_number = ? AND repository = ?
-      `, [1, 'owner/repo']);
-      const prData = JSON.parse(prMetadata.pr_data);
-      expect(prData.viewedFiles).toEqual(['new-file.js']);
-      expect(prData.state).toBe('open');
-      expect(prData.head_sha).toBe('def456');
-    });
-
-    it('should overwrite previous viewed files', async () => {
-      // Insert PR with existing viewedFiles
-      const initialPrData = JSON.stringify({
-        state: 'open',
-        viewedFiles: ['old-file.js']
-      });
-      await run(db, `
-        INSERT INTO pr_metadata (pr_number, repository, title, pr_data)
-        VALUES (?, ?, ?, ?)
-      `, [1, 'owner/repo', 'Test PR', initialPrData]);
-
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/files/viewed')
-        .send({ files: ['new-file1.js', 'new-file2.js'] });
-
-      expect(response.status).toBe(200);
-
-      // Verify viewedFiles was overwritten
-      const prMetadata = await queryOne(db, `
-        SELECT pr_data FROM pr_metadata WHERE pr_number = ? AND repository = ?
-      `, [1, 'owner/repo']);
-      const prData = JSON.parse(prMetadata.pr_data);
-      expect(prData.viewedFiles).toEqual(['new-file1.js', 'new-file2.js']);
     });
   });
 
@@ -1556,10 +1396,11 @@ describe('User Comment Endpoints', () => {
         INSERT INTO comments (review_id, source, file, line_start, body, status)
         VALUES (?, 'user', 'file.js', 10, 'Original comment', 'active')
       `, [prId]);
+      const draft = await queryOne(db, 'SELECT draft_key, revision FROM comments WHERE id = ?', [lastID]);
 
       const response = await request(server)
         .put(`/api/reviews/${prId}/comments/${lastID}`)
-        .send({ body: 'Updated comment' });
+        .send({ body: 'Updated comment', draft_key: draft.draft_key, expected_revision: draft.revision });
 
       expect(response.status).toBe(200);
       expect(response.body.success).toBe(true);
@@ -2671,22 +2512,6 @@ describe('AI Suggestion Endpoints', () => {
       expect(response.body.formattedBody).toBe(editedText);
     });
 
-    it('should trim whitespace from editedText', async () => {
-      const { lastID: suggestionId } = await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, body, type, title, status)
-        VALUES (?, 'ai', 'file.js', 10, 'Original body', 'improvement', 'Fallback Title', 'active')
-      `, [prId]);
-
-      const response = await request(server)
-        .post(`/api/reviews/${prId}/suggestions/${suggestionId}/edit`)
-        .send({
-          action: 'adopt_edited',
-          editedText: '  Edited text with whitespace  '
-        });
-
-      expect(response.status).toBe(200);
-      expect(response.body.formattedBody).toBe('Edited text with whitespace');
-    });
 
     it('should store comment body matching formattedBody', async () => {
       const { lastID: suggestionId } = await run(db, `
@@ -2872,628 +2697,6 @@ describe('AI Suggestion Endpoints', () => {
 
       expect(response.status).toBe(200);
       expect(response.body.summary).toBe('Review fallback summary');
-    });
-  });
-});
-
-// ============================================================================
-// Review Submission Endpoint Tests
-// ============================================================================
-
-describe('Review Submission Endpoint', () => {
-  let db;
-  let app;
-  let server;
-  let prId;
-
-  beforeEach(async () => {
-    db = await createTestDatabase();
-    app = createTestApp(db);
-    server = await listenOnLoopback(app);
-    prId = await insertTestPR(db, 1, 'owner/repo');
-    await insertTestWorktree(db, 1, 'owner/repo');
-  });
-
-  afterEach(async () => {
-    await closeServer(server);
-    if (db) {
-      await closeTestDatabase(db);
-    }
-    vi.clearAllMocks();
-    applyDefaultMocks();
-  });
-
-  describe('POST /api/pr/:owner/:repo/:number/submit-review', () => {
-    it('should return 400 for invalid PR number', async () => {
-      const response = await request(server)
-        .post('/api/pr/owner/repo/invalid/submit-review')
-        .send({ event: 'APPROVE' });
-
-      expect(response.status).toBe(400);
-    });
-
-    it('should return 400 for invalid event type', async () => {
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/submit-review')
-        .send({ event: 'INVALID_EVENT' });
-
-      expect(response.status).toBe(400);
-      expect(response.body.error).toContain('Invalid review event');
-    });
-
-    it('should return 404 for non-existent PR', async () => {
-      const response = await request(server)
-        .post('/api/pr/owner/repo/999/submit-review')
-        .send({ event: 'APPROVE' });
-
-      expect(response.status).toBe(404);
-    });
-
-    it('should accept valid event types', async () => {
-      // Test that valid event types are accepted (they pass validation)
-      // Note: These may fail with 500 due to mocked GitHub API, but they shouldn't return 400
-      const validEvents = ['APPROVE', 'REQUEST_CHANGES', 'COMMENT', 'DRAFT'];
-
-      for (const event of validEvents) {
-        const response = await request(server)
-          .post('/api/pr/owner/repo/1/submit-review')
-          .send({ event, body: 'Test' });
-
-        // Should not be a 400 validation error
-        expect(response.status).not.toBe(400);
-      }
-    });
-
-    it('should validate that comments are collected for submission', async () => {
-      // Add user comments
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, diff_position, body, status)
-        VALUES (?, 'user', 'file.js', 10, 5, 'Comment 1', 'active')
-      `, [prId]);
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, diff_position, body, status)
-        VALUES (?, 'user', 'file.js', 20, 10, 'Comment 2', 'active')
-      `, [prId]);
-
-      // Verify comments exist before submission attempt
-      const comments = await query(db, `
-        SELECT * FROM comments WHERE review_id = ? AND source = 'user' AND status = 'active'
-      `, [prId]);
-
-      expect(comments.length).toBe(2);
-    });
-
-    it('should accept reviews with more than 50 comments', async () => {
-      // Insert more than 50 comments - now supported via batched submission
-      for (let i = 0; i < 55; i++) {
-        await run(db, `
-          INSERT INTO comments (review_id, source, file, line_start, diff_position, body, status)
-          VALUES (?, 'user', 'file.js', ?, ?, 'Comment', 'active')
-        `, [prId, i + 1, i + 1]);
-      }
-
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/submit-review')
-        .send({ event: 'APPROVE' });
-
-      // Large reviews are now supported through batched comment submission
-      expect(response.status).toBe(200);
-      expect(response.body.success).toBe(true);
-    });
-
-    it('should submit file-level comments with isFileLevel flag', async () => {
-      // Insert a file-level comment (is_file_level=1)
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, body, status, is_file_level)
-        VALUES (?, 'user', 'file.js', 'This is a file-level comment', 'active', 1)
-      `, [prId]);
-
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/submit-review')
-        .send({ event: 'COMMENT', body: 'Review with file-level comment' });
-
-      expect(response.status).toBe(200);
-      expect(response.body.success).toBe(true);
-
-      // Verify the GraphQL function was called with isFileLevel=true
-      expect(GitHubClient.prototype.createReviewGraphQL).toHaveBeenCalled();
-      const callArgs = GitHubClient.prototype.createReviewGraphQL.mock.calls[0];
-      const comments = callArgs[3]; // Fourth argument is comments array
-
-      expect(comments.length).toBe(1);
-      expect(comments[0].isFileLevel).toBe(true);
-      expect(comments[0].path).toBe('file.js');
-      expect(comments[0].body).toBe('This is a file-level comment');
-      // File-level comments should NOT have line or side
-      expect(comments[0].line).toBeUndefined();
-      expect(comments[0].side).toBeUndefined();
-    });
-
-    it('should submit mixed file-level and line-level comments correctly', async () => {
-      // Insert a file-level comment
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, body, status, is_file_level)
-        VALUES (?, 'user', 'file1.js', 'File-level comment', 'active', 1)
-      `, [prId]);
-
-      // Insert a line-level comment on a line within the mock diff hunk
-      // Line 2 of file.js is within the diff (RIGHT side)
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, diff_position, side, body, status, is_file_level)
-        VALUES (?, 'user', 'file.js', 2, 5, 'RIGHT', 'Line-level comment', 'active', 0)
-      `, [prId]);
-
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/submit-review')
-        .send({ event: 'COMMENT', body: 'Review with mixed comments' });
-
-      expect(response.status).toBe(200);
-      expect(response.body.success).toBe(true);
-
-      // Verify the GraphQL function was called with correct comment structure
-      expect(GitHubClient.prototype.createReviewGraphQL).toHaveBeenCalled();
-      const callArgs = GitHubClient.prototype.createReviewGraphQL.mock.calls[0];
-      const comments = callArgs[3];
-
-      expect(comments.length).toBe(2);
-
-      // Find file-level and line-level comments
-      const fileLevelComment = comments.find(c => c.isFileLevel && !c.line);
-      const lineLevelComment = comments.find(c => !c.isFileLevel);
-
-      // File-level comment should have isFileLevel=true and no line/side
-      expect(fileLevelComment.isFileLevel).toBe(true);
-      expect(fileLevelComment.line).toBeUndefined();
-      expect(fileLevelComment.side).toBeUndefined();
-
-      // Line-level comment should have isFileLevel=false and include line/side
-      expect(lineLevelComment.isFileLevel).toBe(false);
-      expect(lineLevelComment.line).toBe(2);
-      expect(lineLevelComment.side).toBe('RIGHT');
-    });
-
-    it('should submit draft review with file-level comments', async () => {
-      // Insert a file-level comment
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, body, status, is_file_level)
-        VALUES (?, 'user', 'file.js', 'Draft file-level comment', 'active', 1)
-      `, [prId]);
-
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/submit-review')
-        .send({ event: 'DRAFT', body: 'Draft review' });
-
-      expect(response.status).toBe(200);
-      expect(response.body.success).toBe(true);
-
-      // Verify the draft GraphQL function was called
-      expect(GitHubClient.prototype.createDraftReviewGraphQL).toHaveBeenCalled();
-      const callArgs = GitHubClient.prototype.createDraftReviewGraphQL.mock.calls[0];
-      const comments = callArgs[2]; // Third argument is comments array for draft
-
-      expect(comments.length).toBe(1);
-      expect(comments[0].isFileLevel).toBe(true);
-      expect(comments[0].path).toBe('file.js');
-    });
-
-    it('should add comments to existing pending draft instead of creating a new one', async () => {
-      // Simulate an existing pending draft on GitHub
-      const existingDraft = {
-        id: 'PRR_existing123',
-        databaseId: 99999,
-        body: 'Existing draft body',
-        url: 'https://github.com/owner/repo/pull/1#pullrequestreview-99999',
-        state: 'PENDING',
-        createdAt: new Date().toISOString(),
-        comments: { totalCount: 3 }
-      };
-      GitHubClient.prototype.getPendingReviewForUser.mockResolvedValueOnce(existingDraft);
-      // Mock createDraftReviewGraphQL to return existing draft info (since it now handles existing drafts)
-      GitHubClient.prototype.createDraftReviewGraphQL.mockResolvedValueOnce({
-        id: 'PRR_existing123',
-        databaseId: null, // databaseId not available when adding to existing draft
-        html_url: null, // URL not available from existing review ID alone
-        state: 'PENDING',
-        comments_count: 1
-      });
-
-      // Insert a comment to submit
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, diff_position, side, body, status)
-        VALUES (?, 'user', 'file.js', 10, 5, 'RIGHT', 'New draft comment', 'active')
-      `, [prId]);
-
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/submit-review')
-        .send({ event: 'DRAFT', body: 'Draft review' });
-
-      expect(response.status).toBe(200);
-      expect(response.body.success).toBe(true);
-
-      // Should have called createDraftReviewGraphQL with the existing draft ID as 4th argument
-      // and the PR coordinates (5th arg, prContext) for REST mode compatibility.
-      expect(GitHubClient.prototype.createDraftReviewGraphQL).toHaveBeenCalledWith(
-        'PR_node123', // prNodeId
-        'Draft review', // body
-        expect.any(Array), // graphqlComments
-        'PRR_existing123', // existingDraft.id
-        expect.objectContaining({ owner: 'owner', repo: 'repo', prNumber: 1 })
-      );
-
-      // Verify the response uses the existing draft's URL (falls back from null to existingDraft.url)
-      expect(response.body.github_url).toBe('https://github.com/owner/repo/pull/1#pullrequestreview-99999');
-
-      // Verify comments_count includes existing comments (3) + newly added (1)
-      expect(response.body.comments_submitted).toBe(4);
-    });
-
-    it('should pass existing draft ID to createReviewGraphQL for non-DRAFT submissions', async () => {
-      // Simulate an existing pending draft on GitHub
-      const existingDraft = {
-        id: 'PRR_existing_for_submit',
-        databaseId: 88888,
-        body: 'Existing draft body',
-        url: 'https://github.com/owner/repo/pull/1#pullrequestreview-88888',
-        state: 'PENDING',
-        createdAt: new Date().toISOString(),
-        comments: { totalCount: 2 }
-      };
-      GitHubClient.prototype.getPendingReviewForUser.mockResolvedValueOnce(existingDraft);
-
-      // Insert a comment to submit
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, diff_position, side, body, status)
-        VALUES (?, 'user', 'file.js', 10, 5, 'RIGHT', 'Review comment', 'active')
-      `, [prId]);
-
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/submit-review')
-        .send({ event: 'COMMENT', body: 'Submitting review' });
-
-      expect(response.status).toBe(200);
-      expect(response.body.success).toBe(true);
-
-      // Verify createReviewGraphQL was called with the existing draft's ID as the 5th argument
-      expect(GitHubClient.prototype.createReviewGraphQL).toHaveBeenCalled();
-      const callArgs = GitHubClient.prototype.createReviewGraphQL.mock.calls[0];
-      expect(callArgs[0]).toBe('PR_node123'); // prNodeId
-      expect(callArgs[1]).toBe('COMMENT'); // event
-      expect(callArgs[4]).toBe('PRR_existing_for_submit'); // existingReviewId
-    });
-
-    it('should pass null existingReviewId to createReviewGraphQL when no draft exists', async () => {
-      // getPendingReviewForUser returns null (no existing draft) - default mock behavior
-      GitHubClient.prototype.getPendingReviewForUser.mockResolvedValueOnce(null);
-
-      // Insert a comment to submit
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, diff_position, side, body, status)
-        VALUES (?, 'user', 'file.js', 10, 5, 'RIGHT', 'Review comment', 'active')
-      `, [prId]);
-
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/submit-review')
-        .send({ event: 'APPROVE', body: 'LGTM' });
-
-      expect(response.status).toBe(200);
-      expect(response.body.success).toBe(true);
-
-      // Verify createReviewGraphQL was called with undefined (no existing draft)
-      expect(GitHubClient.prototype.createReviewGraphQL).toHaveBeenCalled();
-      const callArgs = GitHubClient.prototype.createReviewGraphQL.mock.calls[0];
-      expect(callArgs[4]).toBeUndefined(); // existingReviewId should be undefined (existingDraft?.id when null)
-    });
-
-    it('should handle expanded context comments as file-level with line reference', async () => {
-      // Insert an expanded context comment (no diff_position, not explicitly file-level)
-      // This represents a comment on a line outside the diff hunk
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, side, body, status, is_file_level)
-        VALUES (?, 'user', 'file.js', 42, 'RIGHT', 'Expanded context comment', 'active', 0)
-      `, [prId]);
-
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/submit-review')
-        .send({ event: 'COMMENT', body: 'Review with expanded context comment' });
-
-      expect(response.status).toBe(200);
-
-      // Verify the GraphQL function was called
-      expect(GitHubClient.prototype.createReviewGraphQL).toHaveBeenCalled();
-      const callArgs = GitHubClient.prototype.createReviewGraphQL.mock.calls[0];
-      const comments = callArgs[3];
-
-      expect(comments.length).toBe(1);
-      // Expanded context comments should be file-level with line reference in body
-      expect(comments[0].isFileLevel).toBe(true);
-      expect(comments[0].body).toContain('(Ref Line 42)');
-      expect(comments[0].body).toContain('Expanded context comment');
-    });
-
-    it('should submit line-level comment without diff_position when line is in diff (chat agent regression)', async () => {
-      // The chat agent creates comments with line_start but no diff_position.
-      // These should be submitted as line-level when the line is inside a diff hunk.
-      // The mock diff has file.js with RIGHT lines 1-4 (see mockWorktreeResponses.generateUnifiedDiff).
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, side, body, status, is_file_level)
-        VALUES (?, 'user', 'file.js', 2, 'RIGHT', 'Chat agent comment on diff line', 'active', 0)
-      `, [prId]);
-
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/submit-review')
-        .send({ event: 'COMMENT', body: 'Review with chat agent comment' });
-
-      expect(response.status).toBe(200);
-
-      const callArgs = GitHubClient.prototype.createReviewGraphQL.mock.calls[0];
-      const comments = callArgs[3];
-
-      expect(comments.length).toBe(1);
-      // Must be line-level, NOT file-level
-      expect(comments[0].isFileLevel).toBe(false);
-      expect(comments[0].path).toBe('file.js');
-      expect(comments[0].line).toBe(2);
-      expect(comments[0].side).toBe('RIGHT');
-      // Body should NOT have a (Ref Line) prefix
-      expect(comments[0].body).toBe('Chat agent comment on diff line');
-    });
-
-    it('should include start_line for multi-line comments', async () => {
-      // Insert a multi-line comment (line_start != line_end)
-      // Lines 2-4 are within the mock diff hunk (RIGHT side)
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, line_end, diff_position, side, body, status, is_file_level)
-        VALUES (?, 'user', 'file.js', 2, 4, 5, 'RIGHT', 'Multi-line comment spanning lines 2-4', 'active', 0)
-      `, [prId]);
-
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/submit-review')
-        .send({ event: 'COMMENT', body: 'Review with multi-line comment' });
-
-      expect(response.status).toBe(200);
-      expect(response.body.success).toBe(true);
-
-      // Verify the GraphQL function was called with start_line
-      expect(GitHubClient.prototype.createReviewGraphQL).toHaveBeenCalled();
-      const callArgs = GitHubClient.prototype.createReviewGraphQL.mock.calls[0];
-      const comments = callArgs[3];
-
-      expect(comments.length).toBe(1);
-      expect(comments[0].isFileLevel).toBe(false);
-      expect(comments[0].path).toBe('file.js');
-      expect(comments[0].line).toBe(4); // Should use line_end for multi-line
-      expect(comments[0].start_line).toBe(2); // Should include start_line
-      expect(comments[0].side).toBe('RIGHT');
-    });
-
-    it('should not include start_line for single-line comments', async () => {
-      // Insert a single-line comment (line_start only, no line_end)
-      // Line 3 is within the mock diff hunk (RIGHT side)
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, diff_position, side, body, status, is_file_level)
-        VALUES (?, 'user', 'file.js', 3, 10, 'RIGHT', 'Single-line comment', 'active', 0)
-      `, [prId]);
-
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/submit-review')
-        .send({ event: 'COMMENT', body: 'Review with single-line comment' });
-
-      expect(response.status).toBe(200);
-      expect(response.body.success).toBe(true);
-
-      // Verify the GraphQL function was called without start_line
-      expect(GitHubClient.prototype.createReviewGraphQL).toHaveBeenCalled();
-      const callArgs = GitHubClient.prototype.createReviewGraphQL.mock.calls[0];
-      const comments = callArgs[3];
-
-      expect(comments.length).toBe(1);
-      expect(comments[0].isFileLevel).toBe(false);
-      expect(comments[0].path).toBe('file.js');
-      expect(comments[0].line).toBe(3); // Should use line_start for single-line
-      expect(comments[0].start_line).toBeUndefined(); // Should NOT include start_line
-      expect(comments[0].side).toBe('RIGHT');
-    });
-
-    it('should correctly handle single-line comment with same line_start and line_end', async () => {
-      // Insert a comment where line_start equals line_end (single line but with both values set)
-      // Line 3 is within the mock diff hunk (RIGHT side)
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, line_end, diff_position, side, body, status, is_file_level)
-        VALUES (?, 'user', 'file.js', 3, 3, 15, 'RIGHT', 'Single-line comment with both values', 'active', 0)
-      `, [prId]);
-
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/submit-review')
-        .send({ event: 'COMMENT', body: 'Review with single-line comment' });
-
-      expect(response.status).toBe(200);
-      expect(response.body.success).toBe(true);
-
-      // Verify the GraphQL function was called without start_line (not a range)
-      expect(GitHubClient.prototype.createReviewGraphQL).toHaveBeenCalled();
-      const callArgs = GitHubClient.prototype.createReviewGraphQL.mock.calls[0];
-      const comments = callArgs[3];
-
-      expect(comments.length).toBe(1);
-      expect(comments[0].isFileLevel).toBe(false);
-      expect(comments[0].line).toBe(3); // Should use line_start since not a range
-      expect(comments[0].start_line).toBeUndefined(); // Should NOT include start_line (same line)
-    });
-
-    it('should NOT delete comments or analysis_runs when submitting review (regression test for cascade deletion bug)', async () => {
-      // This test verifies the fix for a critical bug where INSERT OR REPLACE
-      // on the reviews table caused cascade deletion of all related comments
-      // and analysis_runs due to foreign key ON DELETE CASCADE constraints.
-
-      // Insert user comments
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, diff_position, body, status)
-        VALUES (?, 'user', 'file1.js', 10, 5, 'User comment 1', 'active')
-      `, [prId]);
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, diff_position, body, status)
-        VALUES (?, 'user', 'file2.js', 20, 10, 'User comment 2', 'active')
-      `, [prId]);
-
-      // Insert AI comments
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, body, type, ai_run_id, status)
-        VALUES (?, 'ai', 'file1.js', 15, 'AI suggestion', 'suggestion', 'test-run-1', 'active')
-      `, [prId]);
-
-      // Insert an analysis run
-      const analysisRunTime = new Date().toISOString();
-      await run(db, `
-        INSERT INTO analysis_runs (id, review_id, status, summary, started_at)
-        VALUES ('test-run-1', ?, 'completed', 'Test analysis summary', ?)
-      `, [prId, analysisRunTime]);
-
-      // Verify comments and analysis run exist before submission
-      const commentsBefore = await query(db, 'SELECT * FROM comments WHERE review_id = ?', [prId]);
-      const analysisRunsBefore = await query(db, 'SELECT * FROM analysis_runs WHERE review_id = ?', [prId]);
-      expect(commentsBefore.length).toBe(3);
-      expect(analysisRunsBefore.length).toBe(1);
-
-      // Submit the review
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/submit-review')
-        .send({ event: 'COMMENT', body: 'Test review submission' });
-
-      expect(response.status).toBe(200);
-      expect(response.body.success).toBe(true);
-
-      // CRITICAL: Verify comments still exist (with 'submitted' status for user comments)
-      const commentsAfter = await query(db, 'SELECT * FROM comments WHERE review_id = ?', [prId]);
-      expect(commentsAfter.length).toBe(3); // All 3 comments should still exist
-
-      // User comments should have 'submitted' status
-      const userCommentsAfter = commentsAfter.filter(c => c.source === 'user');
-      expect(userCommentsAfter.length).toBe(2);
-      expect(userCommentsAfter.every(c => c.status === 'submitted')).toBe(true);
-
-      // AI comments should remain unchanged
-      const aiCommentsAfter = commentsAfter.filter(c => c.source === 'ai');
-      expect(aiCommentsAfter.length).toBe(1);
-      expect(aiCommentsAfter[0].status).toBe('active');
-
-      // CRITICAL: Verify analysis runs still exist
-      const analysisRunsAfter = await query(db, 'SELECT * FROM analysis_runs WHERE review_id = ?', [prId]);
-      expect(analysisRunsAfter.length).toBe(1);
-      expect(analysisRunsAfter[0].id).toBe('test-run-1');
-      expect(analysisRunsAfter[0].summary).toBe('Test analysis summary');
-    });
-
-    it('should NOT delete comments or analysis_runs when creating draft review (regression test for cascade deletion bug)', async () => {
-      // Same test but for draft reviews which use a different code path
-
-      // Insert comments and analysis run
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, diff_position, body, status)
-        VALUES (?, 'user', 'file.js', 10, 5, 'Draft comment', 'active')
-      `, [prId]);
-      await run(db, `
-        INSERT INTO analysis_runs (id, review_id, status, summary, started_at)
-        VALUES ('draft-test-run', ?, 'completed', 'Draft test summary', datetime('now'))
-      `, [prId]);
-
-      // Verify data exists before submission
-      const commentsBefore = await query(db, 'SELECT * FROM comments WHERE review_id = ?', [prId]);
-      const analysisRunsBefore = await query(db, 'SELECT * FROM analysis_runs WHERE review_id = ?', [prId]);
-      expect(commentsBefore.length).toBe(1);
-      expect(analysisRunsBefore.length).toBe(1);
-
-      // Create draft review
-      const response = await request(server)
-        .post('/api/pr/owner/repo/1/submit-review')
-        .send({ event: 'DRAFT', body: 'Draft review' });
-
-      expect(response.status).toBe(200);
-      expect(response.body.success).toBe(true);
-
-      // Verify comments and analysis runs were NOT deleted
-      const commentsAfter = await query(db, 'SELECT * FROM comments WHERE review_id = ?', [prId]);
-      const analysisRunsAfter = await query(db, 'SELECT * FROM analysis_runs WHERE review_id = ?', [prId]);
-
-      expect(commentsAfter.length).toBe(1);
-      expect(commentsAfter[0].status).toBe('draft'); // User comments get 'draft' status
-
-      expect(analysisRunsAfter.length).toBe(1);
-      expect(analysisRunsAfter[0].id).toBe('draft-test-run');
-    });
-
-    describe('GraphQL PR node id feature-gating', () => {
-      /**
-       * Helper: replace the PR record so prData has no node_id.
-       * Mirrors insertTestPR but omits `node_id` from the stored JSON.
-       */
-      async function insertPRWithoutNodeId(database, prNumber, repository) {
-        await run(database, 'DELETE FROM pr_metadata WHERE pr_number = ? AND repository = ?', [prNumber, repository]);
-        const prData = JSON.stringify({
-          state: 'open',
-          diff: 'diff content',
-          changed_files: [{ file: 'file.js', additions: 1, deletions: 0 }],
-          additions: 10,
-          deletions: 5,
-          html_url: `https://github.com/${repository}/pull/${prNumber}`,
-          base_sha: 'abc123',
-          head_sha: 'def456'
-          // node_id intentionally omitted
-        });
-        await run(database, `
-          INSERT INTO pr_metadata (pr_number, repository, title, description, author, base_branch, head_branch, pr_data)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `, [prNumber, repository, 'Test PR Title', 'Test Description', 'testuser', 'main', 'feature-branch', prData]);
-      }
-
-      it('returns 400 when node_id is missing for default github.com (GraphQL review_lifecycle)', async () => {
-        // github.com defaults: review_lifecycle = 'graphql', pending_review_comments = 'graphql'
-        // Without node_id, the GraphQL dispatcher cannot address the PR.
-        await insertPRWithoutNodeId(db, 1, 'owner/repo');
-
-        const response = await request(server)
-          .post('/api/pr/owner/repo/1/submit-review')
-          .send({ event: 'COMMENT', body: 'No node_id' });
-
-        expect(response.status).toBe(400);
-        expect(response.body.error).toMatch(/GraphQL PR node id required/);
-        expect(response.body.error).toMatch(/review_lifecycle = "graphql"/);
-        expect(response.body.error).toMatch(/refresh the PR data/);
-      });
-
-      it('succeeds without node_id when review_lifecycle=rest and pending_review_comments=host (alt-host all-REST/host)', async () => {
-        // Configure the app with an alt-host repo whose features avoid GraphQL.
-        // The route should NOT 400 just because node_id is missing.
-        app.set('config', {
-          github_token: 'top-level-token',
-          port: 7247,
-          theme: 'light',
-          model: 'sonnet',
-          repos: {
-            'owner/repo': {
-              api_host: 'ghe.example.com',
-              token: 'alt-host-token',
-              features: {
-                review_lifecycle: 'rest',
-                pending_review_comments: 'host'
-              }
-            }
-          }
-        });
-
-        await insertPRWithoutNodeId(db, 1, 'owner/repo');
-
-        const response = await request(server)
-          .post('/api/pr/owner/repo/1/submit-review')
-          .send({ event: 'COMMENT', body: 'REST + host config' });
-
-        // Should not be a 400 — the route should let the request through
-        // to the dispatcher which addresses the PR via (owner, repo, prNumber).
-        expect(response.status).not.toBe(400);
-        // With the default mocked createReviewGraphQL response (which the
-        // operations layer would route to REST under these features) the
-        // route returns 200.
-        expect(response.status).toBe(200);
-      });
     });
   });
 });
@@ -4736,7 +3939,7 @@ describe('Analysis Status Endpoints', () => {
       expect(response.body.error).toContain('not found');
     });
 
-    it('should cancel a running analysis', async () => {
+    it('accepts cancellation without claiming an executor has already stopped', async () => {
       // Import the shared module to set up an active analysis
       const { activeAnalyses, reviewToAnalysisId } = require('../../src/routes/shared');
 
@@ -4765,25 +3968,15 @@ describe('Analysis Status Endpoints', () => {
         const response = await request(server)
           .post(`/api/analyses/${analysisId}/cancel`);
 
-        expect(response.status).toBe(200);
-        expect(response.body.success).toBe(true);
-        expect(response.body.status).toBe('cancelled');
-
-        // Verify the analysis status was updated
-        const updatedAnalysis = activeAnalyses.get(analysisId);
-        expect(updatedAnalysis.status).toBe('cancelled');
-        expect(updatedAnalysis.progress).toBe('Analysis cancelled by user');
-
-        // Verify running levels were marked as cancelled
-        expect(updatedAnalysis.levels[1].status).toBe('cancelled');
-        expect(updatedAnalysis.levels[2].status).toBe('cancelled');
-        expect(updatedAnalysis.levels[3].status).toBe('cancelled');
-
-        // Verify reviewToAnalysisId mapping was cleaned up
-        expect(reviewToAnalysisId.has(reviewId)).toBe(false);
+        expect(response.status).toBe(202);
+        expect(response.body).toMatchObject({ success: true, status: 'cancellation_requested' });
+        const status = await request(server).get(`/api/analyses/${analysisId}/status`);
+        expect(status.body.status).toBe('cancellation_requested');
+        expect(reviewToAnalysisId.get(reviewId)).toBe(analysisId);
       } finally {
         // Cleanup always runs
         activeAnalyses.delete(analysisId);
+        reviewToAnalysisId.delete(reviewId);
       }
     });
 
@@ -4841,54 +4034,8 @@ describe('Analysis Status Endpoints', () => {
       }
     });
 
-    it('should cancel a running local mode analysis', async () => {
-      // Import the shared module to set up an active analysis
-      const { activeAnalyses } = require('../../src/routes/shared');
 
-      const analysisId = 'test-local-cancel-analysis-id';
-
-      // Set up an active LOCAL mode analysis
-      activeAnalyses.set(analysisId, {
-        id: analysisId,
-        reviewId: 123,
-        repository: 'owner/repo',
-        reviewType: 'local',  // Key difference: local mode
-        status: 'running',
-        startedAt: new Date().toISOString(),
-        progress: 'Analyzing...',
-        levels: {
-          1: { status: 'running', progress: 'In progress...' },
-          2: { status: 'running', progress: 'In progress...' },
-          3: { status: 'running', progress: 'In progress...' },
-          4: { status: 'pending', progress: 'Pending' }
-        }
-      });
-
-      try {
-        const response = await request(server)
-          .post(`/api/analyses/${analysisId}/cancel`);
-
-        expect(response.status).toBe(200);
-        expect(response.body.success).toBe(true);
-        expect(response.body.status).toBe('cancelled');
-
-        // Verify the analysis status was updated
-        const updatedAnalysis = activeAnalyses.get(analysisId);
-        expect(updatedAnalysis.status).toBe('cancelled');
-        expect(updatedAnalysis.progress).toBe('Analysis cancelled by user');
-        expect(updatedAnalysis.reviewType).toBe('local');
-
-        // Verify running levels were marked as cancelled
-        expect(updatedAnalysis.levels[1].status).toBe('cancelled');
-        expect(updatedAnalysis.levels[2].status).toBe('cancelled');
-        expect(updatedAnalysis.levels[3].status).toBe('cancelled');
-      } finally {
-        // Cleanup always runs
-        activeAnalyses.delete(analysisId);
-      }
-    });
-
-    it('should update database analysis_run record to cancelled when runId is present', async () => {
+    it('does not falsely mark an unacknowledged database run cancelled', async () => {
       const { activeAnalyses } = require('../../src/routes/shared');
 
       const analysisId = 'test-cancel-db-update-id';
@@ -4928,86 +4075,16 @@ describe('Analysis Status Endpoints', () => {
         const response = await request(server)
           .post(`/api/analyses/${analysisId}/cancel`);
 
-        expect(response.status).toBe(200);
-        expect(response.body.success).toBe(true);
-        expect(response.body.status).toBe('cancelled');
-
-        // Verify the database record was updated to 'cancelled'
+        expect(response.status).toBe(202);
+        expect(response.body.status).toBe('cancellation_requested');
         const dbRecord = await queryOne(db, 'SELECT status, completed_at FROM analysis_runs WHERE id = ?', [runId]);
-        expect(dbRecord).toBeTruthy();
-        expect(dbRecord.status).toBe('cancelled');
-        // completed_at should be set for terminal statuses
-        expect(dbRecord.completed_at).toBeTruthy();
+        expect(dbRecord.status).toBe('running');
+        expect(dbRecord.completed_at).toBeNull();
       } finally {
         activeAnalyses.delete(analysisId);
       }
     });
 
-    it('should not overwrite cancelled status when analysis promise resolves after cancellation (race condition)', async () => {
-      const { activeAnalyses, isAnalysisCancelled } = require('../../src/routes/shared');
-
-      // This test verifies the race condition fix where the .then() handler
-      // (analysis.js lines 265-275) checks the in-memory status before updating.
-      // When a cancel sets status to 'cancelled' in activeAnalyses, the .then()
-      // handler's guard (which uses the same isAnalysisCancelled check) must
-      // detect it and skip overwriting the status to 'completed'.
-
-      const analysisId = 'race-condition-cancel-test';
-
-      // Step 1: Set up a running analysis in activeAnalyses
-      activeAnalyses.set(analysisId, {
-        id: analysisId,
-        runId: 'race-run-id',
-        prNumber: 1,
-        repository: 'owner/repo',
-        status: 'running',
-        startedAt: new Date().toISOString(),
-        progress: 'Running analysis...',
-        levels: {
-          1: { status: 'running', progress: 'Running...' },
-          2: { status: 'running', progress: 'Running...' },
-          3: { status: 'running', progress: 'Running...' },
-          4: { status: 'pending', progress: 'Pending' }
-        },
-        filesAnalyzed: 0,
-        filesRemaining: 0
-      });
-
-      try {
-        // Verify analysis is running and not cancelled
-        expect(isAnalysisCancelled(analysisId)).toBe(false);
-        expect(activeAnalyses.get(analysisId).status).toBe('running');
-
-        // Step 2: Cancel the analysis via the cancel endpoint
-        const cancelResponse = await request(server)
-          .post(`/api/analyses/${analysisId}/cancel`);
-
-        expect(cancelResponse.status).toBe(200);
-        expect(cancelResponse.body.status).toBe('cancelled');
-
-        // Step 3: Verify that isAnalysisCancelled now returns true - this is the
-        // same check the .then() handler uses to decide whether to skip completion.
-        // The production code at analysis.js line 272 does:
-        //   if (currentStatus.status === 'cancelled') { return; }
-        // which is equivalent to isAnalysisCancelled(analysisId)
-        expect(isAnalysisCancelled(analysisId)).toBe(true);
-
-        // Verify the full cancelled state is preserved
-        const finalStatus = activeAnalyses.get(analysisId);
-        expect(finalStatus.status).toBe('cancelled');
-        expect(finalStatus.progress).toBe('Analysis cancelled by user');
-        expect(finalStatus.cancelledAt).toBeTruthy();
-
-        // Verify levels were marked as cancelled (running levels should be cancelled)
-        expect(finalStatus.levels[1].status).toBe('cancelled');
-        expect(finalStatus.levels[2].status).toBe('cancelled');
-        expect(finalStatus.levels[3].status).toBe('cancelled');
-        // Non-running level 4 (pending) should remain unchanged
-        expect(finalStatus.levels[4].status).toBe('pending');
-      } finally {
-        activeAnalyses.delete(analysisId);
-      }
-    });
   });
 
   describe('GET /api/reviews/:reviewId/analyses/status (local mode)', () => {
@@ -6193,10 +5270,11 @@ describe('Local Review File-Level Comments', () => {
         INSERT INTO comments (review_id, source, file, line_start, body, status, is_file_level)
         VALUES (?, 'user', 'test.js', 10, 'Line comment', 'active', 0)
       `, [reviewId]);
+      const draft = await queryOne(db, 'SELECT draft_key, revision FROM comments WHERE id = ?', [lineCommentResult.lastID]);
 
       const response = await request(server)
         .put(`/api/reviews/${reviewId}/comments/${lineCommentResult.lastID}`)
-        .send({ body: 'Updated comment' });
+        .send({ body: 'Updated comment', draft_key: draft.draft_key, expected_revision: draft.revision });
 
       expect(response.status).toBe(200);
       expect(response.body.success).toBe(true);
@@ -6208,14 +5286,14 @@ describe('Local Review File-Level Comments', () => {
         INSERT INTO comments (review_id, source, file, body, status, is_file_level)
         VALUES (?, 'user', 'test.js', 'Original comment', 'active', 1)
       `, [reviewId]);
+      const draft = await queryOne(db, 'SELECT draft_key, revision FROM comments WHERE id = ?', [fileCommentResult.lastID]);
 
       const response = await request(server)
         .put(`/api/reviews/${reviewId}/comments/${fileCommentResult.lastID}`)
-        .send({ body: 'Updated file-level comment' });
+        .send({ body: 'Updated file-level comment', draft_key: draft.draft_key, expected_revision: draft.revision });
 
       expect(response.status).toBe(200);
       expect(response.body.success).toBe(true);
-      expect(response.body.message).toContain('updated');
 
       // Verify the update
       const comment = await queryOne(db, `

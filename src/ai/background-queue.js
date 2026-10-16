@@ -36,6 +36,8 @@ class BackgroundQueue {
     this.active = 0;
     this.queue = [];
     this.inFlight = new Map();
+    // Cancellation releases the dedup key, not the running worker's ownership.
+    this.running = new Set();
     // Per-key AbortController covers both queued and running jobs so a
     // single lookup can resolve cancellation against either state.
     this.controllers = new Map();
@@ -165,6 +167,7 @@ class BackgroundQueue {
     while (this.active < this.concurrency && this.queue.length > 0) {
       const descriptor = this.queue.shift();
       this.active++;
+      this.running.add(descriptor);
       Promise.resolve()
         .then(() => descriptor.run(descriptor.controller.signal))
         .then(
@@ -187,6 +190,7 @@ class BackgroundQueue {
     if (this.inFlight.get(descriptor.key) === descriptor.promise) {
       this.inFlight.delete(descriptor.key);
     }
+    this.running.delete(descriptor);
     this.active--;
     this._onComplete(descriptor.reviewId, descriptor.jobType, error);
     if (error === null) {
@@ -195,6 +199,12 @@ class BackgroundQueue {
       descriptor.reject(error);
     }
     this._drain();
+  }
+
+  /** Include cancelled workers until their completion acknowledgement. */
+  hasUnsettledForReview(reviewId) {
+    return this.queue.some(job => String(job.reviewId) === String(reviewId))
+      || [...this.running].some(job => String(job.reviewId) === String(reviewId));
   }
 
   /**

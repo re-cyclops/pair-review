@@ -17,6 +17,7 @@ const { execSync } = require('child_process');
 const logger = require('../utils/logger');
 const { normalizeRepository } = require('../utils/paths');
 const { mergeInstructions } = require('../utils/instructions');
+const { captureRunProtocol } = require('../utils/review-protocol');
 const { GitWorktreeManager } = require('../git/worktree');
 const { GitHubClient } = require('../github/client');
 const { getGitHubToken, resolveHostBinding, resolveBindingRepositoryFromPR, resolveRepoOptions, resolveLoadSkills, buildCouncilProviderOverrides } = require('../config');
@@ -553,7 +554,8 @@ async function launchStackSingleAnalysis(deps, db, config, {
     requestInstructions,
     headSha: prMetadata.head_sha || null,
     configType: 'single',
-    levelsConfig
+    levelsConfig,
+    protocol: captureRunProtocol(config, { provider: selectedProvider, model: selectedModel, tier, levels: levelsConfig, ...providerOverrides })
   });
 
   const initialStatus = {
@@ -808,7 +810,7 @@ async function launchStackExecutableAnalysis(deps, db, config, {
     registerProcessForCancellation
   }, {
     logLabel: `Stack PR #${prNum}`,
-    buildContext: (_r, { selectedModel: model, requestInstructions: customInstructions }) => ({
+    buildContext: (_r, { selectedModel: model }) => ({
       title: prMetadata.title || `PR #${prNum}`,
       description: prMetadata.description || '',
       cwd: worktreePath,
@@ -816,8 +818,7 @@ async function launchStackExecutableAnalysis(deps, db, config, {
       baseSha: prMetadata.base_sha || null,
       headSha: prMetadata.head_sha || null,
       baseBranch: prMetadata.base_branch || null,
-      headBranch: prMetadata.head_branch || null,
-      customInstructions: customInstructions || null
+      headBranch: prMetadata.head_branch || null
     }),
     buildHookPayload: () => ({ mode: 'pr', prContext }),
     onSuccess: async (_db, _runId, { summary }) => {

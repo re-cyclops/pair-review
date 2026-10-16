@@ -153,45 +153,6 @@ class LocalManager {
       manager.viewedFiles = new Set();
     }
 
-    // Override saveViewedState to use localStorage with scoped key
-    manager.saveViewedState = function() {
-      if (!manager.currentPR || !manager.currentPR.localPath || !manager.currentPR.head_sha) return;
-
-      const localPath = manager.currentPR.localPath;
-      const headSha = manager.currentPR.head_sha;
-      // Use encodeURIComponent + unescape for proper UTF-8 to Base64 conversion (handles non-Latin1 paths)
-      const key = `pair-review-local-viewed:${btoa(unescape(encodeURIComponent(localPath)))}:${headSha}`;
-      const viewedArray = Array.from(manager.viewedFiles);
-
-      try {
-        localStorage.setItem(key, JSON.stringify(viewedArray));
-      } catch (error) {
-        console.warn('Error saving viewed state to localStorage:', error);
-      }
-    };
-
-    // Override loadViewedState to use localStorage with scoped key
-    manager.loadViewedState = async function() {
-      if (!manager.currentPR || !manager.currentPR.localPath || !manager.currentPR.head_sha) return;
-
-      const localPath = manager.currentPR.localPath;
-      const headSha = manager.currentPR.head_sha;
-      // Use encodeURIComponent + unescape for proper UTF-8 to Base64 conversion (handles non-Latin1 paths)
-      const key = `pair-review-local-viewed:${btoa(unescape(encodeURIComponent(localPath)))}:${headSha}`;
-
-      try {
-        const stored = localStorage.getItem(key);
-        if (stored) {
-          manager.viewedFiles = new Set(JSON.parse(stored));
-        } else {
-          manager.viewedFiles = new Set();
-        }
-      } catch (error) {
-        console.warn('Error loading viewed state from localStorage:', error);
-        manager.viewedFiles = new Set();
-      }
-    };
-
     // Override init to prevent default PR loading
     manager.init = async function() {
       // Local mode init is handled by LocalManager
@@ -202,67 +163,6 @@ class LocalManager {
     manager.loadPR = async function() {
       // Delegate to LocalManager
       await self.loadLocalReview();
-    };
-
-    // Store original methods we need to patch
-    const originalLoadAISuggestions = manager.loadAISuggestions.bind(manager);
-
-    // Note: loadUserComments no longer needs patching because pr.js now uses the unified
-    // /api/reviews/:reviewId/comments endpoint which works for both PR and local mode.
-
-    // Override loadAISuggestions
-    manager.loadAISuggestions = async function(level = null, runId = null) {
-      if (!manager.currentPR) return;
-
-      try {
-        const filterLevel = level || manager.selectedLevel || 'final';
-        // Use provided runId, or fall back to selectedRunId (which may be null for latest)
-        const filterRunId = runId !== undefined ? runId : manager.selectedRunId;
-
-        // First, check if analysis has been run and get summary data for the selected run
-        try {
-          let checkUrl = `/api/reviews/${reviewId}/suggestions/check`;
-          if (filterRunId) {
-            checkUrl += `?runId=${filterRunId}`;
-          }
-          const checkResponse = await fetch(checkUrl);
-          if (checkResponse.ok) {
-            const checkData = await checkResponse.json();
-
-            // Store summary data in the AI panel for the AI Summary modal
-            if (window.aiPanel?.setSummaryData) {
-              window.aiPanel.setSummaryData({
-                summary: checkData.summary,
-                stats: checkData.stats
-              });
-            }
-
-            // Set analysis state based on whether analysis has run (not just whether we have suggestions)
-            if (window.aiPanel?.setAnalysisState) {
-              window.aiPanel.setAnalysisState(checkData.analysisHasRun ? 'complete' : 'unknown');
-            }
-          }
-        } catch (checkError) {
-          console.warn('Error checking analysis status:', checkError);
-        }
-
-        let url = `/api/reviews/${reviewId}/suggestions?levels=${filterLevel}`;
-        if (filterRunId) {
-          url += `&runId=${filterRunId}`;
-        }
-
-        const response = await fetch(url);
-        if (!response.ok) return;
-
-        const data = await response.json();
-        if (data.suggestions && data.suggestions.length > 0) {
-          await manager.displayAISuggestions(data.suggestions);
-        } else {
-          await manager.displayAISuggestions([]);
-        }
-      } catch (error) {
-        console.error('Error loading AI suggestions:', error);
-      }
     };
 
     // Override triggerAIAnalysis for local mode
@@ -508,12 +408,8 @@ class LocalManager {
       }
     };
 
-    // Note: initSplitButton is NOT patched - it will use the standard SplitButton
-    // which automatically detects local mode via window.PAIR_REVIEW_LOCAL_MODE
-    // and hides the Submit Review option accordingly.
-
-    // Note: openPreviewModal is NOT patched - PreviewModal now automatically
-    // detects local mode and uses the correct API endpoint.
+    // PR and local reviews share final authoring and clipboard export.
+    // Publication remains unavailable until a local review is explicitly associated.
 
     // Add updateDismissedSuggestionUI method for local mode
     // Delegates to the shared SuggestionUI utility
@@ -541,7 +437,7 @@ class LocalManager {
       // Re-anchor comments and suggestions on the fresh DOM
       const includeDismissed = window.aiPanel?.showDismissedComments || false;
       await manager.loadUserComments(includeDismissed);
-      await manager.loadAISuggestions(null, manager.selectedRunId);
+      await manager.loadAISuggestions();
 
       // Restore scroll position after the DOM settles
       requestAnimationFrame(() => {
@@ -942,7 +838,7 @@ class LocalManager {
     // Note: Unlike loadLocalReview() which skips this when analysisHistoryManager exists
     // (because the manager triggers loadAISuggestions via onSelectionChange on init),
     // refresh must call unconditionally since the manager won't re-fire its callback.
-    await manager.loadAISuggestions(null, manager.selectedRunId);
+    await manager.loadAISuggestions();
 
     // Update branchAvailable on the scope selector if the backend sent an updated value
     if (result.branchAvailable !== undefined && manager.diffOptionsDropdown) {
@@ -1163,7 +1059,6 @@ class LocalManager {
           mode: 'local',
           shaAbbrevLength: reviewData.shaAbbrevLength || 7,
           onSelectionChange: (runId, _run) => {
-            manager.selectedRunId = runId;
             manager.loadAISuggestions(null, runId);
           }
         });
@@ -1491,11 +1386,21 @@ class LocalManager {
 
       const data = await response.json();
       const diffContent = data.diff || '';
+      manager.displayedProgressContext = data.progress_context || null;
+      if (data.progress_context?.head && this.localData.localHeadSha !== data.progress_context.head) {
+        this.localData.localHeadSha = data.progress_context.head;
+        manager.currentPR.head_sha = data.progress_context.head;
+        this.updateLocalHeader(this.localData);
+      }
       const stats = data.stats || {};
       const generatedFiles = new Set(data.generated_files || []);
       // Server-computed per-file hunk hashes (computed from the canonical
       // diff so they remain stable across whitespace-filtered renders).
       const hunkHashesByFile = data.hunk_hashes_by_file || {};
+
+      // Load viewed state before rendering so files can start collapsed
+      // and so the sidebar viewed indicator renders on first paint
+      await manager.loadViewedState();
 
       if (!diffContent) {
         const diffContainer = document.getElementById('diff-container');
@@ -1609,10 +1514,6 @@ class LocalManager {
         fileCount: sortedFiles.length
       });
 
-      // Load viewed state before rendering so files can start collapsed
-      // and so the sidebar viewed indicator renders on first paint
-      await manager.loadViewedState();
-
       // Update file list sidebar
       manager.updateFileList(sortedFiles);
 
@@ -1698,7 +1599,7 @@ class LocalManager {
     // Re-anchor comments and suggestions
     const includeDismissed = window.aiPanel?.showDismissedComments || false;
     await manager.loadUserComments(includeDismissed);
-    await manager.loadAISuggestions(null, manager.selectedRunId);
+    await manager.loadAISuggestions();
 
     // Only update dropdown if user hasn't clicked again since this request started
     if (manager?.diffOptionsDropdown) {

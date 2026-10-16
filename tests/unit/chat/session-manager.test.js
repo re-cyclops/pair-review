@@ -592,6 +592,94 @@ describe('ChatSessionManager', () => {
     });
   });
 
+  describe('owned termination and history preservation', () => {
+    const assertIdle = db => require('../../../src/review-removal').assertReviewIdle(db, 1);
+
+    it('does not close or resume another manager’s active session', async () => {
+      const session = await manager.createSession({ provider: 'claude', reviewId: 1 });
+      const observer = new ChatSessionManager(db);
+      await expect(observer.closeSession(session.id)).rejects.toMatchObject({ statusCode: 409 });
+      await expect(observer.resumeSession(session.id)).rejects.toMatchObject({ statusCode: 409 });
+      expect(manager.getSession(session.id).status).toBe('active');
+      expect(() => assertIdle(db)).toThrow();
+      expect(manager.isSessionActive(session.id)).toBe(true);
+    });
+
+    it('keeps duplicate close requests pending without admitting removal, messages or resumption', async () => {
+      const session = await manager.createSession({ provider: 'claude', reviewId: 1 });
+      let acknowledge;
+      _createdBridges[0].close.mockReturnValue(new Promise(resolve => { acknowledge = resolve; }));
+      const closing = [manager.closeSession(session.id), manager.closeSession(session.id)];
+      try {
+        expect(manager.getSession(session.id).status).toBe('active');
+        expect(() => assertIdle(db)).toThrow();
+        await expect(manager.sendMessage(session.id, 'Do not persist this while closing'))
+          .rejects.toMatchObject({ statusCode: 409 });
+        await expect(manager.resumeSession(session.id)).rejects.toMatchObject({ statusCode: 409 });
+        expect(manager.getMessages(session.id)).toEqual([]);
+      } finally {
+        acknowledge();
+        await Promise.all(closing);
+      }
+      expect(manager.getSession(session.id).status).toBe('closed');
+      expect(manager.isSessionActive(session.id)).toBe(false);
+    });
+
+    it('retains ownership when termination fails so explicit closure can still finish', async () => {
+      const session = await manager.createSession({ provider: 'pi', reviewId: 1 });
+      _createdBridges[0].close.mockRejectedValueOnce(new Error('termination not acknowledged'));
+      await expect(manager.closeSession(session.id)).rejects.toThrow('termination not acknowledged');
+      expect(manager.isSessionActive(session.id)).toBe(true);
+      expect(manager.getSession(session.id).status).toBe('active');
+      expect(() => assertIdle(db)).toThrow();
+      await manager.closeSession(session.id);
+      expect(manager.getSession(session.id).status).toBe('closed');
+    });
+
+    it('does not let a departed bridge close a newly resumed session', async () => {
+      const session = await manager.createSession({ provider: 'claude', reviewId: 1 });
+      const departed = _createdBridges[0];
+      await manager.closeSession(session.id);
+      await manager.resumeSession(session.id);
+      departed.emit('close');
+      expect(manager.isSessionActive(session.id)).toBe(true);
+      expect(manager.getSession(session.id).status).toBe('active');
+      expect(() => assertIdle(db)).toThrow();
+    });
+
+    it('waits for failed startup cleanup before making history removable', async () => {
+      _nextStartFail = true;
+      const starting = manager.createSession({ provider: 'pi', reviewId: 1 });
+      let acknowledge;
+      _createdBridges[0].close.mockReturnValue(new Promise(resolve => { acknowledge = resolve; }));
+      const rejected = expect(starting).rejects.toThrow('spawn failed');
+      try {
+        await Promise.resolve();
+        expect(db.prepare('SELECT status FROM chat_sessions').get().status).toBe('active');
+        expect(() => assertIdle(db)).toThrow();
+      } finally {
+        acknowledge();
+        await rejected;
+      }
+      expect(db.prepare('SELECT status FROM chat_sessions').get().status).toBe('error');
+    });
+
+    it('retains the failed startup owner if its cleanup cannot acknowledge termination', async () => {
+      _nextStartFail = true;
+      const starting = manager.createSession({ provider: 'pi', reviewId: 1 });
+      _createdBridges[0].close.mockRejectedValueOnce(new Error('termination not acknowledged'));
+      await expect(starting).rejects.toThrow('termination is unconfirmed');
+      const session = db.prepare('SELECT id, status FROM chat_sessions').get();
+      expect(session.status).toBe('active');
+      expect(manager.isSessionActive(session.id)).toBe(true);
+      expect(() => assertIdle(db)).toThrow();
+      await manager.closeSession(session.id);
+      const { ReviewRepository } = require('../../../src/database');
+      await new ReviewRepository(db).deleteWithRelatedData(1);
+      expect(db.prepare('SELECT id FROM reviews WHERE id = 1').get()).toBeUndefined();
+    });
+  });
+
   describe('getSession', () => {
     it('should return session from DB', async () => {
       const session = await manager.createSession({ provider: 'pi', reviewId: 1 });

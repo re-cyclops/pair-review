@@ -1436,68 +1436,57 @@ describe('CouncilProgressModal', () => {
     });
   });
 
-  describe('_fetchAndApplyStatus', () => {
-    it('should no-op when currentAnalysisId is null', () => {
+  describe('run identity across delayed responses', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it('does not complete a replacement run from an older status response', async () => {
       const { modal } = createTestCouncilProgressModal();
-      modal.currentAnalysisId = null;
-
+      modal.currentAnalysisId = 'old-run';
+      let respond;
+      global.fetch.mockImplementationOnce(() => new Promise(resolve => { respond = resolve; }));
       modal._fetchAndApplyStatus();
-
-      expect(global.fetch).not.toHaveBeenCalled();
+      modal.currentAnalysisId = 'new-run';
+      modal._terminalStatus = null;
+      respond({ ok: true, json: async () => ({ status: 'completed', levels: {} }) });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(modal._terminalStatus).toBeNull();
     });
 
-    it('should fetch and apply status when analysis is active', async () => {
-      const { modal } = createTestCouncilProgressModal();
-      modal.currentAnalysisId = 'analysis-xyz';
-
-      const statusData = { levels: { 1: { status: 'completed' } }, status: 'running' };
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve(statusData)
-      });
-
-      const updateSpy = vi.spyOn(modal, 'updateProgress').mockImplementation(() => {});
-
-      modal._fetchAndApplyStatus();
-
-      await vi.waitFor(() => expect(updateSpy).toHaveBeenCalledWith(statusData));
+    it('does not disable a replacement run from an older cancellation acknowledgement', async () => {
+      const { modal, modalContainer } = createTestCouncilProgressModal();
+      const button = createMockElement('button');
+      modalContainer.querySelector.mockImplementation(selector => selector === '.council-cancel-btn' ? button : null);
+      modal.currentAnalysisId = 'old-run';
+      let respond;
+      global.fetch.mockImplementationOnce(() => new Promise(resolve => { respond = resolve; }));
+      const cancellation = modal.cancel();
+      modal.currentAnalysisId = 'new-run';
+      respond({ ok: true, json: async () => ({ status: 'cancellation_requested' }) });
+      await cancellation;
+      expect(button.disabled).toBe(false);
     });
 
-    it('should handle fetch failure gracefully', async () => {
+    it('accepts terminal cancellation acknowledgement without waiting for a lost socket event', async () => {
       const { modal } = createTestCouncilProgressModal();
-      modal.currentAnalysisId = 'analysis-err';
-
-      global.fetch = vi.fn().mockRejectedValue(new Error('network error'));
-
-      const updateSpy = vi.spyOn(modal, 'updateProgress').mockImplementation(() => {});
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-      modal._fetchAndApplyStatus();
-
-      await vi.waitFor(() => expect(warnSpy).toHaveBeenCalledWith(
-        'Failed to fetch analysis status:',
-        expect.any(Error)
-      ));
-      expect(updateSpy).not.toHaveBeenCalled();
-
-      warnSpy.mockRestore();
+      modal.currentAnalysisId = 'owned-run';
+      modal.isVisible = true;
+      global.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'cancelled' }) });
+      await modal.cancel();
+      expect(modal._terminalStatus).toBe('cancelled');
+      expect(modal.isVisible).toBe(false);
+      expect(modal.isRunningInBackground).toBe(false);
     });
 
-    it('should not apply status when response is not ok', async () => {
+    it.each(['completed', 'cancelled'])('does not hide a replacement run after %s auto-close', async (status) => {
       const { modal } = createTestCouncilProgressModal();
-      modal.currentAnalysisId = 'analysis-404';
-
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: false,
-        status: 404
-      });
-
-      const updateSpy = vi.spyOn(modal, 'updateProgress').mockImplementation(() => {});
-
-      modal._fetchAndApplyStatus();
-
-      await vi.waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
-      expect(updateSpy).not.toHaveBeenCalled();
+      modal.currentAnalysisId = 'old-run';
+      modal.isVisible = true;
+      modal.updateProgress({ status, levels: {} });
+      modal.currentAnalysisId = 'new-run';
+      modal._terminalStatus = null;
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(modal.isVisible).toBe(true);
     });
   });
 
@@ -1561,5 +1550,27 @@ describe('CouncilProgressModal', () => {
       expect(modal._formatVoiceLabel(voice)).toBe('Claude opus-4 (Thorough)');
       delete window.analysisConfigModal;
     });
+  });
+  it('keeps a terminal result closable when the cancellation response arrives late', async () => {
+    vi.useFakeTimers();
+    try {
+      const { modal, modalContainer } = createTestCouncilProgressModal();
+      const button = createMockElement('button');
+      modalContainer.querySelector.mockImplementation(selector => selector === '.council-cancel-btn' ? button : null);
+      modal.currentAnalysisId = 'owned-run';
+      modal.isVisible = true;
+      let acknowledge;
+      global.fetch.mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve; }));
+      const cancellation = modal.cancel();
+      modal.updateProgress({ status: 'cancelled', levels: {} });
+      acknowledge({ ok: true, json: async () => ({ status: 'cancellation_requested' }) });
+      await cancellation;
+      expect(button.disabled).toBe(false);
+      await modal.cancel();
+      expect(modal.isVisible).toBe(false);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -3,7 +3,7 @@
  * GitHub Collections Routes
  *
  * Handles endpoints for PR collections:
- * - Review Requests: PRs where the user's review is requested directly
+ * - Review Requests: personal requests and the viewer's outstanding change requests
  * - Team Review Requests: PRs where a team the user belongs to is requested,
  *   but the user is not requested directly
  * - My PRs: PRs authored by the user
@@ -14,14 +14,17 @@
  */
 
 const express = require('express');
-const { query, run, withTransaction } = require('../database');
+const { createHash, randomUUID } = require('node:crypto');
 const { GitHubClient } = require('../github/client');
 const { getGitHubToken, resolveHostBinding } = require('../config');
 const logger = require('../utils/logger');
 const { resolveRepoLinks } = require('../links/repo-links');
 const { resolveBindingRepositoryForHost, setupHostParam } = require('../utils/host-resolution');
+const { readReviewHistory } = require('../github/operations/review-snapshot');
 
 const router = express.Router();
+const pendingRefreshes = new WeakMap();
+const credentialHash = token => token ? createHash('sha256').update(token).digest('hex') : null;
 
 // `host` is additive: NULL for github.com rows, the repo's `api_host` URL for
 // alt-host rows. Both GET and the refresh re-read echo it so the frontend can
@@ -114,87 +117,103 @@ function ownerRepoFromKey(repoKey) {
   return { owner: parts[0], repo: parts[1] };
 }
 
-/**
- * Sweep every alt-host repo in config for open PRs belonging to `collection`,
- * classifying each with `def.classifyAlt`. Best-effort per host: a failure for
- * one repo is captured in the returned `hosts` array and never thrown, so the
- * github.com results already gathered by the caller are never lost. Rows are
- * stamped with the repo's `api_host` string for the `host` column.
- *
- * `credentialedRepoCount` counts alt-host repos that resolved a non-empty
- * token (i.e. could authenticate), regardless of whether the subsequent fetch
- * then succeeded. The refresh route uses it to decide whether ANY source can
- * authenticate before returning 401 on an install with no github.com token.
- *
- * @param {Object} config - Server config (from loadConfig()).
- * @param {Object} def - The collection definition (needs `classifyAlt`).
- * @param {string|null} team - Validated `org/team` filter, or null.
- * @returns {Promise<{ rows: Array<Object>, hosts: Array<{host: string, repo: string, ok: boolean, error?: string}>, credentialedRepoCount: number }>}
- */
-async function sweepAltHosts(config, def, team) {
-  const rows = [];
-  const hosts = [];
-  let credentialedRepoCount = 0;
-  const repos = (config && config.repos) || {};
-  if (typeof def.classifyAlt !== 'function') {
-    return { rows, hosts, credentialedRepoCount };
-  }
-
-  // One `GET /user` per (host, token) per refresh — multiple repos can share a
-  // host, and a login lookup per repo would be wasteful. Keyed by token too so
-  // distinct credentials on the same host resolve their own identity.
-  const loginCache = new Map();
-
-  for (const [repoKey, repoEntry] of Object.entries(repos)) {
-    if (!repoEntry || typeof repoEntry !== 'object') continue;
-    const apiHost = (typeof repoEntry.api_host === 'string' && repoEntry.api_host) ? repoEntry.api_host : null;
-    if (!apiHost) continue;
-
+// Capture bindings once. A cached queue belongs to credentials, not merely to
+// a collection name; fingerprints stay on the server and never enter responses.
+function collectionSources(config, cachedOnly = false) {
+  const token = getGitHubToken(config, undefined, { cachedOnly });
+  const sources = [{ host: null, repo: null, binding: token, credentialHash: credentialHash(token),
+    source: JSON.stringify([null, null]), error: token ? null : 'no github.com token configured' }];
+  const bySource = new Map();
+  for (const [repoKey, entry] of Object.entries(config?.repos || {})) {
+    if (!entry || typeof entry.api_host !== 'string' || !entry.api_host) continue;
     const ownerRepo = ownerRepoFromKey(repoKey);
-    if (!ownerRepo) {
-      logger.warn(`Collections: skipping alt-host repo "${repoKey}" (${apiHost}) — key is not an owner/repo pair, cannot derive a repo for pulls.list`);
-      hosts.push({ host: apiHost, repo: repoKey, ok: false, error: 'config key is not an owner/repo pair' });
+    const source = { host: entry.api_host, repo: ownerRepo ? repoKey : null, ownerRepo,
+      source: JSON.stringify([entry.api_host, repoKey.toLowerCase()]), credentialHash: null, error: null };
+    const existing = bySource.get(source.source);
+    if (existing) {
+      existing.credentialHash = null;
+      existing.error = 'Multiple case-insensitive bindings name this repository. Keep one binding.';
       continue;
     }
-
+    bySource.set(source.source, source);
+    sources.push(source);
+    if (!ownerRepo) { source.error = 'configured key is not an owner/repo pair'; continue; }
     try {
-      const binding = resolveHostBinding(repoKey, config, { host: apiHost });
-
-      // A repo with `api_host` but no repo-scoped token yields an empty-token
-      // binding. Probing anyway would 401 once per collection per refresh and
-      // spam error logs; surface it as a per-host status instead (debug, not
-      // error — it's a config gap, not a runtime failure).
-      if (!binding.token) {
-        logger.debug(`Collections: skipping alt-host repo "${repoKey}" (${apiHost}) — no repo-scoped credentials configured`);
-        hosts.push({ host: apiHost, repo: repoKey, ok: false, error: 'no credentials configured' });
-        continue;
-      }
-      credentialedRepoCount++;
-
-      const client = new GitHubClient(binding);
-
-      const loginKey = `${apiHost}\u0000${binding.token}`;
-      let login = loginCache.get(loginKey);
-      if (login === undefined) {
-        const user = await client.getAuthenticatedUser();
-        login = user.login;
-        loginCache.set(loginKey, login);
-      }
-
-      const prs = await client.listOpenPullRequests(ownerRepo.owner, ownerRepo.repo);
-      for (const pr of prs) {
-        if (def.classifyAlt(pr, login, team)) {
-          rows.push({ ...pr, host: apiHost });
-        }
-      }
-      hosts.push({ host: apiHost, repo: repoKey, ok: true });
-    } catch (error) {
-      logger.error(`Collections: alt-host refresh failed for ${repoKey} (${apiHost}): ${error.message}`);
-      hosts.push({ host: apiHost, repo: repoKey, ok: false, error: error.message });
-    }
+      source.binding = resolveHostBinding(repoKey, config, { host: source.host, cachedOnly });
+      source.credentialHash = credentialHash(source.binding.token);
+      if (!source.credentialHash) source.error = 'no credentials configured';
+    } catch { source.error = 'host credentials could not be resolved'; }
   }
+  return sources;
+}
 
-  return { rows, hosts, credentialedRepoCount };
+// A global "changes requested" search is only candidate discovery. Another
+// reviewer's objection must not put a PR back in a viewer's individual queue.
+async function outstandingChanges(client, candidates, login, statuses) {
+  const rows = [];
+  const others = candidates.filter(pr => pr.author?.toLowerCase() !== login.toLowerCase());
+  for (let offset = 0; offset < others.length; offset += 3) {
+    const batch = await Promise.all(others.slice(offset, offset + 3).map(async pr => {
+      const history = await readReviewHistory(client, pr, login);
+      if (!history.complete) {
+        statuses.push({ host: client.apiHost || null, repo: `${pr.owner}/${pr.repo}#${pr.number}`, ok: false,
+          error: 'Effective review unavailable or partial; queue membership is unknown' });
+        return pr;
+      }
+      return history.viewerReview?.state === 'CHANGES_REQUESTED' ? pr : null;
+    }));
+    rows.push(...batch.filter(Boolean));
+  }
+  return rows;
+}
+
+// Every source is independently observed. A failed GitHub search must not
+// discard readable alternate-host data (or certify an empty queue).
+async function collectSource(source, def, team, accounts) {
+  if (source.error) { source.status = 401; return; }
+  const client = new GitHubClient(source.binding);
+  source.warnings = [];
+  try {
+    const accountKey = `${source.host || 'github.com'}:${source.credentialHash}`;
+    let account = accounts.get(accountKey);
+    if (!account) {
+      const user = await client.getAuthenticatedUser();
+      if (!user?.login) throw new Error('Authenticated identity unavailable');
+      account = { login: user.login, credentialHash: credentialHash(client.token) };
+      accounts.set(`${source.host || 'github.com'}:${account.credentialHash}`, account);
+    }
+    const login = account.login;
+    if (source.host) {
+      const prs = await client.listOpenPullRequests(source.ownerRepo.owner, source.ownerRepo.repo);
+      source.rows = [];
+      const candidates = [];
+      for (const pr of prs) {
+        if (def.classifyAlt(pr, login, team) && (def.name !== 'review-requests' || pr.author?.toLowerCase() !== login.toLowerCase())) source.rows.push(pr);
+        else if (def.name === 'review-requests') candidates.push(pr);
+      }
+      if (candidates.length) source.rows.push(...await outstandingChanges(client, candidates, login, source.warnings));
+    } else {
+      source.rows = await client.searchPullRequests(def.buildQuery(login, { team }));
+      if (def.name === 'review-requests') {
+        source.rows = source.rows.filter(pr => pr.author?.toLowerCase() !== login.toLowerCase());
+        const direct = new Set(source.rows.map(pr => `${pr.owner}/${pr.repo}#${pr.number}`.toLowerCase()));
+        const candidates = await client.searchPullRequests(`is:pr is:open archived:false reviewed-by:${login} review:changes_requested -author:${login}`);
+        source.rows.push(...await outstandingChanges(client, candidates.filter(pr => !direct.has(`${pr.owner}/${pr.repo}#${pr.number}`.toLowerCase())), login, source.warnings));
+      }
+    }
+    source.credentialHash = credentialHash(client.token);
+    if (source.credentialHash !== account.credentialHash) {
+      source.error = 'Authentication changed while reading the queue. Refresh to observe the current account.';
+      source.status = 409;
+      return;
+    }
+    source.ok = true;
+  } catch (error) {
+    source.credentialHash = credentialHash(client.token);
+    source.status = [401, 403, 429].includes(error.status) ? error.status : 503;
+    source.error = `Host read unavailable (${source.status})`;
+    logger.warn(`Collections: ${source.host || 'github.com'} read failed (${source.status})`);
+  }
 }
 
 /**
@@ -226,15 +245,94 @@ function parseTeamParam(raw) {
   return { team: raw, error: null };
 }
 
-/**
- * Fetch cached rows for a collection, newest first.
- */
-async function getCachedRows(db, collection) {
-  return query(
-    db,
-    `SELECT ${SELECT_COLUMNS} FROM github_pr_cache WHERE collection = ? ORDER BY updated_at DESC`,
-    [collection]
-  );
+// Only a matching successful observation can authorize cached rows, including
+// a successful observation with zero rows. Legacy unowned rows stay unavailable.
+function cachedCollection(db, collection, sources, config) {
+  const observation = db.prepare('SELECT * FROM github_collection_observations WHERE collection = ? AND source = ?');
+  const rows = [];
+  const hosts = [];
+  const times = [];
+  for (const source of sources) {
+    const previous = observation.get(collection, source.source);
+    const matches = source.credentialHash && previous?.credential_hash === source.credentialHash;
+    let availability = 'unavailable';
+    let error = source.error || (matches ? previous.error : null) || 'No cached observation for the current credentials. Refresh this queue.';
+    if (matches && previous.fetched_at) {
+      availability = previous.availability;
+      error = previous.error;
+      if (availability === 'known' && Date.now() - new Date(previous.fetched_at).getTime() > 120000) {
+        availability = 'stale';
+        error = 'Cached observation is older than two minutes. Refresh this queue.';
+      }
+      const predicate = source.host ? 'host = ? AND owner = ? COLLATE NOCASE AND repo = ? COLLATE NOCASE' : 'host IS NULL';
+      const params = source.host ? [collection, source.host, source.ownerRepo.owner, source.ownerRepo.repo] : [collection];
+      rows.push(...db.prepare(`SELECT ${SELECT_COLUMNS} FROM github_pr_cache WHERE collection = ? AND ${predicate}`).all(...params));
+      times.push(previous.fetched_at);
+    }
+    hosts.push({ host: source.host, repo: source.repo, ok: availability === 'known', availability,
+      observationId: matches ? previous.request_id : null,
+      fetched_at: matches ? previous.fetched_at : null, ...(error ? { error } : {}) });
+  }
+  rows.sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)) || String(a.host || '').localeCompare(String(b.host || ''))
+    || a.owner.localeCompare(b.owner) || a.repo.localeCompare(b.repo) || a.number - b.number);
+  const availability = hosts.every(source => source.availability === 'known') ? 'known'
+    : !times.length ? 'unavailable' : hosts.some(source => source.availability === 'unavailable' || source.availability === 'partial') ? 'partial' : 'stale';
+  return { success: true, prs: attachRepoLinks(rows, config), fetched_at: times.sort()[0] || null, availability, hosts,
+    error: hosts.filter(source => source.error).map(source => `${source.repo || source.host || 'GitHub'}: ${source.error}`).join('; ') || null };
+}
+
+async function refreshCollection(db, collection, sources, config, def, team) {
+  let pending = pendingRefreshes.get(db);
+  if (!pending) { pending = new Map(); pendingRefreshes.set(db, pending); }
+  const key = JSON.stringify([collection, sources.map(source => [source.source, source.credentialHash]).sort()]);
+  if (pending.has(key)) return pending.get(key);
+  const requestId = randomUUID();
+  const refresh = (async () => {
+    const claim = db.prepare(`INSERT INTO github_collection_observations (collection, source, credential_hash, request_id)
+      VALUES (?, ?, ?, ?) ON CONFLICT(collection, source) DO UPDATE SET
+      fetched_at = CASE WHEN credential_hash IS excluded.credential_hash THEN fetched_at ELSE NULL END,
+      availability = CASE WHEN credential_hash IS excluded.credential_hash THEN availability ELSE 'unavailable' END,
+      error = CASE WHEN credential_hash IS excluded.credential_hash THEN error ELSE NULL END,
+      credential_hash = excluded.credential_hash, request_id = excluded.request_id`);
+    db.transaction(() => { for (const source of sources) claim.run(collection, source.source, source.credentialHash, requestId); })();
+    const accounts = new Map();
+    for (const source of sources) await collectSource(source, def, team, accounts);
+    // Network calls are finished before this short, synchronous transaction.
+    // A newer credential context/request owns any source whose claim changed.
+    db.transaction(() => {
+      const current = db.prepare('SELECT * FROM github_collection_observations WHERE collection = ? AND source = ?');
+      const update = db.prepare(`UPDATE github_collection_observations SET credential_hash = ?, fetched_at = ?,
+        availability = ?, error = ? WHERE collection = ? AND source = ? AND request_id = ?`);
+      const insert = db.prepare(`INSERT INTO github_pr_cache (owner, repo, number, title, author, updated_at, html_url, state, collection, host)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      for (const source of sources) {
+        const previous = current.get(collection, source.source);
+        if (previous?.request_id !== requestId) continue;
+        let fetchedAt = previous.credential_hash === source.credentialHash ? previous.fetched_at : null;
+        let error = source.error;
+        let availability = fetchedAt ? 'stale' : 'unavailable';
+        if (source.ok) {
+          if (source.host) db.prepare('DELETE FROM github_pr_cache WHERE collection = ? AND host = ? AND owner = ? COLLATE NOCASE AND repo = ? COLLATE NOCASE')
+            .run(collection, source.host, source.ownerRepo.owner, source.ownerRepo.repo);
+          else db.prepare('DELETE FROM github_pr_cache WHERE collection = ? AND host IS NULL').run(collection);
+          for (const pr of source.rows) insert.run(pr.owner, pr.repo, pr.number, pr.title, pr.author, pr.updated_at, pr.html_url, pr.state, collection, source.host);
+          fetchedAt = new Date().toISOString();
+          availability = source.warnings.length ? 'partial' : 'known';
+          error = source.warnings.map(warning => `${warning.repo}: ${warning.error}`).join('; ') || null;
+        }
+        update.run(source.credentialHash, fetchedAt, availability, error, collection, source.source, requestId);
+        // Retain this opaque generation for browser cache invalidation. It is
+        // not a heartbeat or evidence that a refresh is still running.
+      }
+    })();
+    const payload = cachedCollection(db, collection, sources, config);
+    for (const source of sources) if (source.warnings?.length) payload.hosts.push(...source.warnings);
+    const status = sources.some(source => source.ok) ? 200 : sources.find(source => source.status)?.status || 503;
+    payload.success = status === 200;
+    return { status, payload };
+  })().finally(() => pending.delete(key));
+  pending.set(key, refresh);
+  return refresh;
 }
 
 /**
@@ -267,7 +365,7 @@ function attachRepoLinks(rows, config) {
  *   ({ name, label, buildQuery, supportsTeamFilter }).
  */
 function registerCollection(def) {
-  const { name, label, buildQuery, supportsTeamFilter } = def;
+  const { name, label, supportsTeamFilter } = def;
 
   // GET cached PRs.
   router.get(`/api/github/${name}`, async (req, res) => {
@@ -284,10 +382,8 @@ function registerCollection(def) {
       }
 
       const db = req.app.get('db');
-      const rows = await getCachedRows(db, cacheKey(name, team));
-      const prs = attachRepoLinks(rows, req.app.get('config') || {});
-      const fetchedAt = rows.length > 0 ? rows[0].fetched_at : null;
-      res.json({ success: true, prs, fetched_at: fetchedAt });
+      const config = req.app.get('config') || {};
+      res.json(cachedCollection(db, cacheKey(name, team), collectionSources(config, true), config));
     } catch (error) {
       logger.error(`Failed to fetch ${label}:`, error);
       res.status(500).json({ success: false, error: `Failed to fetch ${label}` });
@@ -310,79 +406,14 @@ function registerCollection(def) {
         team = parsed.team;
       }
 
-      const config = req.app.get('config');
-      const db = req.app.get('db');
-
-      // The dashboard has two independent PR sources: the github.com search
-      // (top-level token) and the per-repo alt-host sweep. Treat them
-      // independently so an alt-host-only install (repo-scoped alt credentials,
-      // NO global github token) can still refresh. A missing github token skips
-      // ONLY the github branch; a per-source status is recorded instead.
-      // Cross-repo search on github.com — no per-repo binding applies here.
-      // Explicit `undefined` repository selects the no-repo (top-level) path.
-      const githubToken = getGitHubToken(config, undefined);
-      const sourceStatuses = [];
-      let prs = [];
-      if (githubToken) {
-        const client = new GitHubClient(githubToken);
-        const user = await client.getAuthenticatedUser();
-        prs = await client.searchPullRequests(buildQuery(user.login, { team }));
-      } else {
-        // host:null, repo:null identifies the github.com cross-repo source
-        // (mirrors the NULL-host = github.com convention used for cache rows).
-        sourceStatuses.push({ host: null, repo: null, ok: false, error: 'no github.com token configured' });
-      }
-
-      // Alt-host repos (both exclusive and dual) have no Search API, so sweep
-      // them via REST and classify locally. Best-effort: a failing host is
-      // reported in `hosts` and never aborts the github.com rows below. Done
-      // BEFORE the transaction so a slow alt host doesn't hold a write lock.
-      const { rows: altRows, hosts, credentialedRepoCount } = await sweepAltHosts(config, def, team);
-
-      // Only 401 when NO source can authenticate at all: no github token AND no
-      // alt-host repo with credentials. If either can authenticate, proceed and
-      // report the unavailable source in the response.
-      if (!githubToken && credentialedRepoCount === 0) {
-        return res.status(401).json({ success: false, error: 'GitHub token not configured' });
-      }
-
-      // Namespace the cache so a filtered view never clobbers the all-teams
-      // cache. Every distinct team string the user tries creates its own cached
-      // rows that are never garbage-collected; negligible for a local SQLite
-      // home-page feature.
-      const key = cacheKey(name, team);
-      await withTransaction(db, async () => {
-        // DELETE-then-INSERT clears prior github AND alt rows for this key, so a
-        // retry re-derives the whole view rather than duplicating. github rows
-        // stamp host NULL; alt rows carry their api_host string.
-        await run(db, 'DELETE FROM github_pr_cache WHERE collection = ?', [key]);
-        for (const pr of prs) {
-          await run(db,
-            'INSERT INTO github_pr_cache (owner, repo, number, title, author, updated_at, html_url, state, collection, host) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [pr.owner, pr.repo, pr.number, pr.title, pr.author, pr.updated_at, pr.html_url, pr.state, key, null]
-          );
-        }
-        for (const pr of altRows) {
-          await run(db,
-            'INSERT INTO github_pr_cache (owner, repo, number, title, author, updated_at, html_url, state, collection, host) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [pr.owner, pr.repo, pr.number, pr.title, pr.author, pr.updated_at, pr.html_url, pr.state, key, pr.host]
-          );
-        }
-      });
-
-      const rows = await getCachedRows(db, key);
-      const resolvedRows = attachRepoLinks(rows, config);
-      const fetchedAt = rows.length > 0 ? rows[0].fetched_at : null;
-      // `hosts` is additive; omit it entirely when every source is healthy (no
-      // alt-host repos and a working github token) so the happy path gains no
-      // `hosts` key. A skipped github source or any alt-host status adds it.
-      const allStatuses = sourceStatuses.concat(hosts);
-      const payload = { success: true, prs: resolvedRows, fetched_at: fetchedAt };
-      if (allStatuses.length > 0) payload.hosts = allStatuses;
-      res.json(payload);
+      const config = req.app.get('config') || {};
+      const sources = collectionSources(config);
+      const result = await refreshCollection(req.app.get('db'), cacheKey(name, team), sources, config, def, team);
+      res.status(result.status).json(result.payload);
     } catch (error) {
       if (error.status === 401 || error.status === 403) {
-        return res.status(401).json({ success: false, error: 'GitHub token is invalid or expired' });
+        return res.status(error.status).json({ success: false, availability: 'unavailable',
+          error: error.status === 401 ? 'GitHub authentication failed' : 'GitHub access denied or rate limited' });
       }
       logger.error(`Failed to refresh ${label}:`, error);
       res.status(500).json({ success: false, error: `Failed to refresh ${label}` });

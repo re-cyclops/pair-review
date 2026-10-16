@@ -10,8 +10,10 @@
  * - Dropdown behavior and selection
  */
 
-import { test, expect } from './fixtures.js';
+import { test, publicationTest, expect } from './fixtures.js';
 import { waitForDiffToRender } from './helpers.js';
+import { AnalysisRunRepository } from '../../src/database.js';
+import { captureRunProtocol } from '../../src/utils/review-protocol.js';
 
 /**
  * Helper to seed an analysis run by triggering the analyze endpoint
@@ -96,26 +98,6 @@ test.describe('Analysis History - Empty State', () => {
     }
   });
 
-  test('should display "No AI analysis yet" text in empty state', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await waitForDiffToRender(page);
-
-    // Panel starts collapsed by default; expand it so analysis context elements are visible
-    await page.evaluate(() => window.aiPanel?.expand());
-
-    const emptyState = page.locator('#analysis-context-empty');
-
-    // If empty state is visible, verify its text content
-    const isVisible = await emptyState.isVisible();
-    if (isVisible) {
-      await expect(emptyState).toContainText('No AI analysis yet');
-    } else {
-      // Analysis already exists from previous tests - verify the element has the correct text
-      // even if it's hidden (the text is still in the DOM)
-      const text = await emptyState.textContent();
-      expect(text).toContain('No AI analysis yet');
-    }
-  });
 });
 
 test.describe('Analysis History - Selector Display', () => {
@@ -529,8 +511,7 @@ test.describe('Analysis History - Dropdown', () => {
     await secondItem.click();
 
     await page.waitForFunction(
-      (runId) => window.prManager?.selectedRunId === runId
-        && window.prManager?.analysisHistoryManager?.selectedRunId === runId,
+      (runId) => window.prManager?.analysisHistoryManager?.getSelectedRunId() === runId,
       olderRunId
     );
 
@@ -542,8 +523,7 @@ test.describe('Analysis History - Dropdown', () => {
     await page.evaluate((id) => window.prManager?.adoptSuggestion(parseInt(id, 10)), suggestionId);
 
     await page.waitForFunction(
-      (runId) => window.prManager?.selectedRunId === runId
-        && window.prManager?.analysisHistoryManager?.selectedRunId === runId,
+      (runId) => window.prManager?.analysisHistoryManager?.getSelectedRunId() === runId,
       olderRunId
     );
 
@@ -554,11 +534,7 @@ test.describe('Analysis History - Dropdown', () => {
     });
 
     await page.waitForFunction(
-      (runId) => {
-        const manager = window.prManager;
-        return manager?.selectedRunId === runId
-          && manager?.analysisHistoryManager?.selectedRunId === runId;
-      },
+      (runId) => window.prManager?.analysisHistoryManager?.getSelectedRunId() === runId,
       olderRunId
     );
 
@@ -566,4 +542,34 @@ test.describe('Analysis History - Dropdown', () => {
     const selectedItem = page.locator('#analysis-context-list .analysis-history-item.selected');
     await expect(selectedItem).toHaveAttribute('data-run-id', olderRunId);
   });
+});
+
+publicationTest('protocol inspection follows the selected historical run, not the latest run or loaded policy', async ({ page, testServer }) => {
+  const runs = new AnalysisRunRepository(testServer.db);
+  const baseConfig = testServer.app.get('config');
+  for (const [id, profile, startedAt] of [
+    ['protocol-older', 'Captured older policy', '2026-01-01 00:00:00'],
+    ['protocol-newer', 'Captured newer policy', '2026-01-02 00:00:00']
+  ]) {
+    await runs.create({ id, reviewId: 1, provider: 'omp', model: 'default', status: 'completed',
+      protocol: captureRunProtocol({ ...baseConfig, review_prose: { profile } }) });
+    testServer.db.prepare('UPDATE analysis_runs SET started_at = ?, completed_at = ? WHERE id = ?').run(startedAt, startedAt, id);
+  }
+  testServer.app.set('config', { ...baseConfig, review_prose: { profile: 'Loaded current policy' } });
+  await page.goto('/pr/test-owner/test-repo/1');
+  await waitForDiffToRender(page);
+  await page.evaluate(() => window.aiPanel.expand());
+  await page.locator('#analysis-context-btn').click();
+  await page.locator('button.analysis-history-item[data-run-id="protocol-older"]').click();
+  await page.getByRole('button', { name: /^Commands / }).click();
+  const search = page.getByRole('combobox', { name: 'Search commands, reviews or a PR URL' });
+  await search.fill('protocol');
+  await page.getByRole('option', { name: 'Inspect effective review protocol' }).waitFor();
+  await search.press('Enter');
+  await page.getByText('Full protocol receipt', { exact: true }).click();
+  const receipt = JSON.parse(await page.locator('#workspace-protocol pre').innerText());
+  expect(receipt['Selected run (captured configuration)']).toMatchObject({
+    runId: 'protocol-older', protocol: { prosePolicy: { profile: 'Captured older policy' } }
+  });
+  expect(receipt['Configured outgoing prose policy'].profile).toBe('Loaded current policy');
 });

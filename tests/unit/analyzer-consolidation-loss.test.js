@@ -1,5 +1,5 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // analyzer.js destructures createProvider from src/ai/index at load time
 // (line 2), so the binding is captured the first time the module is required.
@@ -11,6 +11,9 @@ const aiIndex = require('../../src/ai/index');
 const createProvider = vi.spyOn(aiIndex, 'createProvider');
 
 const Analyzer = require('../../src/ai/analyzer');
+const { AnalysisRunRepository } = require('../../src/database');
+let baselineRead;
+afterEach(() => { baselineRead?.mockRestore(); baselineRead = null; });
 
 /**
  * Regression tests for issue #560: consolidation could silently drop every
@@ -293,10 +296,8 @@ describe('_intraLevelConsolidate parse-failure handling (issue #560)', () => {
   });
 });
 
-// Wiring tests: verify that consolidation parse failures propagate through the
-// full analysis flows into the persisted/returned levelOutcomes, not just the
-// parse primitives. DB access is stubbed on the instance (analysis_run repo
-// calls inside these flows are wrapped in try/catch, so a bare `{}` db is safe).
+// Exercise parse failures through complete analysis flows into the returned
+// levelOutcomes. Storage and the absent human baseline are isolated here.
 describe('analyzeAllLevels consolidation outcome mapping (issue #560)', () => {
   function createWiredAnalyzer() {
     const analyzer = new Analyzer({}, 'sonnet', 'claude');
@@ -315,6 +316,7 @@ describe('analyzeAllLevels consolidation outcome mapping (issue #560)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    baselineRead = vi.spyOn(AnalysisRunRepository.prototype, 'getById').mockResolvedValue(null);
   });
 
   it('records levelOutcomes.consolidation = failed and orchestrationFailed when the consolidation response is unparseable', async () => {
@@ -393,6 +395,7 @@ describe('runCouncilAnalysis intra-level consolidation failure (issue #560)', ()
 
   beforeEach(() => {
     vi.clearAllMocks();
+    baselineRead = vi.spyOn(AnalysisRunRepository.prototype, 'getById').mockResolvedValue(null);
   });
 
   it('reports consolidation failed when Pass 1 is unparseable even though Pass 2 succeeds', async () => {

@@ -161,6 +161,12 @@ class KeyboardShortcuts {
         groups.general.shortcuts.push(item);
       }
     }
+    if (window.reviewWorkspace) {
+      groups.navigation.shortcuts.unshift({
+        keys: [window.reviewWorkspace.shortcutHint],
+        description: 'Find a review or action'
+      });
+    }
 
     let html = '';
 

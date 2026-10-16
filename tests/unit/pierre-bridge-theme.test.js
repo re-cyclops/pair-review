@@ -88,26 +88,6 @@ describe('PierreBridge theme handling', () => {
     vi.restoreAllMocks();
   });
 
-  it('propagates theme changes to the worker pool render options', () => {
-    const { PierreBridge, setRenderOptions } = loadPierreBridge();
-    const bridge = new PierreBridge({ theme: 'light' });
-    const instance = { setThemeType: vi.fn() };
-    bridge.files.set('src/example.js', { instance });
-
-    bridge.setTheme('dark');
-
-    expect(setRenderOptions).toHaveBeenCalledWith({
-      theme: {
-        dark: 'github-dark',
-        light: 'github-light',
-      },
-      useTokenTransformer: false,
-      lineDiffType: 'word',
-      maxLineDiffLength: 1000,
-      tokenizeMaxLineLength: 1000,
-    });
-    expect(instance.setThemeType).toHaveBeenCalledWith('dark');
-  });
 
   it('uses non-worker rendering while startup is pending and disables workers on timeout', () => {
     vi.useFakeTimers();

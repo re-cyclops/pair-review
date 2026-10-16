@@ -102,10 +102,11 @@ curl -s -X POST http://localhost:{{PORT}}/api/reviews/{{REVIEW_ID}}/comments \\
   }'
 \`\`\`
 
-**Response:** \`{ "success": true, "commentId": 123, "message": "Comment saved successfully" }\`
+**Response:** \`{ "success": true, "commentId": 123, "comment": { "id": 123, "draft_key": "...", "revision": 1, "included": true, ... } }\`
 
 Required fields: \`file\`, \`body\`.
-Optional fields: \`line_start\`, \`line_end\`, \`side\` ("left" or "right"), \`diff_position\`, \`commit_sha\`, \`parent_id\`, \`type\`, \`title\`.
+Optional fields: \`line_start\`, \`line_end\`, \`side\` ("left" or "right"), \`diff_position\`, \`commit_sha\`, \`parent_id\`, \`type\`, \`title\`, \`draft_key\`, \`included\`.
+Use a stable unique \`draft_key\` for each new comment; a lost create response can be retried with that same key and identical content. Do not reuse it for a different draft. Set \`included: false\` to keep text out of the selected submission set without dismissing or deleting it. Record the actual reviewed \`commit_sha\`; a missing or stale anchor cannot authorize publication.
 
 ### Get a single comment
 
@@ -113,15 +114,21 @@ Optional fields: \`line_start\`, \`line_end\`, \`side\` ("left" or "right"), \`d
 curl -s http://localhost:{{PORT}}/api/reviews/{{REVIEW_ID}}/comments/COMMENT_ID
 \`\`\`
 
+The response is the comment object, including \`body\`, \`draft_key\`, \`revision\`, and \`included\`.
+
 ### Update a comment
+
+Read the comment first. Copy its exact \`draft_key\` and \`revision\` into the update as \`draft_key\` and \`expected_revision\`; the values below are illustrative.
 
 \`\`\`bash
 curl -s -X PUT http://localhost:{{PORT}}/api/reviews/{{REVIEW_ID}}/comments/COMMENT_ID \\
   -H 'Content-Type: application/json' \\
-  -d '{ "body": "Updated comment text." }'
+  -d '{ "body": "Updated comment text.", "draft_key": "KEY_FROM_GET", "expected_revision": 1 }'
 \`\`\`
 
-**Response:** \`{ "success": true, "message": "Comment updated successfully" }\`
+**Response:** \`{ "success": true, "comment": { "id": 123, "draft_key": "...", "revision": 2, ... } }\`
+
+Use the returned revision for a later edit. The same endpoint accepts \`included\` with the same revision checks. Missing preconditions return \`428\`; stale edits return \`409\` with the server's \`current\` version. Preserve your intended text and the server version for the reviewer to resolve; never fetch a newer revision and blindly overwrite it.
 
 ### Delete a comment
 
@@ -134,6 +141,8 @@ curl -s -X DELETE http://localhost:{{PORT}}/api/reviews/{{REVIEW_ID}}/comments/C
 \`\`\`
 
 **Response:** \`{ "success": true, "message": "Comment deleted successfully", "dismissedSuggestionId": null }\`
+
+To clear saved draft text permanently instead of dismissing it, use \`DELETE /api/reviews/{{REVIEW_ID}}/comments/COMMENT_ID/draft\` with JSON \`{ "draft_key": "KEY_FROM_GET", "expected_revision": 1 }\`, using the current GET values. This requires an explicit user request, cannot be restored, and is blocked while a submission is unresolved.
 
 ### Restore a deleted comment
 
@@ -321,7 +330,9 @@ curl -s http://localhost:{{PORT}}/api/analyses/ANALYSIS_ID/status
 curl -s -X POST http://localhost:{{PORT}}/api/analyses/ANALYSIS_ID/cancel
 \`\`\`
 
-**Response:** \`{ "success": true, "message": "Analysis cancelled", "processesKilled": 2, "status": "cancelled" }\`
+**Response:** HTTP \`202\`, \`{ "success": true, "message": "Cancellation requested; waiting for the executor", "processesSignalled": 2, "status": "cancellation_requested" }\`.
+
+This acknowledges the request, not process termination. Wait for the terminal status/event before treating cancellation as complete or removing the review or checkout.
 
 ### Real-time progress (WebSocket)
 
@@ -497,12 +508,13 @@ Base: \`http://localhost:{{PORT}}\` | Review: \`{{REVIEW_ID}}\`
 
 ## Comments — /api/reviews/{{REVIEW_ID}}/comments
 - \`GET\` — List all (?includeDismissed=true)
-- \`POST\` — Create {file, body, ?line_start, ?line_end, ?side, ?type, ?title} (no line_start=file-level)
-- \`GET /:id\` — Get one
-- \`PUT /:id\` — Update {body}
+- \`POST\` — Create {file, body, ?line_start, ?line_end, ?side, ?commit_sha, ?draft_key, ?included}
+- \`GET /:id\` — Get body, draft_key, revision, included
+- \`PUT /:id\` — Edit {draft_key, expected_revision, ?body, ?included}; use GET values. 409: retain both versions; no blind overwrite.
 - \`DELETE /:id\` — Dismiss (soft-delete)
 - \`PUT /:id/restore\` — Restore dismissed
 - \`DELETE\` (no id) — Bulk dismiss all
+- \`DELETE /:id/draft\` — Clear text irreversibly {draft_key, expected_revision}; explicit user request only
 
 ## Suggestions — /api/reviews/{{REVIEW_ID}}/suggestions
 - \`GET\` — List (?levels=final,1,2,3 &runId=UUID)
@@ -521,7 +533,7 @@ Base: \`http://localhost:{{PORT}}\` | Review: \`{{REVIEW_ID}}\`
 ## Analysis Status & Management
 - \`GET /api/reviews/{{REVIEW_ID}}/analyses/status\` — Running?
 - \`GET /api/analyses/:id/status\` — Status by analysis ID
-- \`POST /api/analyses/:id/cancel\` — Cancel
+- \`POST /api/analyses/:id/cancel\` — Request (202); wait for terminal acknowledgement
 - WebSocket /ws: subscribe "analysis:{id}" for progress
 - \`GET /api/analyses/runs?reviewId={{REVIEW_ID}}\` — List runs
 - \`GET /api/analyses/runs/latest?reviewId={{REVIEW_ID}}\` — Latest run

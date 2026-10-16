@@ -156,17 +156,17 @@ class CommentManager {
           placeholder="Leave a comment... (Cmd/Ctrl+Enter to save)"
           data-line="${lineNumber}"
           data-line-end="${endLineNumber || lineNumber}"
-          data-file="${fileName}"
+          data-file="${window.escapeHtmlAttribute(fileName)}"
           data-diff-position="${diffPosition || ''}"
           data-side="${side}"
         ></textarea>
         <div class="comment-form-actions">
-          <button class="btn btn-sm btn-primary save-comment-btn" disabled>Save</button>
+          <button class="btn btn-sm btn-primary save-comment-btn" disabled>Done</button>
           <button class="ai-action ai-action-chat btn-chat-from-comment" title="Chat about these lines">
             <svg viewBox="0 0 16 16" fill="currentColor" width="16" height="16"><path d="M1.75 1h8.5c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0 1 10.25 10H7.061l-2.574 2.573A1.458 1.458 0 0 1 2 11.543V10h-.25A1.75 1.75 0 0 1 0 8.25v-5.5C0 1.784.784 1 1.75 1ZM1.5 2.75v5.5c0 .138.112.25.25.25h1a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h3.5a.25.25 0 0 0 .25-.25v-5.5a.25.25 0 0 0-.25-.25h-8.5a.25.25 0 0 0-.25.25Zm13 2a.25.25 0 0 0-.25-.25h-.5a.75.75 0 0 1 0-1.5h.5c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0 1 14.25 12H14v1.543a1.458 1.458 0 0 1-2.487 1.03L9.22 12.28a.749.749 0 0 1 .326-1.275.749.749 0 0 1 .734.215l2.22 2.22v-2.19a.75.75 0 0 1 .75-.75h1a.25.25 0 0 0 .25-.25Z"/></svg>
             Chat
           </button>
-          <button class="btn btn-sm btn-secondary cancel-comment-btn">Cancel</button>
+          <button class="btn btn-sm btn-secondary cancel-comment-btn">Close</button>
         </div>
       </div>
     `;
@@ -179,6 +179,10 @@ class CommentManager {
 
     // Focus on textarea
     const textarea = td.querySelector('.comment-textarea');
+    window.reviewDrafts?.bind(textarea, { anchor: {
+      file: fileName, line_start: lineNumber, line_end: endLineNumber || lineNumber,
+      diff_position: diffPosition ?? null, side
+    } });
     textarea.focus();
 
     // Attach emoji picker for autocomplete
@@ -209,7 +213,7 @@ class CommentManager {
     if (chatFromCommentBtn) {
       chatFromCommentBtn.addEventListener('click', () => {
         if (!window.chatPanel) return;
-        const unsavedText = textarea.value.trim();
+        const unsavedText = textarea.value;
         const file = textarea.dataset.file;
         const lineStart = textarea.dataset.line ? parseInt(textarea.dataset.line) : null;
         const lineEnd = textarea.dataset.lineEnd ? parseInt(textarea.dataset.lineEnd) : lineStart;
@@ -253,6 +257,7 @@ class CommentManager {
    */
   hideCommentForm() {
     if (this.currentCommentForm) {
+      window.reviewDrafts?.close(this.currentCommentForm.querySelector('textarea'));
       this.currentCommentForm.remove();
       this.currentCommentForm = null;
     }
@@ -413,6 +418,7 @@ class CommentManager {
     const newCursorPos = start + prefix.length + backticks.length + 'suggestion\n'.length;
     textarea.setSelectionRange(newCursorPos, newCursorPos + code.length);
     textarea.focus();
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
 
     // Trigger auto-resize
     this.autoResizeTextarea(textarea);
@@ -429,104 +435,23 @@ class CommentManager {
    * @param {HTMLElement} formRow - The form row element
    */
   async saveUserComment(textarea, formRow) {
-    const fileName = textarea.dataset.file;
-    const lineNumber = parseInt(textarea.dataset.line);
-    // Validate endLineNumber, fallback to lineNumber if invalid
-    const parsedEndLine = parseInt(textarea.dataset.lineEnd);
-    const endLineNumber = !isNaN(parsedEndLine) ? parsedEndLine : lineNumber;
-    const diffPosition = textarea.dataset.diffPosition ? parseInt(textarea.dataset.diffPosition) : null;
-    // Get the side for GitHub API (LEFT for deleted lines, RIGHT for added/context)
-    const side = textarea.dataset.side || 'RIGHT';
-    const content = textarea.value.trim();
-
-    // Guard clause - button should be disabled when empty, but check anyway
-    if (!content) {
-      return;
-    }
-
-    // Prevent duplicate saves from rapid clicks or Cmd+Enter
+    if (!textarea.value.trim()) return;
     const saveBtn = formRow?.querySelector('.save-comment-btn');
-    if (saveBtn?.dataset.saving === 'true') {
-      return;
-    }
-    if (saveBtn) saveBtn.dataset.saving = 'true';
-    if (saveBtn) saveBtn.disabled = true;
-
+    if (saveBtn?.dataset.saving === 'true') return;
+    if (saveBtn) { saveBtn.dataset.saving = 'true'; saveBtn.disabled = true; }
     try {
-      const reviewId = this.prManager?.currentPR?.id;
-      const headSha = this.prManager?.currentPR?.head_sha;
-
-      const response = await fetch(`/api/reviews/${reviewId}/comments`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          file: fileName,
-          line_start: lineNumber,
-          line_end: endLineNumber,
-          diff_position: diffPosition,
-          side: side,
-          commit_sha: headSha,  // Anchor comment to PR head commit
-          body: content
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to save comment');
-      }
-
-      const result = await response.json();
-
-      // Build comment object
-      const commentData = {
-        id: result.commentId,
-        file: fileName,
-        line_start: lineNumber,
-        line_end: endLineNumber,
-        diff_position: diffPosition,  // Include for expanded context warning logic
-        side: side,  // Include side for suggestion code extraction
-        body: content,
-        created_at: new Date().toISOString()
-      };
-
-      // Create comment display row
-      this.displayUserComment(commentData, formRow.previousElementSibling);
-
-      // Notify AI Panel about the new comment
-      if (window.aiPanel?.addComment) {
-        window.aiPanel.addComment(commentData);
-      }
-
-      // Hide form and clear selection
+      const comment = await window.reviewDrafts.saveTextarea(textarea);
       this.hideCommentForm();
-      if (this.prManager?.lineTracker) {
-        this.prManager.lineTracker.clearRangeSelection();
-      }
-
-      // Update comment count
-      if (this.prManager?.updateCommentCount) {
-        this.prManager.updateCommentCount();
-      }
-
-      // Refresh minimize-mode indicators so the new comment is reflected
-      if (window.prManager?.commentMinimizer) {
-        window.prManager.commentMinimizer.refreshIndicators();
-        // Auto-expand so the new comment stays visible in minimize mode
-        const newRow = document.querySelector(`.user-comment-row[data-comment-id="${commentData.id}"]`);
-        if (newRow) {
-          window.prManager.commentMinimizer.expandForElement(newRow);
-        }
-      }
-
-      window.chatPanel?.queueUserActionHint(`[User Action: created comment ${result.commentId}]`);
-
+      this.prManager?.lineTracker?.clearRangeSelection();
+      await this.prManager.loadUserComments();
+      const row = document.querySelector(`[data-comment-id="${comment.id}"]`);
+      if (row) this.prManager.commentMinimizer?.expandForElement(row);
+      window.chatPanel?.queueUserActionHint(`[User Action: created comment ${comment.id}]`);
     } catch (error) {
       console.error('Error saving comment:', error);
-      alert('Failed to save comment');
-      // Re-enable save button on failure so the user can retry
-      if (saveBtn) {
-        saveBtn.dataset.saving = 'false';
-        saveBtn.disabled = false;
-      }
+      window.reviewDrafts?.showRecovery();
+    } finally {
+      if (saveBtn?.isConnected) { saveBtn.dataset.saving = 'false'; saveBtn.disabled = false; }
     }
   }
 
@@ -773,7 +698,7 @@ class CommentManager {
     const rowDataset = { commentId: comment.id, file: comment.file, lineStart: comment.line_start, lineEnd: comment.line_end || comment.line_start };
     if (comment.side) rowDataset.side = comment.side;
 
-    const { saveBtn, cancelBtn } = this._buildEditFormRow(targetRow, {
+    const { textarea, saveBtn, cancelBtn } = this._buildEditFormRow(targetRow, {
       rowClassName: 'user-comment-row',
       rowDataset,
       iconHtml: comment.parent_id ? CommentManager.AI_ICON_SVG : CommentManager.PERSON_ICON_SVG,
@@ -793,6 +718,8 @@ class CommentManager {
       },
       saveLabel: 'Save'
     });
+    window.reviewDrafts?.bind(textarea, { comment, mode: 'edit' });
+    cancelBtn.textContent = 'Close';
 
     saveBtn.addEventListener('click', () => this.prManager?.saveEditedUserComment(comment.id));
     cancelBtn.addEventListener('click', () => this.prManager?.cancelEditUserComment(comment.id));
@@ -800,7 +727,7 @@ class CommentManager {
 
   /**
    * Display an edit form for an AI suggestion that has NOT yet been adopted.
-   * Nothing is saved until the user clicks Save/Adopt.
+   * Edits persist as excluded drafts until the user explicitly includes them.
    * @param {Object} suggestion - { id, body, type, title, file, lineNumber, diffPosition, side }
    * @param {HTMLElement} targetRow - The suggestion row to insert the form after
    * @param {Function} onSave - Called with (editedText) when user clicks Save
@@ -809,9 +736,9 @@ class CommentManager {
   displaySuggestionEditForm(suggestion, targetRow, onSave, onCancel) {
     // Remove any existing pending edit form (prevents stale multi-form state)
     const existing = document.querySelector('.suggestion-edit-pending');
-    if (existing) existing.remove();
+    if (existing) { window.reviewDrafts?.close(existing.querySelector('textarea')); existing.remove(); }
 
-    const { formRow, saveBtn, cancelBtn } = this._buildEditFormRow(targetRow, {
+    const { formRow, textarea, saveBtn, cancelBtn } = this._buildEditFormRow(targetRow, {
       rowClassName: 'user-comment-row suggestion-edit-pending',
       rowDataset: { suggestionId: suggestion.id },
       iconHtml: CommentManager.AI_ICON_SVG,
@@ -831,22 +758,32 @@ class CommentManager {
       },
       saveLabel: 'Save'
     });
+    window.reviewDrafts?.bind(textarea, {
+      anchor: { file: suggestion.file, line_start: suggestion.lineNumber, line_end: suggestion.lineEnd || suggestion.lineNumber, side: suggestion.side || 'RIGHT', diff_position: suggestion.diffPosition ?? null },
+      parentId: suggestion.id, included: false
+    });
+    saveBtn.textContent = 'Include edited draft';
+    cancelBtn.textContent = 'Close';
 
     saveBtn.addEventListener('click', async () => {
       const textarea = formRow.querySelector('.comment-edit-textarea');
-      const text = textarea?.value.trim();
-      if (text) {
+      const text = textarea?.value;
+      if (text?.trim()) {
         saveBtn.disabled = true;
         try {
-          await onSave(text);
+          const draft = await window.reviewDrafts.saveTextarea(textarea);
+          await onSave(draft.body, draft);
+          window.reviewDrafts.close(textarea);
           formRow.remove();
         } catch (err) {
+          window.reviewDrafts?.showRecovery();
           saveBtn.disabled = false;
         }
       }
     });
 
     cancelBtn.addEventListener('click', () => {
+      window.reviewDrafts?.close(textarea);
       formRow.remove();
       onCancel();
     });

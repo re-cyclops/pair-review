@@ -270,26 +270,17 @@ async function startTestServer(port) {
   const { GitWorktreeManager } = require('../../src/git/worktree');
   const configModule = require('../../src/config');
 
-  // Mock GitHub client
-  GitHubClient.prototype.fetchPullRequest = async () => mockGitHubResponses.fetchPullRequest;
+  const originalBuildOctokit = GitHubClient.prototype._buildOctokit;
+  // Keep native host adapters and the durable publisher; mock only HTTP effects.
+  const { createSubmissionHost } = require('../utils/submission-host');
+  const reviewHost = await createSubmissionHost({
+    repository: 'test-owner/test-repo', head: mockGitHubResponses.fetchPullRequest.head_sha,
+    base: mockGitHubResponses.fetchPullRequest.base_sha, author: mockGitHubResponses.fetchPullRequest.author,
+    pr: mockGitHubResponses.fetchPullRequest, diff: mockWorktreeResponses.generateUnifiedDiff
+  });
+  const hostTransport = new GitHubClient({ apiHost: reviewHost.baseUrl, token: 'synthetic-e2e-only' }).octokit;
+  GitHubClient.prototype._buildOctokit = () => hostTransport;
   GitHubClient.prototype.repositoryExists = async () => true;
-  GitHubClient.prototype.getPendingReviewForUser = async () => null;
-  GitHubClient.prototype.getReviewById = async () => null;
-  GitHubClient.prototype.createReviewGraphQL = async () => ({
-    id: 'PRR_test12345',
-    databaseId: 12345,
-    html_url: 'https://github.com/test-owner/test-repo/pull/1#review-12345',
-    state: 'APPROVED',
-    comments_count: 0,
-    submitted_at: new Date().toISOString()
-  });
-  GitHubClient.prototype.createDraftReviewGraphQL = async () => ({
-    id: 'PRR_test12346',
-    databaseId: 12346,
-    html_url: 'https://github.com/test-owner/test-repo/pull/1#review-12346',
-    state: 'PENDING',
-    comments_count: 0
-  });
 
   // Mock worktree manager
   GitWorktreeManager.prototype.getWorktreePath = async () => mockWorktreeResponses.getWorktreePath;
@@ -364,6 +355,11 @@ async function startTestServer(port) {
   let analysisRunning = false;
   let analysisId = null;
   let analysisHasRun = false;
+  const { activeAnalyses, reviewToAnalysisId, broadcastProgress } = require('../../src/routes/shared');
+  const { broadcastReviewEvent } = require('../../src/events/review-events');
+  const ownedAnalyses = new Map();
+  const analysisTimers = new Set();
+  const analysis = { hold: false, complete: null };
 
   // Mock AI analysis endpoint - responds with mock suggestions
   app.post('/api/pr/:owner/:repo/:number/analyses', (req, res) => {
@@ -384,7 +380,7 @@ async function startTestServer(port) {
       .get(prNumber, repository);
 
     if (review && prMetadata) {
-      const aiRunId = `test-run-${Date.now()}`;
+      const aiRunId = analysisId;
       const now = new Date().toISOString();
 
       // Extract custom instructions from request body
@@ -409,11 +405,11 @@ async function startTestServer(port) {
         'Repository default instructions for testing',
         requestInstructions || 'Test custom instructions',
         'def456head',
-        'completed',
+        'running',
         mockAISuggestions.length,
         2,
         now,
-        now
+        null
       );
 
       // Insert mock AI suggestions into the database using review.id
@@ -442,6 +438,25 @@ async function startTestServer(port) {
         );
       }
     }
+    const runId = analysisId;
+    const running = { status: 'running', reviewId: review?.id, reviewType: 'pr', repository, prNumber,
+      progress: 'Analyzing', levels: { 1: { status: 'running' }, 2: { status: 'running' }, 3: { status: 'running' } } };
+    activeAnalyses.set(runId, running);
+    if (review) reviewToAnalysisId.set(review.id, runId);
+    ownedAnalyses.set(runId, review?.id);
+    broadcastProgress(runId, running);
+    const complete = () => {
+      if (activeAnalyses.get(runId)?.status !== 'running') return;
+      if (analysisId === runId) analysisRunning = false;
+      db.prepare('UPDATE analysis_runs SET status = ?, completed_at = ? WHERE id = ?')
+        .run('completed', new Date().toISOString(), runId);
+      const completed = { ...running, status: 'completed', progress: 'Analysis complete',
+        levels: { 1: { status: 'completed' }, 2: { status: 'completed' }, 3: { status: 'completed' } } };
+      activeAnalyses.set(runId, completed);
+      broadcastProgress(runId, completed);
+      if (review) broadcastReviewEvent(review.id, { type: 'review:analysis_completed' });
+    };
+    analysis.complete = complete;
 
     // Return immediately (analysis "started")
     res.json({
@@ -450,10 +465,11 @@ async function startTestServer(port) {
       message: 'AI analysis started in background'
     });
 
-    // Simulate analysis completion after configured duration
-    setTimeout(() => {
-      analysisRunning = false;
-    }, MOCK_ANALYSIS_DURATION_MS);
+    // Execution is synthetic; status lookup and progress use the real transport.
+    if (!analysis.hold) {
+      const timer = setTimeout(() => { analysisTimers.delete(timer); complete(); }, MOCK_ANALYSIS_DURATION_MS);
+      analysisTimers.add(timer);
+    }
   });
 
   // Test-only endpoint: seed a dismissed AI suggestion carrying a status_reason.
@@ -507,51 +523,6 @@ async function startTestServer(port) {
     res.json({ id: Number(info.lastInsertRowid), reviewId: review.id });
   });
 
-  // Mock SSE endpoint for analysis progress
-  app.get('/api/analyses/:id/progress', (req, res) => {
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive'
-    });
-
-    // Send initial connection
-    res.write('data: {"type":"connected"}\n\n');
-
-    // Send running status after short delay
-    setTimeout(() => {
-      res.write(`data: ${JSON.stringify({
-        type: 'progress',
-        status: 'running',
-        levels: {
-          1: { status: 'running', progress: 'Analyzing...' },
-          2: { status: 'running', progress: 'Analyzing...' },
-          3: { status: 'running', progress: 'Analyzing...' },
-          4: { status: 'pending', progress: 'Pending' }
-        },
-        progress: 'Running analysis...'
-      })}\n\n`);
-    }, 100);
-
-    // Send completion after configured duration
-    setTimeout(() => {
-      res.write(`data: ${JSON.stringify({
-        type: 'progress',
-        status: 'completed',
-        levels: {
-          1: { status: 'completed', progress: 'Complete' },
-          2: { status: 'completed', progress: 'Complete' },
-          3: { status: 'completed', progress: 'Complete' },
-          4: { status: 'completed', progress: 'Complete' }
-        },
-        progress: 'Analysis complete',
-        completedLevel: 3,
-        suggestionsCount: mockAISuggestions.length
-      })}\n\n`);
-      res.end();
-    }, MOCK_ANALYSIS_DURATION_MS);
-  });
-
   // Mock analysis status check endpoint
   app.get('/api/reviews/:reviewId/analyses/status', (req, res) => {
     if (analysisRunning && analysisId) {
@@ -586,32 +557,6 @@ async function startTestServer(port) {
     }
   });
 
-  // Mock suggestions endpoint (unified)
-  app.get('/api/reviews/:reviewId/suggestions', (req, res) => {
-    const { reviewId } = req.params;
-    try {
-      const rows = db.prepare(`
-        SELECT id, source, author, ai_run_id, ai_level, ai_confidence,
-               file, line_start, line_end, side, type, title, body,
-               reasoning, status, status_reason, is_file_level, created_at, updated_at
-        FROM comments
-        WHERE review_id = ? AND source = 'ai'
-          AND (ai_level IS NULL)
-          AND status IN ('active', 'dismissed', 'adopted', 'draft', 'submitted')
-          AND (is_raw = 0 OR is_raw IS NULL)
-        ORDER BY is_file_level DESC, file, line_start
-      `).all(parseInt(reviewId));
-
-      const suggestions = rows.map(row => ({
-        ...row,
-        reasoning: row.reasoning ? JSON.parse(row.reasoning) : null
-      }));
-
-      res.json({ suggestions });
-    } catch (e) {
-      res.json({ suggestions: [] });
-    }
-  });
 
   // Mock suggestion status update endpoint (unified)
   app.post('/api/reviews/:reviewId/suggestions/:id/status', (req, res) => {
@@ -634,24 +579,6 @@ async function startTestServer(port) {
       res.json({ success: true, status });
     } catch (e) {
       res.status(500).json({ error: 'Failed to update status' });
-    }
-  });
-
-  // E2E-only cleanup hook: delete AI-seeded suggestion + analysis-run rows for
-  // a review. The mock analyses POST above inserts AI rows straight into the
-  // `comments` table (source='ai') plus an `analysis_runs` row; production has
-  // no route that deletes those (the user-comment DELETE routes are scoped to
-  // source='user'). A describe block that seeds AI suggestions uses this so it
-  // can tear down symmetrically and not leak AI rows into later tests that
-  // revisit the same review on the shared per-worker DB.
-  app.delete('/api/reviews/:reviewId/ai-suggestions', (req, res) => {
-    const reviewId = parseInt(req.params.reviewId, 10);
-    try {
-      const info = db.prepare("DELETE FROM comments WHERE review_id = ? AND source = 'ai'").run(reviewId);
-      db.prepare('DELETE FROM analysis_runs WHERE review_id = ?').run(reviewId);
-      res.json({ success: true, deleted: info.changes });
-    } catch (e) {
-      res.status(500).json({ error: e.message });
     }
   });
 
@@ -929,13 +856,31 @@ async function startTestServer(port) {
 
   // Start server on the given port
   const server = await new Promise((resolve, reject) => {
-    const srv = app.listen(port, () => resolve(srv));
+    const srv = app.listen(port, '127.0.0.1', () => resolve(srv));
     srv.on('error', (err) => reject(err));
   });
+  const ws = require('../../src/ws');
+  ws.attachWebSocket(server, db);
 
   console.log(`E2E test server (worker) running on http://localhost:${port}`);
 
-  return { server, db, app, port };
+  return { server, db, app, port, reviewHost, analysis, async close() {
+    for (const timer of analysisTimers) clearTimeout(timer);
+    for (const [runId, reviewId] of ownedAnalyses) {
+      if (activeAnalyses.get(runId)?.status === 'running') {
+        broadcastProgress(runId, { ...activeAnalyses.get(runId), status: 'cancelled' });
+      }
+      activeAnalyses.delete(runId);
+      if (reviewToAnalysisId.get(reviewId) === runId) reviewToAnalysisId.delete(reviewId);
+    }
+    ws.closeAll();
+    const stopped = new Promise(resolve => server.close(resolve));
+    server.closeAllConnections();
+    await stopped;
+    await reviewHost.close();
+    db.close();
+    GitHubClient.prototype._buildOctokit = originalBuildOctokit;
+  } };
 }
 
 module.exports = { startTestServer };

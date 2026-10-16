@@ -60,6 +60,7 @@ async function runHeadlessCouncilAnalysis(db, params) {
     changedFiles,
     instructions,
     githubClient,
+    protocol = null,
   } = params;
 
   const runId = uuidv4();
@@ -87,7 +88,8 @@ async function runHeadlessCouncilAnalysis(db, params) {
     requestInstructions: instructions.requestInstructions || null,
     headSha: prMetadata?.head_sha || null,
     configType,
-    levelsConfig
+    levelsConfig,
+    protocol
   });
 
   new CouncilRepository(db).touchLastUsedAt(council.id).catch(err => {

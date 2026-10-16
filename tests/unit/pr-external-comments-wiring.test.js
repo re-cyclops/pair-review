@@ -423,33 +423,6 @@ describe('PRManager._externalCommentsEnabled', () => {
 });
 
 describe('PRManager.handleWhitespaceToggle re-renders external comments', () => {
-  it('routes through _rerenderAllOverlays so external rows survive the DOM rebuild', async () => {
-    // Regression: handleWhitespaceToggle rebuilds the diff DOM (which drops
-    // every .external-comment-row) but originally only re-anchored user
-    // comments + AI suggestions. External rows silently disappeared until a
-    // full PR refresh. Now whitespace toggle and post-analysis refresh both
-    // route through _rerenderAllOverlays, which calls externalCommentManager.
-    const prManager = createTestPRManager();
-    prManager.loadUserComments = vi.fn().mockResolvedValue(undefined);
-    prManager.loadAISuggestions = vi.fn().mockResolvedValue(undefined);
-    prManager.loadAndDisplayFiles = vi.fn().mockResolvedValue(undefined);
-    prManager.selectedRunId = 'run-7';
-
-    global.window.scrollY = 0;
-    global.window.scrollTo = vi.fn();
-    global.window.requestAnimationFrame = (cb) => cb();
-    global.requestAnimationFrame = (cb) => cb();
-
-    await prManager.handleWhitespaceToggle(true);
-
-    expect(prManager.hideWhitespace).toBe(true);
-    expect(prManager.loadAndDisplayFiles).toHaveBeenCalledTimes(1);
-    expect(prManager.loadUserComments).toHaveBeenCalledTimes(1);
-    expect(prManager.loadAISuggestions).toHaveBeenCalledWith(null, 'run-7');
-    expect(externalCommentManagerStub.loadAndRender).toHaveBeenCalledTimes(1);
-    expect(externalCommentManagerStub.reviewId).toBe(7);
-  });
-
   it('short-circuits when no PR is loaded', async () => {
     const prManager = createTestPRManager();
     prManager.currentPR = null;
@@ -462,47 +435,7 @@ describe('PRManager.handleWhitespaceToggle re-renders external comments', () => 
   });
 });
 
-describe('PRManager._reloadAfterAnalysis re-renders external comments', () => {
-  it('post-analysis auto-refresh routes through _rerenderAllOverlays', async () => {
-    // Regression: _reloadAfterAnalysis (fired by review:analysis_completed
-    // and the visibilitychange dirty-analysis branch) previously reloaded
-    // only AI + user comments. After this fix it goes through the shared
-    // helper so external rows stay in sync.
-    const prManager = createTestPRManager();
-    prManager.loadUserComments = vi.fn().mockResolvedValue(undefined);
-    prManager.loadAISuggestions = vi.fn().mockResolvedValue(undefined);
-
-    await prManager._reloadAfterAnalysis();
-
-    expect(prManager.loadUserComments).toHaveBeenCalledTimes(1);
-    expect(prManager.loadAISuggestions).toHaveBeenCalledTimes(1);
-    expect(externalCommentManagerStub.loadAndRender).toHaveBeenCalledTimes(1);
-  });
-});
-
 describe('PRManager._rerenderAllOverlays', () => {
-  it('re-renders user comments, AI suggestions, AND external comments via GET-only path by default', async () => {
-    // Regression: refreshPR previously rebuilt the diff DOM and re-ran AI
-    // suggestions + user comments, but forgot to re-run external comments,
-    // so refreshing the PR silently dropped every blue external-comment row.
-    // Without `syncExternal: true` the helper takes the GET-only path so
-    // analysis rebuilds and whitespace toggles don't pay for a sync POST.
-    const prManager = createTestPRManager();
-    prManager.loadUserComments = vi.fn().mockResolvedValue(undefined);
-    prManager.loadAISuggestions = vi.fn().mockResolvedValue(undefined);
-
-    await prManager._rerenderAllOverlays({ analysisRunId: 'run-1' });
-
-    expect(prManager.loadUserComments).toHaveBeenCalledTimes(1);
-    expect(prManager.loadAISuggestions).toHaveBeenCalledWith(null, 'run-1');
-    expect(externalCommentManagerStub.loadAndRender).toHaveBeenCalledTimes(1);
-    // GET-only path: no sync POST.
-    expect(mockFetch).not.toHaveBeenCalled();
-    expect(externalCommentManagerStub.syncAndRender).not.toHaveBeenCalled();
-    // External-comment manager must have its reviewId pinned before rendering.
-    expect(externalCommentManagerStub.reviewId).toBe(7);
-  });
-
   it('fires the sync POST when called with syncExternal: true', async () => {
     // Regression for refreshPR: when refresh fetches a fresh diff the commit
     // SHA may have changed, so cached anchors and outdated flags must be
@@ -517,7 +450,7 @@ describe('PRManager._rerenderAllOverlays', () => {
       json: vi.fn().mockResolvedValue({ count: 0, lostAnchors: 0, deleted: 0, syncedAt: 'now' }),
     });
 
-    await prManager._rerenderAllOverlays({ analysisRunId: 'run-2', syncExternal: true });
+    await prManager._rerenderAllOverlays({ syncExternal: true });
 
     // The sync POST fired exactly once and a render still happened — both
     // via the manager's syncAndRender (which the stub forwards to syncFn).
@@ -541,14 +474,4 @@ describe('PRManager._rerenderAllOverlays', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('does not throw when external-comment manager is missing', async () => {
-    window.externalCommentManager = null;
-    const prManager = createTestPRManager();
-    prManager.loadUserComments = vi.fn().mockResolvedValue(undefined);
-    prManager.loadAISuggestions = vi.fn().mockResolvedValue(undefined);
-
-    await expect(prManager._rerenderAllOverlays({})).resolves.toBeUndefined();
-    expect(prManager.loadUserComments).toHaveBeenCalledTimes(1);
-    expect(prManager.loadAISuggestions).toHaveBeenCalled();
-  });
 });

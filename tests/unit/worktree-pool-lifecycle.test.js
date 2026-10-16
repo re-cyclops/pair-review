@@ -18,6 +18,7 @@ function createMockDeps() {
     refreshWorktree: vi.fn().mockResolvedValue('/tmp/worktree/pair-review--abc'),
     executeCheckoutScript: vi.fn().mockResolvedValue(undefined),
     cleanupWorktree: vi.fn().mockResolvedValue(undefined),
+    removeWorktree: vi.fn().mockResolvedValue(undefined),
     ensureBaseShaAvailable: vi.fn().mockResolvedValue(undefined),
     resolveRemoteForPR: vi.fn().mockResolvedValue('origin'),
     getPRHeadSha: vi.fn((data) => data?.head?.sha || data?.head_sha || ''),
@@ -114,12 +115,6 @@ describe('WorktreePoolLifecycle', () => {
     lifecycle = new WorktreePoolLifecycle({}, {}, deps);
   });
 
-  // ── poolRepo getter ─────────────────────────────────────────────────────
-  describe('poolRepo getter', () => {
-    it('returns the pool repository instance', () => {
-      expect(lifecycle.poolRepo).toBe(deps.poolRepo);
-    });
-  });
 
   // ── acquireForPR (ported from WorktreePoolManager) ──────────────────────
   describe('acquireForPR', () => {
@@ -1019,7 +1014,7 @@ describe('WorktreePoolLifecycle', () => {
       deps.poolRepo.getPoolEntry.mockResolvedValue({ id: 'wt-1', status: 'creating' });
 
       await expect(lifecycle.destroyPoolWorktree('wt-1'))
-        .rejects.toThrow('Cannot delete worktree wt-1: currently creating');
+        .rejects.toMatchObject({ statusCode: 409 });
 
       // Should not proceed with any cleanup
       expect(deps._mockUsageTracker.clearWorktree).not.toHaveBeenCalled();
@@ -1031,7 +1026,7 @@ describe('WorktreePoolLifecycle', () => {
       deps.poolRepo.getPoolEntry.mockResolvedValue({ id: 'wt-1', status: 'switching' });
 
       await expect(lifecycle.destroyPoolWorktree('wt-1'))
-        .rejects.toThrow('Cannot delete worktree wt-1: currently switching');
+        .rejects.toMatchObject({ statusCode: 409 });
 
       expect(deps._mockUsageTracker.clearWorktree).not.toHaveBeenCalled();
       expect(deps.poolRepo.delete).not.toHaveBeenCalled();
@@ -1070,37 +1065,5 @@ describe('WorktreePoolLifecycle', () => {
       expect(deps.worktreeRepo.delete).toHaveBeenCalledWith('wt-1');
     });
 
-    it('cancels active analyses before destroying', async () => {
-      deps.poolRepo.getPoolEntry.mockResolvedValue({ id: 'wt-1', status: 'in_use' });
-      deps._mockUsageTracker.getActiveAnalyses.mockReturnValue(new Set(['run-1', 'run-2']));
-      deps.worktreeRepo.findById.mockResolvedValue({ id: 'wt-1', path: '/tmp/wt-1' });
-
-      const cancelFn = vi.fn();
-      await lifecycle.destroyPoolWorktree('wt-1', { cancelAnalyses: cancelFn });
-
-      expect(cancelFn).toHaveBeenCalledWith('wt-1', new Set(['run-1', 'run-2']));
-      expect(deps.poolRepo.delete).toHaveBeenCalledWith('wt-1');
-    });
-
-    it('cleans up worktree from disk when record exists', async () => {
-      deps.poolRepo.getPoolEntry.mockResolvedValue({ id: 'wt-1', status: 'available' });
-      deps.worktreeRepo.findById.mockResolvedValue({ id: 'wt-1', path: '/tmp/wt-1' });
-
-      await lifecycle.destroyPoolWorktree('wt-1');
-
-      expect(deps._mockWorktreeManagerInstance.cleanupWorktree).toHaveBeenCalledWith('/tmp/wt-1');
-    });
-
-    it('does not fail when disk cleanup throws (best-effort)', async () => {
-      deps.poolRepo.getPoolEntry.mockResolvedValue({ id: 'wt-1', status: 'available' });
-      deps.worktreeRepo.findById.mockResolvedValue({ id: 'wt-1', path: '/tmp/wt-1' });
-      deps._mockWorktreeManagerInstance.cleanupWorktree.mockRejectedValue(new Error('disk error'));
-
-      // Should not throw
-      await lifecycle.destroyPoolWorktree('wt-1');
-
-      expect(deps.poolRepo.delete).toHaveBeenCalledWith('wt-1');
-      expect(deps.worktreeRepo.delete).toHaveBeenCalledWith('wt-1');
-    });
   });
 });

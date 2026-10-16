@@ -16,6 +16,7 @@ const { reviewScope } = require('../local-scope');
 const { normalizeRepository } = require('../utils/paths');
 const logger = require('../utils/logger');
 const { broadcastReviewEvent } = require('../events/review-events');
+const { captureRunProtocol } = require('../utils/review-protocol');
 const {
   activeAnalyses,
   reviewToAnalysisId,
@@ -29,6 +30,7 @@ const { safeParseJson } = require('../utils/safe-parse-json');
 const { resolveLoadSkills, resolveHostBinding } = require('../config');
 const { GitHubClient } = require('../github/client');
 const { resolveSingleProviderModel } = require('../review-config');
+const activity = require('../analysis-activity');
 
 // All valid tier values: canonical tiers + aliases (for Zod enum validation)
 const ALL_TIER_VALUES = /** @type {[string, ...string[]]} */ ([...TIERS, ...Object.keys(TIER_ALIASES)]);
@@ -197,6 +199,8 @@ function createMCPServer(db, options = {}) {
               url: `http://localhost:${options.port}`,
               port: options.port,
               version: packageJson.version,
+              ...activity.identity(db),
+              activityScope: 'connected-instance',
             }, null, 2)
           }]
         };
@@ -457,7 +461,7 @@ function createMCPServer(db, options = {}) {
         feedback: z.boolean().optional().describe('Exclude existing pair-review suggestions and comments')
       }).optional().describe('Exclude previously identified issues from results'),
     },
-    async (args) => {
+    async (args) => activity.context.run({ entryPoint: 'mcp' }, async () => {
       // Track analysisId and reviewId for cleanup in catch block (must be outside try scope)
       let analysisId = null;
       let trackingReviewId = null;
@@ -665,15 +669,17 @@ function createMCPServer(db, options = {}) {
             provider,
             model,
             tier,
+            globalInstructions: config.globalInstructions || null,
             repoInstructions,
             requestInstructions,
-            headSha: localHeadSha
+            headSha: localHeadSha,
+            protocol: captureRunProtocol(config, { provider, model, tier, ...providerOverrides })
           });
 
           // Launch analysis asynchronously (skipRunCreation since we created the record above).
           // Local mode has no associated GitHub PR, so githubClient is intentionally
           // omitted — the analyzer drops the GitHub dedup section when no client is supplied.
-          analyzer.analyzeLevel1(reviewId, localPath, localMetadata, progressCallback, { repoInstructions, requestInstructions }, changedFiles, { analysisId, runId, skipRunCreation: true, tier, skipLevel3: args.skipLevel3, excludePrevious: args.excludePrevious, serverPort: (options.port || config.port || 7247) })
+          analyzer.analyzeLevel1(reviewId, localPath, localMetadata, progressCallback, { globalInstructions: config.globalInstructions || null, repoInstructions, requestInstructions }, changedFiles, { analysisId, runId, skipRunCreation: true, tier, skipLevel3: args.skipLevel3, excludePrevious: args.excludePrevious, serverPort: (options.port || config.port || 7247) })
             .then(result => handleAnalysisCompletion(analysisId, runId, result, async (r) => {
               if (r.summary) {
                 try { await reviewRepo.updateSummary(reviewId, r.summary); } catch (_) { /* ignore */ }
@@ -821,13 +827,15 @@ function createMCPServer(db, options = {}) {
             provider,
             model,
             tier,
+            globalInstructions: config.globalInstructions || null,
             repoInstructions,
             requestInstructions,
-            headSha: prMetadata.head_sha || null
+            headSha: prMetadata.head_sha || null,
+            protocol: captureRunProtocol(config, { provider, model, tier })
           });
 
           // Launch analysis asynchronously (skipRunCreation since we created the record above)
-          analyzer.analyzeLevel1(review.id, worktreePath, prMetadata, progressCallback, { repoInstructions, requestInstructions }, null, { analysisId, runId, skipRunCreation: true, tier, skipLevel3: args.skipLevel3, excludePrevious: args.excludePrevious, serverPort: (options.port || config.port || 7247), githubClient: prAnalysisGithubClient })
+          analyzer.analyzeLevel1(review.id, worktreePath, prMetadata, progressCallback, { globalInstructions: config.globalInstructions || null, repoInstructions, requestInstructions }, null, { analysisId, runId, skipRunCreation: true, tier, skipLevel3: args.skipLevel3, excludePrevious: args.excludePrevious, serverPort: (options.port || config.port || 7247), githubClient: prAnalysisGithubClient })
             .then(result => handleAnalysisCompletion(analysisId, runId, result, async (r) => {
               try { await prMetadataRepo.updateLastAiRunId(prMetadata.id, r.runId); } catch (_) { /* ignore */ }
               if (r.summary) {
@@ -887,7 +895,7 @@ function createMCPServer(db, options = {}) {
           }]
         };
       }
-    }
+    })
   );
 
   return server;

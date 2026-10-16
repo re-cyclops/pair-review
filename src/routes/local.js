@@ -9,7 +9,7 @@
  * - Get AI suggestions
  * - User comment CRUD operations
  *
- * Note: No submit-review endpoint - GitHub submission is disabled in local mode.
+ * Associated local reviews publish through the shared, revision-bound review endpoint.
  */
 
 const express = require('express');
@@ -18,12 +18,14 @@ const path = require('path');
 const fs = require('fs').promises;
 const { query, queryOne, run, ReviewRepository, RepoSettingsRepository, AnalysisRunRepository, CouncilRepository } = require('../database');
 const Analyzer = require('../ai/analyzer');
+const { captureRunProtocol } = require('../utils/review-protocol');
 const { v4: uuidv4 } = require('uuid');
 const logger = require('../utils/logger');
 const { broadcastReviewEvent } = require('../events/review-events');
 const { fireHooks, hasHooks } = require('../hooks/hook-runner');
 const { buildReviewStartedPayload, buildReviewLoadedPayload, buildAnalysisStartedPayload, buildAnalysisCompletedPayload, getCachedUser } = require('../hooks/payloads');
 const { mergeInstructions } = require('../utils/instructions');
+const { diffContext } = require('../review-progress');
 const { getGitHubToken, resolveLoadSkills, buildCouncilProviderOverrides, getSummaryEnabled, getTourEnabled } = require('../config');
 const { backgroundQueue } = require('../ai/background-queue');
 const localReview = require('../local-review');
@@ -369,8 +371,8 @@ router.delete('/api/local/sessions/:reviewId', async (req, res) => {
 
   } catch (error) {
     logger.error(`Error deleting local session: ${error.message}`);
-    res.status(500).json({
-      error: 'Failed to delete local session'
+    res.status(error.statusCode || 500).json({
+      error: error.statusCode === 409 ? error.message : 'Failed to delete local session'
     });
   }
 });
@@ -992,6 +994,7 @@ router.get('/api/local/:reviewId/diff', async (req, res) => {
     }
     res.json({
       diff: diffContent || '',
+      progress_context: diffContext(review.local_head_sha, canonicalDiff),
       generated_files: generatedFiles,
       hunk_hashes_by_file: hunkHashesByFile,
       stats: {
@@ -1163,7 +1166,7 @@ router.get('/api/local/:reviewId/check-stale', async (req, res) => {
  */
 async function handleExecutableAnalysis(req, res, {
   reviewId, review, localPath, repository, selectedProvider, selectedModel,
-  repoInstructions, requestInstructions, combinedInstructions, runId, analysisId, reviewRepo,
+  repoInstructions, requestInstructions, runId, analysisId, reviewRepo,
   providerOverrides
 }) {
   return runExecutableAnalysis(req, res, {
@@ -1187,7 +1190,7 @@ async function handleExecutableAnalysis(req, res, {
     registerProcessForCancellation
   }, {
     logLabel: `Review #${reviewId}`,
-    buildContext: (r, { selectedModel: model, requestInstructions: customInstructions }) => {
+    buildContext: (r, { selectedModel: model }) => {
       const { start: scopeStart, end: scopeEnd } = reviewScope(r);
       return {
         title: null,
@@ -1199,8 +1202,7 @@ async function handleExecutableAnalysis(req, res, {
         baseBranch: r.local_base_branch || null,
         headBranch: r.local_head_branch || null,
         scopeStart,
-        scopeEnd,
-        customInstructions: customInstructions || null
+        scopeEnd
       };
     },
     buildHookPayload: () => ({
@@ -1486,7 +1488,6 @@ router.post('/api/local/:reviewId/analyses', async (req, res) => {
         selectedModel,
         repoInstructions,
         requestInstructions,
-        combinedInstructions,
         runId,
         analysisId,
         reviewRepo,
@@ -1515,7 +1516,8 @@ router.post('/api/local/:reviewId/analyses', async (req, res) => {
         configType: 'single',
         levelsConfig,
         scopeStart,
-        scopeEnd
+        scopeEnd,
+        protocol: captureRunProtocol(appConfig, { provider: selectedProvider, model: selectedModel, tier, levels: levelsConfig, ...providerOverrides })
       });
     } catch (error) {
       logger.error('Failed to create analysis run record:', error);

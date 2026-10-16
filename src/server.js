@@ -1,21 +1,27 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
 const express = require('express');
 const path = require('path');
-const { loadConfig, getGitHubToken, resolveDbName, warnIfDevModeWithoutDbName, getRepoConfig, isExclusiveAltHost } = require('./config');
+const { createHash } = require('crypto');
+const fsPromises = require('fs').promises;
+const { loadConfig, getConfigDir, getGitHubToken, resolveDbName, warnIfDevModeWithoutDbName, getRepoConfig, isExclusiveAltHost } = require('./config');
 const { initializeDatabase, getDatabaseStatus, queryOne, run, PRMetadataRepository } = require('./database');
 const { normalizeRepository } = require('./utils/paths');
 const { resolveBindingRepositoryForHost } = require('./utils/host-resolution');
 const { GlobalSettingsService } = require('./settings/global-settings-service');
 const { applyConfigOverrides, checkAllProviders } = require('./ai');
+const { replaceProviderModels } = require('./ai/provider');
 const { checkAllChatProviders } = require('./chat/chat-providers');
 const logger = require('./utils/logger');
 const { attachWebSocket, closeAll: closeAllWS } = require('./ws');
 const { WorktreePoolLifecycle } = require('./git/worktree-pool-lifecycle');
 const { resolveDbPath, computeDbId } = require('./utils/db-identity');
+const activity = require('./analysis-activity');
+const { rejectUnsafeRequest } = require('./utils/loopback-security');
 
 let db = null;
 let server = null;
 let chatSessionManager = null;
+let shutdownPromise = null;
 
 /**
  * Assemble the GET /health response body. Kept as a standalone factory so the
@@ -24,7 +30,7 @@ let chatSessionManager = null;
  * (the resolved DB path cannot change without a restart).
  *
  * @param {string} dbId - computeDbId(resolveDbPath(config)) digest
- * @returns {{status: string, service: string, version: string, dbId: string, timestamp: string}}
+ * @returns {{status: string, service: string, version: string, dbId: string, dotfilesReviewModes: 1, timestamp: string}}
  */
 function buildHealthPayload(dbId) {
   return {
@@ -32,6 +38,7 @@ function buildHealthPayload(dbId) {
     service: 'pair-review',
     version: require('../package.json').version,
     dbId,
+    dotfilesReviewModes: 1,
     timestamp: new Date().toISOString()
   };
 }
@@ -143,7 +150,7 @@ function findAvailablePort(app, startPort, maxAttempts = 20) {
     let currentPort = startPort;
     
     function tryPort() {
-      const testServer = app.listen(currentPort, (error) => {
+      const testServer = app.listen(currentPort, '127.0.0.1', (error) => {
         if (error) {
           testServer.close();
           console.log(`Port ${currentPort} is already in use`);
@@ -186,6 +193,104 @@ function findAvailablePort(app, startPort, maxAttempts = 20) {
   });
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(key => `${canonicalJson(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value).replace(/[^\x00-\x7f]/gu, (character) => {
+    const codePoint = character.codePointAt(0);
+    if (codePoint <= 0xffff) {
+      return `\\u${codePoint.toString(16).padStart(4, '0')}`;
+    }
+    const adjusted = codePoint - 0x10000;
+    const high = 0xd800 + (adjusted >> 10);
+    const low = 0xdc00 + (adjusted & 0x3ff);
+    return `\\u${high.toString(16)}\\u${low.toString(16)}`;
+  });
+}
+
+function isUntouchedManagedOmpModel(model) {
+  if (!model || typeof model !== 'object' || Array.isArray(model)
+    || model.dotfilesManaged !== 'omp-sync'
+    || typeof model.dotfilesManagedSha256 !== 'string'
+    || !/^[a-f0-9]{64}$/i.test(model.dotfilesManagedSha256)) {
+    return false;
+  }
+
+  const payload = Object.fromEntries(
+    Object.entries(model).filter(([key]) => key !== 'dotfilesManaged' && key !== 'dotfilesManagedSha256')
+  );
+  const digest = createHash('sha256').update(canonicalJson(payload), 'utf8').digest('hex');
+  return digest === model.dotfilesManagedSha256.toLowerCase();
+}
+
+function mergeManagedOmpModels(currentModels, sourceModels) {
+  const sourceIds = new Set(sourceModels.map(model => model.id));
+  const retainedModels = currentModels.filter((model) => {
+    if (model?.dotfilesManaged !== 'omp-sync') return true;
+    if (sourceIds.has(model.id)) return false;
+    return !isUntouchedManagedOmpModel(model);
+  });
+  const retainedIds = new Set(retainedModels.map(model => model?.id).filter(id => typeof id === 'string'));
+  const sourceModelsToAppend = sourceModels.filter(model => !retainedIds.has(model.id));
+  return [...retainedModels, ...sourceModelsToAppend];
+}
+
+function createOmpModelCatalogRefresher() {
+  let lastSignature = null;
+  let refreshPromise = null;
+
+  return async function refreshOmpModelCatalog(config) {
+    const configPath = path.join(getConfigDir(), 'config.json');
+    let stat = null;
+    try {
+      stat = await fsPromises.stat(configPath);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    const signature = stat ? `${stat.mtimeMs}:${stat.size}:${stat.ino}` : 'missing';
+    if (signature === lastSignature) return;
+    if (refreshPromise) return refreshPromise;
+
+    refreshPromise = (async () => {
+      const sourceConfig = stat ? JSON.parse(await fsPromises.readFile(configPath, 'utf8')) : {};
+      if (!sourceConfig || typeof sourceConfig !== 'object' || Array.isArray(sourceConfig)
+        || (sourceConfig.providers !== undefined
+          && (!sourceConfig.providers || typeof sourceConfig.providers !== 'object' || Array.isArray(sourceConfig.providers)))
+        || (sourceConfig.providers?.omp !== undefined
+          && (!sourceConfig.providers.omp || typeof sourceConfig.providers.omp !== 'object' || Array.isArray(sourceConfig.providers.omp)))) {
+        throw new TypeError('Invalid OMP model catalog config');
+      }
+
+      const sourceModels = sourceConfig.providers?.omp?.models;
+      const currentModels = config.providers?.omp?.models;
+      if ((sourceModels !== undefined && (!Array.isArray(sourceModels)
+          || sourceModels.some(model => !model || typeof model !== 'object' || Array.isArray(model)
+            || typeof model.id !== 'string' || !model.id)))
+        || (currentModels !== undefined && !Array.isArray(currentModels))) {
+        throw new TypeError('Invalid OMP model catalog');
+      }
+
+      const nextModels = mergeManagedOmpModels(currentModels || [], sourceModels || []);
+      replaceProviderModels('omp', nextModels);
+      if (config.providers?.omp || nextModels.length > 0) {
+        config.providers = config.providers || {};
+        config.providers.omp = { ...(config.providers.omp || {}), models: nextModels };
+      }
+      lastSignature = signature;
+    })();
+
+    try {
+      await refreshPromise;
+    } finally {
+      refreshPromise = null;
+    }
+  };
+}
+
 /**
  * Start the Express server
  * @param {sqlite3.Database} [sharedDb] - Optional shared database instance
@@ -201,7 +306,7 @@ async function startServer(sharedDb = null, sharedPoolLifecycle = null, options 
   const cliOverrides = options.cliOverrides || {};
   try {
     // Load configuration
-    const { config, layers } = await loadConfig();
+    const { config, layers, protocolSources } = await loadConfig();
     applyEnvOverrides(config);
 
     // Get GitHub token (env var takes precedence over config)
@@ -262,22 +367,6 @@ async function startServer(sharedDb = null, sharedPoolLifecycle = null, options 
       console.log('Could not check database status:', error.message);
     }
 
-    // Clean up stale analysis runs that have been "running" for over 30 minutes.
-    // We use a time threshold rather than blanket cleanup because multiple server
-    // processes (e.g. Express + MCP) may share the same database, and a naive
-    // UPDATE would kill legitimately running analyses owned by another process.
-    // TODO: A more robust approach would be to record the owning PID in
-    // analysis_runs and only clean up records whose process is no longer alive.
-    // This would require a schema migration and updating the PID throughout the
-    // analysis lifecycle (since analysis spawns child processes).
-    try {
-      const result = await run(db, "UPDATE analysis_runs SET status = 'failed', completed_at = CURRENT_TIMESTAMP WHERE status = 'running' AND started_at < datetime('now', '-30 minutes')");
-      if (result.changes > 0) {
-        logger.info(`Cleaned up ${result.changes} stale analysis run(s) (running > 30 minutes)`);
-      }
-    } catch (error) {
-      logger.warn(`Failed to clean up orphaned analysis runs: ${error.message}`);
-    }
 
     // Check if public directory exists
     const publicDir = path.join(__dirname, '..', 'public');
@@ -290,8 +379,10 @@ async function startServer(sharedDb = null, sharedPoolLifecycle = null, options 
     
     // Create Express app
     const app = express();
+    app.set('protocolSources', protocolSources || []);
     
     // Middleware
+    app.use(rejectUnsafeRequest);
     app.use(requestLogger);
     app.use(express.json());
 
@@ -327,7 +418,7 @@ async function startServer(sharedDb = null, sharedPoolLifecycle = null, options 
           res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
           res.setHeader('Pragma', 'no-cache');
           res.setHeader('Expires', '0');
-        } else if (filePath.endsWith('.html')) {
+        } else if (/\.(html|js|css)$/.test(filePath)) {
           res.setHeader('Cache-Control', 'no-cache');
         } else {
           res.setHeader('Cache-Control', 'public, max-age=3600');
@@ -462,6 +553,30 @@ async function startServer(sharedDb = null, sharedPoolLifecycle = null, options 
     // entry points (main.js / local-review.js). Read per request by the analyze
     // routes; ranks above repo settings but below an explicit request body.
     app.set('cliOverrides', cliOverrides);
+    app.use((req, res, next) => activity.context.run({
+      entryPoint: req.get('X-Pair-Review-Entry-Point') === 'delegated-cli' ? 'delegated-cli' : 'ui'
+    }, next));
+
+    const refreshOmpModelCatalog = createOmpModelCatalogRefresher();
+    app.use(async (req, res, next) => {
+      const isAnalysisRequest = /\/analyses(?:\/|$)/.test(req.path);
+      const isPreferenceRequest = req.path.startsWith('/api/pr/') && req.path.endsWith('/analysis-preferences');
+      const isChatRequest = /^\/api\/chat(?:\/|$)/.test(req.path);
+      if (req.path !== '/api/providers' && !isChatRequest
+        && !isAnalysisRequest && !isPreferenceRequest) {
+        return next();
+      }
+
+      try {
+        await refreshOmpModelCatalog(req.app.get('config') || config);
+        next();
+      } catch {
+        logger.warn('Rejected invalid managed OMP model catalog update');
+        res.status(503).json({
+          error: 'Managed OMP model catalog could not be loaded. Check ~/.pair-review/config.json for valid JSON and model definitions.'
+        });
+      }
+    });
 
     // Create or reuse the worktree pool lifecycle instance.
     // When called from main.js, the shared instance (already rehydrated) is
@@ -558,7 +673,7 @@ async function startServer(sharedDb = null, sharedPoolLifecycle = null, options 
     }
 
     await new Promise((resolve, reject) => {
-      server = app.listen(port, () => {
+      server = app.listen(port, '127.0.0.1', () => {
         console.log(`Server running on http://localhost:${port}`);
         attachWebSocket(server, db, poolLifecycle);
         resolve();
@@ -607,42 +722,36 @@ async function startServer(sharedDb = null, sharedPoolLifecycle = null, options 
 /**
  * Graceful shutdown handler
  */
-async function gracefulShutdown(signal) {
-  console.log('\nServer shutting down...');
-
-  // Close all active chat sessions
-  if (chatSessionManager) {
+function gracefulShutdown(signal) {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    console.log('\nServer shutting down...');
+    const { shutdownAnalyses } = require('./routes/shared');
+    // Stop accepting work before draining owned execution. Existing requests
+    // cannot admit another run once shutdownAnalyses closes the admission gate.
+    closeAllWS();
+    const closed = server ? new Promise(resolve => server.close(resolve)) : Promise.resolve();
+    const connectionDeadline = server ? setTimeout(() => server.closeAllConnections(), 5000) : null;
+    connectionDeadline?.unref();
     try {
-      await chatSessionManager.closeAll();
-    } catch (error) {
-      console.error('Error closing chat sessions:', error.message);
-    }
-  }
-
-  closeAllWS();
-
-  if (server) {
-    server.close(() => {
-      if (db) {
-        db.close((error) => {
-          if (error) {
-            console.error('Error closing database:', error.message);
-          }
-          process.exit(0);
-        });
-      } else {
-        process.exit(0);
+      await shutdownAnalyses();
+      if (chatSessionManager) {
+        try {
+          await chatSessionManager.closeAll();
+        } catch (error) {
+          console.error('Error closing chat sessions:', error.message);
+        }
       }
-    });
-    
-    // Force exit after 5 seconds if graceful shutdown fails
-    setTimeout(() => {
-      console.error('Could not close connections in time, forcefully shutting down');
-      process.exit(1);
-    }, 5000);
-  } else {
-    process.exit(0);
-  }
+      await closed;
+      // Include any already-started provider that registered during draining.
+      await shutdownAnalyses();
+      if (db?.open) db.close();
+      process.exit(signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : 0);
+    } finally {
+      clearTimeout(connectionDeadline);
+    }
+  })();
+  return shutdownPromise;
 }
 
 // Handle graceful shutdown
@@ -665,4 +774,4 @@ if (require.main === module) {
   startServer();
 }
 
-module.exports = { startServer, applyEnvOverrides, applyHostQueryCorrection, buildHealthPayload };
+module.exports = { startServer, gracefulShutdown, applyEnvOverrides, applyHostQueryCorrection, buildHealthPayload };

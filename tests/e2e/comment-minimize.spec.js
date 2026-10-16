@@ -19,7 +19,7 @@
  * survive.
  */
 
-import { test, expect } from './fixtures.js';
+import { publicationTest as test, expect } from './fixtures.js';
 import { waitForDiffToRender, seedAISuggestions, openCommentFormOnLine, waitForDiffType } from './helpers.js';
 
 // A line-level annotation card slotted below a diff line (excludes
@@ -49,22 +49,6 @@ async function setMinimize(page, enabled) {
 }
 
 test.describe('Minimize comments (pierre renderer)', () => {
-  test.afterEach(async ({ page }) => {
-    // The worker DB is shared across spec files (fullyParallel: false), so both
-    // user comments AND seeded AI suggestions must be swept — GET /comments does
-    // not return source='ai' rows, so they need the dedicated delete route.
-    await page.evaluate(async () => {
-      const resp = await fetch('/api/reviews/1/comments?includeDismissed=true');
-      const data = await resp.json();
-      for (const c of (data.comments || [])) {
-        await fetch(`/api/reviews/1/comments/${c.id}`, { method: 'DELETE' });
-      }
-      // fetch only rejects on network errors, so assert resp.ok ourselves.
-      const aiResp = await fetch('/api/reviews/1/ai-suggestions', { method: 'DELETE' });
-      if (!aiResp.ok) throw new Error(`AI cleanup failed: ${aiResp.status}`);
-    });
-  });
-
   test('hides suggestion + comment cards behind line indicators and toggles them back', async ({ page }) => {
     await page.goto('/pr/test-owner/test-repo/1');
     await waitForDiffToRender(page);

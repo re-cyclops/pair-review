@@ -24,6 +24,8 @@ const { resolveTier } = require('./prompts/config');
 const { registerProcess, isAnalysisCancelled, CancellationError } = require('../routes/shared');
 const { AnalysisRunRepository, CommentRepository } = require('../database');
 const { mergeInstructions } = require('../utils/instructions');
+const { baselineInstructions } = require('../review-progress');
+const { safeParseJson } = require('../utils/safe-parse-json');
 const { GitWorktreeManager } = require('../git/worktree');
 const { buildSparseCheckoutGuidance } = require('./prompts/sparse-checkout-guidance');
 const { generateDiffForExecutable } = require('../routes/executable-analysis');
@@ -63,6 +65,11 @@ async function captureDiffSnapshot(analyzer, worktreePath, prMetadata, logPrefix
     // Continue without diff snapshot - share endpoint will fall back to current PR diff
     return null;
   }
+}
+
+async function reviewedContext(repository, runId) {
+  const row = await repository.getById(runId);
+  return baselineInstructions(safeParseJson(row?.review_baseline));
 }
 
 /**
@@ -123,11 +130,11 @@ function buildVoiceContext(voice, idx, instructions, progressCallback, db, provi
  * @param {number|string} reviewId - Review ID
  * @param {string} worktreePath - Path to the git worktree
  * @param {Object} prMetadata - PR metadata
- * @param {Object} options - { analysisId, timeout, requestInstructions, progressCallback, logPrefix }
+ * @param {Object} options - { analysisId, timeout, instructions, progressCallback, logPrefix }
  * @returns {Promise<Object>} { suggestions, summary }
  */
 async function runExecutableVoice(voiceProvider, reviewId, worktreePath, prMetadata, options) {
-  const { analysisId, timeout, requestInstructions, progressCallback, logPrefix } = options;
+  const { analysisId, timeout, instructions, progressCallback, logPrefix } = options;
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pair-review-exec-'));
   try {
     const executableContext = {
@@ -142,7 +149,7 @@ async function runExecutableVoice(voiceProvider, reviewId, worktreePath, prMetad
       headBranch: prMetadata.head_branch || null,
       scopeStart: prMetadata.scopeStart || null,
       scopeEnd: prMetadata.scopeEnd || null,
-      customInstructions: requestInstructions || null,
+      customInstructions: [mergeInstructions(instructions), options.reviewBaseline].filter(Boolean).join('\n\n') || null,
     };
 
     // Generate scoped diff file when provider expects diff_path
@@ -522,7 +529,8 @@ class Analyzer {
           repoInstructions,
           requestInstructions,
           headSha,
-          diff: diffSnapshot
+          diff: diffSnapshot,
+          protocol: options.protocol || null
         });
         logger.info(`${logPrefix}Created analysis_run record: ${runId}`);
       } catch (createError) {
@@ -538,6 +546,7 @@ class Analyzer {
         logger.warn(`${logPrefix}Failed to update analysis_run with diff: ${updateError.message}`);
       }
     }
+    mergedInstructions = [mergedInstructions, await reviewedContext(analysisRunRepo, runId)].filter(Boolean).join('\n\n') || null;
 
     // Load generated file patterns to skip during analysis
     const generatedPatterns = await this.loadGeneratedFilePatterns(worktreePath);
@@ -3173,7 +3182,8 @@ File-level suggestions should NOT have a line number. They apply to the entire f
           headSha,
           diff: diffSnapshot,
           configType: 'council',
-          levelsConfig: enabledLevels
+          levelsConfig: enabledLevels,
+          protocol: options.protocol || null
         });
         logger.info(`[ReviewerCouncil] Created parent analysis_run: ${parentRunId}`);
       } catch (err) {
@@ -3188,6 +3198,8 @@ File-level suggestions should NOT have a line number. They apply to the entire f
         logger.warn(`[ReviewerCouncil] Failed to update analysis_run with diff: ${updateError.message}`);
       }
     }
+    const reviewBaseline = await reviewedContext(analysisRunRepo, parentRunId);
+    mergedInstructions = [mergedInstructions, reviewBaseline].filter(Boolean).join('\n\n') || null;
 
     const voices = councilConfig.voices || [];
     if (voices.length === 0) {
@@ -3214,7 +3226,8 @@ File-level suggestions should NOT have a line number. They apply to the entire f
       if (isExecutable) {
         const result = await runExecutableVoice(voiceProvider, reviewId, worktreePath, prMetadata, {
           analysisId, timeout: voiceTimeout,
-          requestInstructions: voiceRequestInstructions,
+          instructions: { ...instructions, requestInstructions: voiceRequestInstructions },
+          reviewBaseline,
           progressCallback: voiceProgressCallback,
           logPrefix: `[${reviewerLabel}] `
         });
@@ -3315,10 +3328,10 @@ File-level suggestions should NOT have a line number. They apply to the entire f
           provider: voice.provider,
           model: voice.model,
           tier: voiceTier,
-          customInstructions: instructions?.requestInstructions || null,  // Only request-level; global/repo stored in their own columns
+          customInstructions: voiceRequestInstructions,
           globalInstructions: instructions?.globalInstructions || null,
           repoInstructions: instructions?.repoInstructions || null,
-          requestInstructions: instructions?.requestInstructions || null,
+          requestInstructions: voiceRequestInstructions,
           headSha,
           diff: diffSnapshot,
           parentRunId,
@@ -3334,7 +3347,8 @@ File-level suggestions should NOT have a line number. They apply to the entire f
         if (isExecutable) {
           const result = await runExecutableVoice(voiceProvider, reviewId, worktreePath, prMetadata, {
             analysisId, timeout: voiceTimeout,
-            requestInstructions: voiceRequestInstructions,
+            instructions: { ...instructions, requestInstructions: voiceRequestInstructions },
+            reviewBaseline,
             progressCallback: voiceProgressCallback,
             logPrefix: `[${reviewerLabel}] `
           });
@@ -3676,6 +3690,7 @@ File-level suggestions should NOT have a line number. They apply to the entire f
     if (instructions && typeof instructions === 'object') {
       mergedInstructions = mergeInstructions({ globalInstructions: instructions.globalInstructions, repoInstructions: instructions.repoInstructions, requestInstructions: instructions.requestInstructions });
     }
+    mergedInstructions = [mergedInstructions, await reviewedContext(new AnalysisRunRepository(this.db), runId)].filter(Boolean).join('\n\n') || null;
 
     // Load generated file patterns
     const generatedPatterns = await this.loadGeneratedFilePatterns(worktreePath);

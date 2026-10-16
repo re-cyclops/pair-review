@@ -13,8 +13,8 @@ const test = base.extend({
   testServer: [async ({}, use, workerInfo) => {
     const port = 4000 + workerInfo.workerIndex;
     const result = await startTestServer(port);
-    await use(result);
-    result.server.close();
+    try { await use(result); }
+    finally { await result.close(); }
   }, { scope: 'worker' }],
 
   baseURL: async ({ testServer }, use) => {
@@ -32,4 +32,16 @@ const test = base.extend({
   },
 });
 
-export { test, expect };
+// Publication/conflict cases get a fresh database and host for every test.
+const publicationTest = base.extend({
+  testServer: async ({}, use) => {
+    const result = await startTestServer(0);
+    try { await use(result); }
+    finally { await result.close(); }
+  },
+  baseURL: async ({ testServer }, use) => {
+    await use(`http://127.0.0.1:${testServer.server.address().port}`);
+  },
+});
+
+export { test, publicationTest, expect };

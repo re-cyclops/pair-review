@@ -35,6 +35,7 @@ const OMP_CHAT_TOOLS = 'read,bash,grep,glob,task';
 
 /** Error code sendMessage() sets when the agent still owns the previous turn. */
 const SESSION_BUSY = 'SESSION_BUSY';
+const sessionConflict = message => Object.assign(new Error(message), { statusCode: 409 });
 
 class ChatSessionManager {
   /**
@@ -79,21 +80,6 @@ class ChatSessionManager {
     const selectorResolution = resolveChatModel(provider, selector, providerDef);
     const resolvedModel = selectorResolution.id;
 
-    // Insert session record into DB
-    const stmt = this._db.prepare(`
-      INSERT INTO chat_sessions (review_id, context_comment_id, provider, model, status)
-      VALUES (?, ?, ?, ?, 'active')
-    `);
-    const result = stmt.run(
-      reviewId,
-      contextCommentId || null,
-      provider,
-      resolvedModel
-    );
-    const sessionId = Number(result.lastInsertRowid);
-
-    logger.info(`[ChatSession] Creating session ${sessionId} (provider=${provider}, model=${resolvedModel}, review=${reviewId})`);
-
     // Create and start the bridge
     // Chat sessions get bash for git commands; review analysis uses the safe default
     const { bridge, resolved } = this._createBridge(provider, {
@@ -103,6 +89,17 @@ class ChatSessionManager {
       systemPrompt,
       loadSkills,
     }, providerDef);
+
+    const result = this._db.transaction(() => {
+      require('../review-removal').assertReviewAvailable(this._db, reviewId);
+      return this._db.prepare(`
+        INSERT INTO chat_sessions (review_id, context_comment_id, provider, model, status)
+        VALUES (?, ?, ?, ?, 'active')
+      `).run(reviewId, contextCommentId || null, provider, resolvedModel);
+    }).immediate();
+    const sessionId = Number(result.lastInsertRowid);
+
+    logger.info(`[ChatSession] Creating session ${sessionId} (provider=${provider}, model=${resolvedModel}, review=${reviewId})`);
 
     const listeners = {
       delta: new Set(),
@@ -127,18 +124,7 @@ class ChatSessionManager {
     this._wireBridgeEvents(sessionId, bridge, listeners);
 
     // Start the bridge process
-    try {
-      await bridge.start();
-    } catch (err) {
-      // Bridge failed to start — clean up
-      this._sessions.delete(sessionId);
-      this._db.prepare(`
-        UPDATE chat_sessions SET status = 'error', updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).run(sessionId);
-      logger.error(`[ChatSession] Failed to start bridge for session ${sessionId}: ${err.message}`);
-      throw err;
-    }
+    await this._startBridge(sessionId, bridge);
 
     logger.info(`[ChatSession] Session ${sessionId} active`);
     return { id: sessionId, status: 'active', model: resolvedModel, cliModel: resolved.cliModel };
@@ -162,6 +148,7 @@ class ChatSessionManager {
     if (!session) {
       throw new Error(`Session ${sessionId} not found or not active`);
     }
+    if (session.closePromise) throw sessionConflict('Chat termination is pending. Wait for acknowledgement before sending another message.');
 
     if (!session.bridge.isReady()) {
       throw new Error(`Session ${sessionId} bridge is not ready`);
@@ -340,27 +327,30 @@ class ChatSessionManager {
   async closeSession(sessionId) {
     const session = this._sessions.get(sessionId);
     if (!session) {
-      // Session may already be closed — just update DB to be safe
-      this._db.prepare(`
-        UPDATE chat_sessions SET status = 'closed', updated_at = CURRENT_TIMESTAMP
-        WHERE id = ? AND status = 'active'
-      `).run(sessionId);
+      const row = this._db.prepare('SELECT status FROM chat_sessions WHERE id = ?').get(sessionId);
+      if (row?.status === 'active') {
+        throw sessionConflict('This chat is not owned by this server; its termination is unconfirmed.');
+      }
       return;
     }
 
-    // Remove from map first so the 'close' event handler doesn't double-update
-    this._sessions.delete(sessionId);
-
-    // Close the bridge process (PiBridge.close() handles listener cleanup internally)
-    await session.bridge.close();
-
-    // Update DB status
-    this._db.prepare(`
-      UPDATE chat_sessions SET status = 'closed', updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).run(sessionId);
-
-    logger.info(`[ChatSession] Session ${sessionId} closed`);
+    if (!session.closePromise) {
+      // Keep ownership and the active row until the bridge acknowledges exit.
+      // Deferring the close call also sets the promise before synchronous events.
+      session.closePromise = Promise.resolve().then(async () => {
+        await session.bridge.close();
+        this._db.prepare(`
+          UPDATE chat_sessions SET status = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(session.startFailed ? 'error' : 'closed', sessionId);
+        if (this._sessions.get(sessionId) === session) this._sessions.delete(sessionId);
+        logger.info(`[ChatSession] Session ${sessionId} closed`);
+      }).catch(error => {
+        session.closePromise = null;
+        throw error;
+      });
+    }
+    return session.closePromise;
   }
 
   /**
@@ -461,6 +451,7 @@ class ChatSessionManager {
     // Already active — return immediately
     if (this._sessions.has(sessionId)) {
       const active = this._sessions.get(sessionId);
+      if (active.closePromise) throw sessionConflict('Chat termination is pending. Wait for acknowledgement before resuming.');
       return {
         id: sessionId,
         status: 'active',
@@ -473,6 +464,9 @@ class ChatSessionManager {
     const row = this._db.prepare('SELECT * FROM chat_sessions WHERE id = ?').get(sessionId);
     if (!row) {
       throw new Error(`Session ${sessionId} not found`);
+    }
+    if (row.status === 'active') {
+      throw sessionConflict('This chat is not owned by this server; its termination is unconfirmed.');
     }
 
     const isAcp = isAcpProvider(row.provider);
@@ -522,6 +516,15 @@ class ChatSessionManager {
       error: new Set()
     };
 
+    // Update DB status back to active
+    this._db.transaction(() => {
+      require('../review-removal').assertReviewAvailable(this._db, row.review_id);
+      const claimed = this._db.prepare(`
+        UPDATE chat_sessions SET status = 'active', updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND status IN ('closed', 'error')
+      `).run(sessionId);
+      if (claimed.changes !== 1) throw sessionConflict('Another executor already resumed or removed this chat.');
+    }).immediate();
     this._sessions.set(sessionId, {
       bridge,
       listeners,
@@ -535,26 +538,30 @@ class ChatSessionManager {
     this._wireBridgeEvents(sessionId, bridge, listeners);
 
     // Start the bridge process
-    try {
-      await bridge.start();
-    } catch (err) {
-      this._sessions.delete(sessionId);
-      this._db.prepare(`
-        UPDATE chat_sessions SET status = 'error', updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).run(sessionId);
-      logger.error(`[ChatSession] Failed to resume bridge for session ${sessionId}: ${err.message}`);
-      throw err;
-    }
+    await this._startBridge(sessionId, bridge);
 
-    // Update DB status back to active
-    this._db.prepare(`
-      UPDATE chat_sessions SET status = 'active', updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).run(sessionId);
 
     logger.info(`[ChatSession] Session ${sessionId} resumed`);
     return { id: sessionId, status: 'active', model: resolved.id ?? null, cliModel: resolved.cliModel };
+  }
+
+  async _startBridge(sessionId, bridge) {
+    const session = this._sessions.get(sessionId);
+    try {
+      await bridge.start();
+    } catch (error) {
+      if (this._sessions.get(sessionId) === session) {
+        session.startFailed = true;
+        try {
+          await this.closeSession(sessionId);
+        } catch (closeError) {
+          throw Object.assign(new AggregateError([error, closeError],
+            'Chat startup failed; termination is unconfirmed'), { statusCode: 409 });
+        }
+      }
+      logger.error(`[ChatSession] Failed to start session ${sessionId}: ${error.message}`);
+      throw error;
+    }
   }
 
   /**
@@ -801,7 +808,8 @@ class ChatSessionManager {
 
     bridge.on('close', () => {
       // If the bridge closes unexpectedly (not via closeSession), update DB
-      if (this._sessions.has(sessionId)) {
+      const current = this._sessions.get(sessionId);
+      if (current?.bridge === bridge && !current.closePromise) {
         for (const cb of listeners.error) {
           try {
             cb({ message: 'Agent process ended unexpectedly' });

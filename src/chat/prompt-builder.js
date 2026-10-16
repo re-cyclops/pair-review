@@ -9,6 +9,7 @@
 
 const logger = require('../utils/logger');
 const { scopeGitHints, reviewScope } = require('../local-scope');
+const { mergeInstructions } = require('../utils/instructions');
 
 /**
  * Build a lean system prompt for chat sessions.
@@ -19,10 +20,11 @@ const { scopeGitHints, reviewScope } = require('../local-scope');
  * @param {Object} options.review - Review metadata {id, pr_number, repository, review_type, local_path, name}
  * @param {Object} [options.prData] - PR data with base_sha/head_sha (for PR reviews)
  * @param {string} [options.chatInstructions] - Custom instructions from repo settings to append to system prompt
+ * @param {string} [options.globalInstructions] - Server-loaded global instructions and trusted excerpts
  * @param {string} [options.commentFormatTemplate] - Resolved comment format template for consistent comment formatting
  * @returns {string} System prompt for the chat agent
  */
-function buildChatPrompt({ review, prData, chatInstructions, commentFormatTemplate }) {
+function buildChatPrompt({ review, prData, chatInstructions, globalInstructions, commentFormatTemplate }) {
   const sections = [];
 
   // Role
@@ -112,10 +114,8 @@ function buildChatPrompt({ review, prData, chatInstructions, commentFormatTempla
     'Be concise and helpful. Use markdown formatting in your responses.'
   );
 
-  // Custom chat instructions from repo settings
-  if (chatInstructions) {
-    sections.push('## Custom Instructions\n\nThe following instructions take precedence over previous guidance.\n\n' + chatInstructions);
-  }
+  const instructions = mergeInstructions({ globalInstructions, repoInstructions: chatInstructions });
+  if (instructions) sections.push(instructions);
 
   const prompt = sections.join('\n\n');
   logger.debug(`Chat system prompt built: ${prompt.length} chars`);
