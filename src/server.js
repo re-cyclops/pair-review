@@ -1,12 +1,15 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
 const express = require('express');
 const path = require('path');
-const { loadConfig, getGitHubToken, resolveDbName, warnIfDevModeWithoutDbName, getRepoConfig, isExclusiveAltHost } = require('./config');
+const { createHash } = require('crypto');
+const fsPromises = require('fs').promises;
+const { loadConfig, getConfigDir, getGitHubToken, resolveDbName, warnIfDevModeWithoutDbName, getRepoConfig, isExclusiveAltHost } = require('./config');
 const { initializeDatabase, getDatabaseStatus, queryOne, run, PRMetadataRepository } = require('./database');
 const { normalizeRepository } = require('./utils/paths');
 const { resolveBindingRepositoryForHost } = require('./utils/host-resolution');
 const { GlobalSettingsService } = require('./settings/global-settings-service');
 const { applyConfigOverrides, checkAllProviders } = require('./ai');
+const { replaceProviderModels } = require('./ai/provider');
 const { checkAllChatProviders } = require('./chat/chat-providers');
 const logger = require('./utils/logger');
 const { attachWebSocket, closeAll: closeAllWS } = require('./ws');
@@ -27,7 +30,7 @@ let shutdownPromise = null;
  * (the resolved DB path cannot change without a restart).
  *
  * @param {string} dbId - computeDbId(resolveDbPath(config)) digest
- * @returns {{status: string, service: string, version: string, dbId: string, timestamp: string}}
+ * @returns {{status: string, service: string, version: string, dbId: string, dotfilesReviewModes: 1, timestamp: string}}
  */
 function buildHealthPayload(dbId) {
   return {
@@ -35,6 +38,7 @@ function buildHealthPayload(dbId) {
     service: 'pair-review',
     version: require('../package.json').version,
     dbId,
+    dotfilesReviewModes: 1,
     timestamp: new Date().toISOString()
   };
 }
@@ -187,6 +191,104 @@ function findAvailablePort(app, startPort, maxAttempts = 20) {
     
     tryPort();
   });
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(key => `${canonicalJson(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value).replace(/[^\x00-\x7f]/gu, (character) => {
+    const codePoint = character.codePointAt(0);
+    if (codePoint <= 0xffff) {
+      return `\\u${codePoint.toString(16).padStart(4, '0')}`;
+    }
+    const adjusted = codePoint - 0x10000;
+    const high = 0xd800 + (adjusted >> 10);
+    const low = 0xdc00 + (adjusted & 0x3ff);
+    return `\\u${high.toString(16)}\\u${low.toString(16)}`;
+  });
+}
+
+function isUntouchedManagedOmpModel(model) {
+  if (!model || typeof model !== 'object' || Array.isArray(model)
+    || model.dotfilesManaged !== 'omp-sync'
+    || typeof model.dotfilesManagedSha256 !== 'string'
+    || !/^[a-f0-9]{64}$/i.test(model.dotfilesManagedSha256)) {
+    return false;
+  }
+
+  const payload = Object.fromEntries(
+    Object.entries(model).filter(([key]) => key !== 'dotfilesManaged' && key !== 'dotfilesManagedSha256')
+  );
+  const digest = createHash('sha256').update(canonicalJson(payload), 'utf8').digest('hex');
+  return digest === model.dotfilesManagedSha256.toLowerCase();
+}
+
+function mergeManagedOmpModels(currentModels, sourceModels) {
+  const sourceIds = new Set(sourceModels.map(model => model.id));
+  const retainedModels = currentModels.filter((model) => {
+    if (model?.dotfilesManaged !== 'omp-sync') return true;
+    if (sourceIds.has(model.id)) return false;
+    return !isUntouchedManagedOmpModel(model);
+  });
+  const retainedIds = new Set(retainedModels.map(model => model?.id).filter(id => typeof id === 'string'));
+  const sourceModelsToAppend = sourceModels.filter(model => !retainedIds.has(model.id));
+  return [...retainedModels, ...sourceModelsToAppend];
+}
+
+function createOmpModelCatalogRefresher() {
+  let lastSignature = null;
+  let refreshPromise = null;
+
+  return async function refreshOmpModelCatalog(config) {
+    const configPath = path.join(getConfigDir(), 'config.json');
+    let stat = null;
+    try {
+      stat = await fsPromises.stat(configPath);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    const signature = stat ? `${stat.mtimeMs}:${stat.size}:${stat.ino}` : 'missing';
+    if (signature === lastSignature) return;
+    if (refreshPromise) return refreshPromise;
+
+    refreshPromise = (async () => {
+      const sourceConfig = stat ? JSON.parse(await fsPromises.readFile(configPath, 'utf8')) : {};
+      if (!sourceConfig || typeof sourceConfig !== 'object' || Array.isArray(sourceConfig)
+        || (sourceConfig.providers !== undefined
+          && (!sourceConfig.providers || typeof sourceConfig.providers !== 'object' || Array.isArray(sourceConfig.providers)))
+        || (sourceConfig.providers?.omp !== undefined
+          && (!sourceConfig.providers.omp || typeof sourceConfig.providers.omp !== 'object' || Array.isArray(sourceConfig.providers.omp)))) {
+        throw new TypeError('Invalid OMP model catalog config');
+      }
+
+      const sourceModels = sourceConfig.providers?.omp?.models;
+      const currentModels = config.providers?.omp?.models;
+      if ((sourceModels !== undefined && (!Array.isArray(sourceModels)
+          || sourceModels.some(model => !model || typeof model !== 'object' || Array.isArray(model)
+            || typeof model.id !== 'string' || !model.id)))
+        || (currentModels !== undefined && !Array.isArray(currentModels))) {
+        throw new TypeError('Invalid OMP model catalog');
+      }
+
+      const nextModels = mergeManagedOmpModels(currentModels || [], sourceModels || []);
+      replaceProviderModels('omp', nextModels);
+      if (config.providers?.omp || nextModels.length > 0) {
+        config.providers = config.providers || {};
+        config.providers.omp = { ...(config.providers.omp || {}), models: nextModels };
+      }
+      lastSignature = signature;
+    })();
+
+    try {
+      await refreshPromise;
+    } finally {
+      refreshPromise = null;
+    }
+  };
 }
 
 /**
@@ -454,6 +556,27 @@ async function startServer(sharedDb = null, sharedPoolLifecycle = null, options 
     app.use((req, res, next) => activity.context.run({
       entryPoint: req.get('X-Pair-Review-Entry-Point') === 'delegated-cli' ? 'delegated-cli' : 'ui'
     }, next));
+
+    const refreshOmpModelCatalog = createOmpModelCatalogRefresher();
+    app.use(async (req, res, next) => {
+      const isAnalysisRequest = /\/analyses(?:\/|$)/.test(req.path);
+      const isPreferenceRequest = req.path.startsWith('/api/pr/') && req.path.endsWith('/analysis-preferences');
+      const isChatRequest = /^\/api\/chat(?:\/|$)/.test(req.path);
+      if (req.path !== '/api/providers' && !isChatRequest
+        && !isAnalysisRequest && !isPreferenceRequest) {
+        return next();
+      }
+
+      try {
+        await refreshOmpModelCatalog(req.app.get('config') || config);
+        next();
+      } catch {
+        logger.warn('Rejected invalid managed OMP model catalog update');
+        res.status(503).json({
+          error: 'Managed OMP model catalog could not be loaded. Check ~/.pair-review/config.json for valid JSON and model definitions.'
+        });
+      }
+    });
 
     // Create or reuse the worktree pool lifecycle instance.
     // When called from main.js, the shared instance (already rehydrated) is

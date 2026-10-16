@@ -829,6 +829,76 @@ function getProviderConfigOverrides(providerId) {
   return providerConfigOverrides.get(providerId);
 }
 
+
+/**
+ * Replace only one provider's model definitions at runtime.
+ *
+ * Used for request-time model-catalog refreshes. Keeping this scoped avoids
+ * re-registering aliases or resetting unrelated providers, and existing
+ * provider instances retain the overrides object they were constructed with.
+ *
+ * @param {string} providerId
+ * @param {Array<Object>} models
+ */
+function replaceProviderModels(providerId, models) {
+  const ProviderClass = providerRegistry.get(providerId);
+  if (!ProviderClass) {
+    throw new Error(`Unknown AI provider: ${providerId}`);
+  }
+  if (!Array.isArray(models)) {
+    throw new TypeError('Provider models must be an array');
+  }
+
+  const seenIds = new Set();
+  let processedModels = models.map((model) => {
+    if (!model || typeof model !== 'object' || Array.isArray(model)
+      || typeof model.id !== 'string' || !model.id || model.id.trim() !== model.id) {
+      throw new TypeError('Each provider model must have a canonical string id');
+    }
+    if (seenIds.has(model.id)) {
+      throw new TypeError('Provider model ids must be unique');
+    }
+    seenIds.add(model.id);
+
+    if (model.cli_model !== undefined && model.cli_model !== null && typeof model.cli_model !== 'string') {
+      throw new TypeError('Provider model cli_model must be a string or null');
+    }
+    if (model.aliases !== undefined && (!Array.isArray(model.aliases) || model.aliases.some(alias => typeof alias !== 'string'))) {
+      throw new TypeError('Provider model aliases must be an array of strings');
+    }
+    if (model.extra_args !== undefined && (!Array.isArray(model.extra_args) || model.extra_args.some(arg => typeof arg !== 'string'))) {
+      throw new TypeError('Provider model extra_args must be an array of strings');
+    }
+    if (model.env !== undefined && (!model.env || typeof model.env !== 'object' || Array.isArray(model.env)
+      || Object.values(model.env).some(value => typeof value !== 'string'))) {
+      throw new TypeError('Provider model env must be an object of strings');
+    }
+    return inferModelDefaults(model);
+  });
+
+  const builtInModels = ProviderClass.getModels();
+  processedModels = processedModels.map((model) => {
+    const builtIn = builtInModels.find(candidate => modelMatches(candidate, model.id));
+    return builtIn && builtIn.id !== model.id ? { ...model, id: builtIn.id } : model;
+  });
+
+  const canonicalIds = new Set();
+  for (const model of processedModels) {
+    if (canonicalIds.has(model.id)) {
+      throw new TypeError('Provider model ids must be unique after canonicalization');
+    }
+    canonicalIds.add(model.id);
+  }
+
+  const current = providerConfigOverrides.get(providerId) || {};
+  const disabledModels = normalizeDisabledModels(providerId, current.disabled_models);
+  validateModelSelectors(providerId, builtInModels, processedModels, disabledModels, current.default_model || null);
+  providerConfigOverrides.set(providerId, {
+    ...current,
+    models: processedModels,
+    disabled_models: disabledModels
+  });
+}
 /**
  * Register a provider class
  * @param {string} id - Provider ID (e.g., 'claude', 'antigravity')
@@ -1197,6 +1267,7 @@ module.exports = {
   DEFAULT_AVAILABILITY_TIMEOUT_MS,
   // Config override support
   applyConfigOverrides,
+  replaceProviderModels,
   createAliasedProviderClass,
   getProviderConfigOverrides,
   inferModelDefaults,

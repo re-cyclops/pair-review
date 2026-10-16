@@ -4937,6 +4937,14 @@ class ReviewRepository {
   async updateAfterSubmission(id, { event, reviewData }) {
     const now = new Date().toISOString();
     const status = event === 'DRAFT' ? 'draft' : 'submitted';
+    const existing = await this.getReview(id);
+    const existingData = existing?.review_data && typeof existing.review_data === 'object' && !Array.isArray(existing.review_data)
+      ? existing.review_data
+      : {};
+    const submittedData = reviewData && typeof reviewData === 'object' && !Array.isArray(reviewData)
+      ? reviewData
+      : {};
+    const mergedReviewData = { ...existingData, ...submittedData };
 
     // Note: reviews.review_id is legacy and no longer written.
     // GitHub review IDs are now tracked in the github_reviews table.
@@ -4945,7 +4953,7 @@ class ReviewRepository {
         UPDATE reviews
         SET status = ?, updated_at = ?, review_data = ?
         WHERE id = ?
-      `, [status, now, JSON.stringify(reviewData), id]);
+      `, [status, now, JSON.stringify(mergedReviewData), id]);
 
       return result.changes > 0;
     } else {
@@ -4953,7 +4961,7 @@ class ReviewRepository {
         UPDATE reviews
         SET status = ?, updated_at = ?, submitted_at = ?, review_data = ?
         WHERE id = ?
-      `, [status, now, now, JSON.stringify(reviewData), id]);
+      `, [status, now, now, JSON.stringify(mergedReviewData), id]);
 
       return result.changes > 0;
     }

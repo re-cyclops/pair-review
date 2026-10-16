@@ -8163,11 +8163,18 @@ class PRManager {
       // buildProviderModelScopes prepends any CLI/env override ahead of repo
       // settings so `--provider` seeds the modal as the default selection.
       const providersInfo = await this._getProvidersInfo();
-      const { provider: currentProvider, model: currentModel } = window.resolveProviderModelPair(
+      const resolvedPair = window.resolveProviderModelPair(
         window.buildProviderModelScopes(repoSettings, appConfig),
         providersInfo
       );
-
+      const savedPreferences = reviewSettings.analysis_preferences;
+      const savedProvider = providersInfo.find(provider => provider.id === savedPreferences?.provider);
+      const savedModel = savedProvider?.models.find(model => model.id === savedPreferences?.model);
+      const hasSavedPreference = Boolean(savedPreferences);
+      const hasValidSavedPreference = Boolean(savedProvider && savedModel
+        && (!savedProvider.availability || savedProvider.availability.available));
+      const currentProvider = hasValidSavedPreference ? savedPreferences.provider : resolvedPair.provider;
+      const currentModel = hasValidSavedPreference ? savedPreferences.model : resolvedPair.model;
       // Determine default tab (priority: localStorage > repo settings > 'single')
       const tabStorageKey = PRManager.getRepoStorageKey('pair-review-tab', owner, repo);
       const rememberedTab = localStorage.getItem(tabStorageKey);
@@ -8175,7 +8182,8 @@ class PRManager {
 
       // Restore custom instructions (priority: database > localStorage)
       const instructionsStorageKey = PRManager.getRepoStorageKey('pair-review-instructions', owner, repo);
-      const lastInstructions = reviewSettings.custom_instructions
+      const lastInstructions = savedPreferences?.customInstructions
+        ?? reviewSettings.custom_instructions
         ?? localStorage.getItem(instructionsStorageKey)
         ?? '';
 
@@ -8187,7 +8195,10 @@ class PRManager {
       // Show the config modal
       const config = await this.analysisConfigModal.show({
         currentModel,
+        providersInfo,
         currentProvider,
+        hasSavedPreference: hasSavedPreference && hasValidSavedPreference,
+        savedPreferenceInvalid: hasSavedPreference && !hasValidSavedPreference,
         defaultTab,
         repoInstructions: repoSettings?.default_instructions || '',
         lastInstructions: lastInstructions,
@@ -8206,6 +8217,22 @@ class PRManager {
       if (!config) {
         return;
       }
+      if (!config.isCouncil) {
+        const response = await fetch(`/api/pr/${owner}/${repo}/${number}/analysis-preferences`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider: config.provider,
+            model: config.model,
+            customInstructions: config.customInstructions || ''
+          })
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(result.error || 'Failed to save analysis preferences');
+        }
+      }
+
 
       // Persist custom instructions to localStorage for immediate recall on next dialog open
       const submittedInstructions = config.customInstructions || '';

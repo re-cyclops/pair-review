@@ -16,7 +16,10 @@ class AnalysisConfigModal {
     this.repoInstructions = '';
     this.lastInstructions = '';
     this.providersLoaded = false;
+    this.providerLoadError = false;
     this.skipLevel3 = false;
+    this.invalidSavedPreference = false;
+    this.hasSavedPreference = false;
 
     // Character limit constants (must match backend limit)
     this.CHAR_LIMIT = 5000;
@@ -70,53 +73,75 @@ class AnalysisConfigModal {
    * @param {boolean} forceRefresh - Force reload even if already loaded
    * @returns {Promise<void>}
    */
-  async loadProviders(forceRefresh = false) {
-    if (this.providersLoaded && !forceRefresh) return;
+  async loadProviders(forceRefresh = false, providersInfo = null) {
+    if (this.providersLoaded && !forceRefresh && providersInfo === null) return;
 
     try {
-      const response = await fetch('/api/providers');
-      if (!response.ok) {
-        throw new Error('Failed to fetch providers');
+      let data;
+      if (Array.isArray(providersInfo)) {
+        data = { providers: providersInfo, checkInProgress: false };
+      } else {
+        const response = await fetch('/api/providers');
+        if (!response.ok) throw new Error();
+        data = await response.json();
       }
+      if (!Array.isArray(data.providers)) throw new Error();
 
-      const data = await response.json();
-
-      // Track availability check status
-      this.availabilityCheckInProgress = data.checkInProgress || false;
-
-      // Convert array to object keyed by provider id
-      // Filter out providers with no models configured (e.g., unconfigured OpenCode)
-      this.providers = {};
+      this.availabilityCheckInProgress = Boolean(data.checkInProgress);
+      const loadedProviders = {};
       for (const provider of data.providers) {
-        if (provider.models && provider.models.length > 0) {
-          this.providers[provider.id] = provider;
-        } else {
-          console.warn(`Provider "${provider.name}" has no models configured and will not be available`);
+        if (Array.isArray(provider.models) && provider.models.length > 0) {
+          loadedProviders[provider.id] = provider;
         }
       }
 
-      this.providersLoaded = true;
+      const hasAvailableProvider = Object.values(loadedProviders).some(provider =>
+        !provider.availability || provider.availability.available);
+      if (!hasAvailableProvider) throw new Error();
+      const hadProviderLoadError = this.providerLoadError;
+      this.providers = loadedProviders;
 
-      // Update models for current provider
-      if (this.providers[this.selectedProvider]) {
-        this.models = this.providers[this.selectedProvider].models;
-      }
-    } catch (error) {
-      console.error('Error loading providers:', error);
-      // Fall back to minimal defaults if API fails
-      this.providers = {
-        claude: {
-          id: 'claude',
-          name: 'Claude',
-          models: [
-            { id: 'opus', name: 'Opus 4.6 High', tier: 'thorough', default: true }
-          ],
-          defaultModel: 'opus'
-        }
-      };
-      this.models = this.providers.claude.models;
       this.providersLoaded = true;
+      this.providerLoadError = false;
+      this.models = this.providers[this.selectedProvider]?.models || [];
+      if (hadProviderLoadError) this._updatePreferenceNotice();
+    } catch {
+      console.error('Could not load the provider/model catalog');
+      this.providersLoaded = false;
+      this.providerLoadError = true;
+      throw new Error('The provider/model catalog is unavailable. Try again after checking provider configuration.');
     }
+  }
+
+  _updatePreferenceNotice() {
+    const notice = this.modal.querySelector('#analysis-preference-notice');
+    if (!notice) return;
+
+    if (this.providerLoadError) {
+      notice.textContent = 'Provider/model catalog is unavailable. Check provider configuration and retry before starting analysis.';
+      notice.setAttribute('role', 'alert');
+    } else if (this.invalidSavedPreference) {
+      notice.textContent = 'The saved provider/model is no longer available. Choose a current provider or model before starting analysis.';
+      notice.setAttribute('role', 'alert');
+    } else if (this.hasSavedPreference) {
+      notice.textContent = 'Using the saved review preference, which takes priority over repository defaults.';
+      notice.setAttribute('role', 'status');
+    } else {
+      notice.hidden = true;
+      notice.style.display = 'none';
+      notice.textContent = '';
+      return;
+    }
+
+    notice.hidden = false;
+    notice.style.display = 'flex';
+  }
+
+  _showProviderCatalogError() {
+    this.providerLoadError = true;
+    this._updatePreferenceNotice();
+    const submitBtn = this.modal.querySelector('[data-action="submit"]');
+    if (submitBtn) submitBtn.disabled = true;
   }
 
   /**
@@ -241,6 +266,7 @@ class AnalysisConfigModal {
             <h4 class="section-title">
               Select Model
             </h4>
+            <div id="analysis-preference-notice" class="skip-level3-info" role="status" hidden style="display: none;"></div>
             <div class="model-cards" id="model-cards-container">
               <!-- Model cards rendered dynamically -->
             </div>
@@ -511,7 +537,10 @@ class AnalysisConfigModal {
 
     // Re-attach event listeners
     container.querySelectorAll('.provider-btn').forEach(btn => {
-      btn.addEventListener('click', () => this.selectProvider(btn.dataset.provider));
+      btn.addEventListener('click', () => {
+        this._clearSavedPreferenceNotice();
+        this.selectProvider(btn.dataset.provider);
+      });
     });
     if (restoreFocus) container.querySelector('.provider-btn.selected')?.focus();
   }
@@ -542,10 +571,25 @@ class AnalysisConfigModal {
 
     // Attach event listeners
     container.querySelectorAll('.model-card').forEach(card => {
-      card.addEventListener('click', () => this.selectModel(card.dataset.model));
+      card.addEventListener('click', () => {
+        this._clearSavedPreferenceNotice();
+        this.selectModel(card.dataset.model);
+      });
     });
   }
 
+  _clearSavedPreferenceNotice() {
+    this.invalidSavedPreference = false;
+    this.hasSavedPreference = false;
+    const notice = this.modal.querySelector('#analysis-preference-notice');
+    if (notice) {
+      notice.hidden = true;
+      notice.style.display = 'none';
+      notice.textContent = '';
+    }
+    const textarea = this.modal.querySelector('#custom-instructions');
+    this.updateCharacterCount(textarea?.value?.length || 0);
+  }
   /**
    * Select a provider and update model cards
    */
@@ -739,9 +783,14 @@ class AnalysisConfigModal {
 
     // Enable/disable submit button
     if (submitBtn) {
-      submitBtn.disabled = isOverLimit;
+      const requiresModelChoice = this.providerLoadError || (this.invalidSavedPreference && this.activeTab === 'single');
+      submitBtn.disabled = isOverLimit || requiresModelChoice;
       if (isOverLimit) {
         submitBtn.title = 'Custom instructions exceed 5,000 character limit';
+      } else if (this.providerLoadError) {
+        submitBtn.title = 'Provider/model catalog unavailable; check provider configuration and retry';
+      } else if (requiresModelChoice) {
+        submitBtn.title = 'Choose a currently available provider or model before starting analysis';
       } else {
         submitBtn.title = 'Start Analysis (Cmd/Ctrl+Enter)';
       }
@@ -775,6 +824,7 @@ class AnalysisConfigModal {
    * Handle form submission
    */
   async handleSubmit() {
+    if (this.providerLoadError || (this.invalidSavedPreference && this.activeTab === 'single')) return;
     if (this.activeTab === 'council') {
       // Voice-centric council tab
       if (!this.councilTab || !this.councilTab.validate()) return;
@@ -903,10 +953,12 @@ class AnalysisConfigModal {
    */
   async _initializeContent(options) {
     try {
-      await this.loadProviders();
-    } catch (error) {
-      console.error('Error loading providers:', error);
+      await this.loadProviders(true, options.providersInfo);
+    } catch {
+      // The catalog error is surfaced in the dialog and disables submission.
     }
+    this.invalidSavedPreference = Boolean(options.savedPreferenceInvalid);
+    this.hasSavedPreference = Boolean(options.hasSavedPreference);
 
     // Render provider buttons and model cards now that we have provider data
     this.renderProviderButtons();
@@ -990,6 +1042,7 @@ class AnalysisConfigModal {
         this.updateCharacterCount(0);
       }
     }
+    this._updatePreferenceNotice();
 
     // Restore exclude-previous checkbox state from localStorage
     this._restoreExcludePrevious(options);
@@ -1166,6 +1219,8 @@ class AnalysisConfigModal {
         dirtyHintContainer.style.display = 'none';
       }
     }
+    const customInstructions = this.modal.querySelector('#custom-instructions')?.value || '';
+    this.updateCharacterCount(customInstructions.length);
 
     // Re-evaluate exclude-previous section based on new tab context
     this._updateExcludePreviousState();
@@ -1227,7 +1282,12 @@ class AnalysisConfigModal {
     } else {
       const overlay = this.modal.querySelector('.config-loading-overlay');
       if (overlay) overlay.style.display = 'none';
-      if (submitBtn) submitBtn.disabled = false;
+      if (submitBtn) {
+        const textarea = this.modal.querySelector('#custom-instructions');
+        submitBtn.disabled = this.providerLoadError
+          || (textarea?.value?.length || 0) > this.CHAR_LIMIT
+          || (this.invalidSavedPreference && this.activeTab === 'single');
+      }
     }
   }
 
@@ -1257,6 +1317,15 @@ class AnalysisConfigModal {
       if (this.isVisible) return;
 
       this.modal.style.display = 'none';
+      this.invalidSavedPreference = false;
+      this.hasSavedPreference = false;
+      this.providerLoadError = false;
+      const preferenceNotice = this.modal.querySelector('#analysis-preference-notice');
+      if (preferenceNotice) {
+        preferenceNotice.hidden = true;
+        preferenceNotice.style.display = 'none';
+        preferenceNotice.textContent = '';
+      }
       // Reset state
       this.selectedPresets.clear();
       this.modal.querySelectorAll('.preset-chip').forEach(chip => {

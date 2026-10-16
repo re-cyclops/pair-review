@@ -46,6 +46,16 @@ const logger = require('../utils/logger');
 const { runReceipt, serverReceipt } = require('../utils/review-protocol');
 
 const router = express.Router();
+const PUBLIC_MODEL_FIELDS = [
+  'id', 'name', 'tier', 'tagline', 'description', 'badge', 'badgeClass',
+  'icon', 'default', 'aliases', 'supports_chat'
+];
+
+function publicProviderModel(model) {
+  return Object.fromEntries(PUBLIC_MODEL_FIELDS
+    .filter(field => model[field] !== undefined)
+    .map(field => [field, model[field]]));
+}
 
 router.get('/api/protocol', async (req, res) => {
   try {
@@ -489,7 +499,8 @@ router.get('/api/pr/:owner/:repo/:number/review-settings', async (req, res) => {
     if (!review) {
       return res.json({
         custom_instructions: null,
-        last_council_id: null
+        last_council_id: null,
+        analysis_preferences: null
       });
     }
 
@@ -504,9 +515,18 @@ router.get('/api/pr/:owner/:repo/:number/review-settings', async (req, res) => {
       last_council_id = lastCouncilRun.model;
     }
 
+    const storedPreferences = review.review_data?.analysis_preferences;
+    const analysis_preferences = storedPreferences && typeof storedPreferences === 'object' && !Array.isArray(storedPreferences)
+      ? {
+          provider: typeof storedPreferences.provider === 'string' ? storedPreferences.provider : null,
+          model: typeof storedPreferences.model === 'string' ? storedPreferences.model : null,
+          customInstructions: typeof storedPreferences.customInstructions === 'string' ? storedPreferences.customInstructions : ''
+        }
+      : null;
     res.json({
       custom_instructions: review.custom_instructions || null,
-      last_council_id
+      last_council_id,
+      analysis_preferences
     });
 
   } catch (error) {
@@ -514,6 +534,63 @@ router.get('/api/pr/:owner/:repo/:number/review-settings', async (req, res) => {
     res.status(500).json({
       error: 'Failed to fetch review settings'
     });
+  }
+});
+
+/**
+ * Save prepared PR analysis preferences without starting an analysis.
+ * Preferences are namespaced in review_data so findings, comments, and
+ * custom_instructions remain independent.
+ */
+router.post('/api/pr/:owner/:repo/:number/analysis-preferences', async (req, res) => {
+  try {
+    const { owner, repo, number } = req.params;
+    const prNumber = parseInt(number, 10);
+    const body = req.body;
+
+    if (isNaN(prNumber) || prNumber <= 0) {
+      return res.status(400).json({ error: 'Invalid pull request number' });
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body)
+      || typeof body.provider !== 'string' || !body.provider
+      || typeof body.model !== 'string' || !body.model
+      || !Object.prototype.hasOwnProperty.call(body, 'customInstructions')
+      || (body.customInstructions !== null && typeof body.customInstructions !== 'string')) {
+      return res.status(400).json({ error: 'provider, model, and customInstructions are required' });
+    }
+
+    const customInstructions = body.customInstructions || '';
+    if (customInstructions.length > 5000) {
+      return res.status(400).json({ error: 'Custom instructions exceed maximum length of 5000 characters' });
+    }
+
+    const provider = getAllProvidersInfo().find(candidate => candidate.id === body.provider);
+    if (!provider) {
+      return res.status(400).json({ error: 'Unknown provider selection' });
+    }
+    if (!provider.models.some(candidate => candidate.id === body.model)) {
+      return res.status(400).json({ error: 'Unknown model selection for provider' });
+    }
+
+    const repository = normalizeRepository(owner, repo);
+    const reviewRepo = new ReviewRepository(req.app.get('db'));
+    const review = await reviewRepo.getReviewByPR(prNumber, repository);
+    if (!review) {
+      return res.status(404).json({ error: 'Review not found. Complete PR setup first.' });
+    }
+
+    const reviewData = review.review_data && typeof review.review_data === 'object' && !Array.isArray(review.review_data)
+      ? review.review_data
+      : {};
+    const analysis_preferences = { provider: body.provider, model: body.model, customInstructions };
+    await reviewRepo.updateReview(review.id, {
+      reviewData: { ...reviewData, analysis_preferences }
+    });
+
+    res.json({ analysis_preferences });
+  } catch {
+    logger.error('Failed to save analysis preferences');
+    res.status(500).json({ error: 'Failed to save analysis preferences' });
   }
 });
 
@@ -529,6 +606,7 @@ router.get('/api/providers', (req, res) => {
     // Enrich providers with availability status
     const enrichedProviders = providers.map(provider => ({
       ...provider,
+      models: provider.models.map(publicProviderModel),
       availability: availability[provider.id] || null
     }));
 
