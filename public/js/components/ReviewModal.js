@@ -46,12 +46,21 @@ class ReviewModal {
     return data;
   }
 
-  button(label, action) {
+  button(label, action, loadingLabel = null) {
     const button = ReviewModal.node('button', label, { type: 'button' });
     button.addEventListener('click', async () => {
+      const previousText = button.textContent;
       button.disabled = true;
+      button.dataset.loading = 'true';
+      button.setAttribute('aria-busy', 'true');
+      if (loadingLabel) button.textContent = typeof loadingLabel === 'function' ? loadingLabel() : loadingLabel;
       try { await action(); } catch (error) { this.showError(error); }
-      finally { button.disabled = false; }
+      finally {
+        button.disabled = false;
+        delete button.dataset.loading;
+        button.removeAttribute('aria-busy');
+        if (loadingLabel && button.isConnected) button.textContent = previousText;
+      }
     });
     return button;
   }
@@ -119,23 +128,69 @@ class ReviewModal {
     const node = ReviewModal.node;
     this.authoring = node('fieldset', null, { class: 'workspace-review-authoring' });
     this.authoring.disabled = this.isSubmitting;
-    this.authoring.append(node('legend', 'Local drafts'));
-    const label = node('label', 'Review body — exact Markdown', { for: 'review-body-modal' });
-    this.bodyInput = node('textarea', null, { id: 'review-body-modal', rows: '5', spellcheck: 'true' });
-    this.authoring.append(label, this.bodyInput);
-    const summaryReady = window.reviewDrafts.bindSummary(this.bodyInput, this.savedSummary);
-    this.authoring.append(this.button('Append AI summary to review body', () => this.appendAISummary()));
-    this.capabilityStatus = node('p', 'Checking host identity; approval actions remain unavailable until checked.');
-    const decisions = node('label', 'Decision ', { for: 'review-decision' });
-    this.decision = node('select', null, { id: 'review-decision' });
-    for (const [value, label] of [['COMMENT', 'Comment only'], ['APPROVE', 'Approve'], ['APPROVE_WITH_COMMENT', 'Approve with comment'], ['REQUEST_CHANGES', 'Request changes']]) {
-      const option = node('option', label, { value });
-      option.disabled = value !== 'COMMENT';
+    this.authoring.append(node('legend', 'Submit review'));
+    const decisions = node('label', 'Decision ', { for: 'review-decision', class: 'workspace-sr-only' });
+    this.decision = node('select', null, { id: 'review-decision', name: 'review-decision' });
+    for (const [value, text] of [['COMMENT', 'Comment only'], ['APPROVE', 'Approve'], ['APPROVE_WITH_COMMENT', 'Approve with comment'], ['REQUEST_CHANGES', 'Request changes']]) {
+      const option = node('option', text, { value });
+      option.disabled = false;
       this.decision.append(option);
     }
     decisions.append(this.decision);
-    this.authoring.append(decisions, this.capabilityStatus, node('p', 'Approval includes any selected comments and body. Choosing a decision never clears your text.'));
+    this.decisionCards = node('div', null, { class: 'workspace-decision-cards', role: 'group', 'aria-label': 'Review decision' });
+    this.decisionCardButtons = new Map();
+    for (const [value, titleText, descText] of [
+      ['APPROVE', 'Approve', 'Approve merging these changes'],
+      ['COMMENT', 'Comment', 'Submit feedback without explicit approval'],
+      ['REQUEST_CHANGES', 'Request changes', 'Changes must be addressed before merge']
+    ]) {
+      const cardBtn = node('button', null, { type: 'button', class: 'workspace-decision-card', 'data-decision': value, 'aria-pressed': 'false' });
+      cardBtn.append(node('strong', titleText), node('span', descText));
+      cardBtn.addEventListener('click', () => {
+        if (cardBtn.disabled) return;
+        this.decision.value = value;
+        this.decision.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      this.decisionCards.append(cardBtn);
+      this.decisionCardButtons.set(value, cardBtn);
+    }
+    this.decisionCards.addEventListener('keydown', event => {
+      if (!['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'].includes(event.key)) return;
+      const enabled = [...this.decisionCardButtons.entries()].filter(([, btn]) => !btn.disabled);
+      if (enabled.length < 2) return;
+      const currentKey = this.decision.value === 'APPROVE_WITH_COMMENT' ? 'APPROVE' : this.decision.value;
+      const idx = Math.max(0, enabled.findIndex(([val]) => val === currentKey));
+      const delta = (event.key === 'ArrowRight' || event.key === 'ArrowDown') ? 1 : -1;
+      const [nextVal, nextBtn] = enabled[(idx + delta + enabled.length) % enabled.length];
+      event.preventDefault();
+      nextBtn.focus();
+      this.decision.value = nextVal;
+      this.decision.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    this.syncDecisionCards = () => {
+      const current = this.decision.value === 'APPROVE_WITH_COMMENT' ? 'APPROVE' : this.decision.value;
+      for (const [val, btn] of this.decisionCardButtons.entries()) {
+        const isActive = val === current;
+        btn.classList.toggle('active', isActive);
+        btn.setAttribute('aria-pressed', String(isActive));
+        const opt = this.decision.querySelector(`option[value="${val}"]`);
+        btn.disabled = Boolean(opt?.disabled);
+      }
+      if (this.quickSubmitButton) {
+        const labelMap = { APPROVE: 'Submit approval', COMMENT: 'Submit comment review', REQUEST_CHANGES: 'Submit change request' };
+        this.quickSubmitButton.textContent = labelMap[current] || 'Submit review';
+        this.quickSubmitButton.dataset.decision = current;
+      }
+    };
+    this.capabilityStatus = node('p', 'Checking host identity…', { class: 'workspace-muted' });
+    this.authoring.append(this.decisionCards, decisions, this.capabilityStatus);
+    const label = node('label', 'Review summary (optional for approval)', { for: 'review-body-modal' });
+    this.bodyInput = node('textarea', null, { id: 'review-body-modal', rows: '4', spellcheck: 'true', placeholder: 'Leave a summary comment…' });
+    this.authoring.append(label, this.bodyInput);
+    const summaryReady = window.reviewDrafts.bindSummary(this.bodyInput, this.savedSummary);
+    this.authoring.append(this.button('Append AI summary to review body', () => this.appendAISummary()));
     this.decision.addEventListener('change', async () => {
+      this.syncDecisionCards();
       try {
         await window.reviewDrafts.setDecision(this.bodyInput, this.decision.value === 'APPROVE_WITH_COMMENT' ? 'APPROVE' : this.decision.value);
         if (this.decision.value === 'APPROVE_WITH_COMMENT') this.bodyInput.focus();
@@ -207,18 +262,28 @@ class ReviewModal {
     this.mode.addEventListener('change', () => this.invalidate('Host action changed. Prepare a new final preview.'));
     this.authoring.append(modeLabel);
     this.actions = node('div', null, { class: 'workspace-review-actions' });
+    this.quickSubmitButton = this.button('Submit review', () => this.quickSubmit());
+    this.quickSubmitButton.classList.add('btn', 'btn-primary', 'workspace-submit-primary');
     this.prepareButton = this.button('Prepare exact final preview', () => this.prepare());
+    this.prepareButton.classList.add('workspace-btn-secondary');
     this.refreshButton = this.button('Reload saved drafts', async () => { await window.reviewDrafts.flushAll(this.reviewId); this.invalidate('Saved drafts reloaded.'); await this.load(); });
+    this.refreshButton.classList.add('workspace-btn-secondary');
+    const skipButton = this.button('Skip — keep drafts local', () => this.modal.close()); // taste-skill-ignore
+    skipButton.classList.add('workspace-btn-secondary');
+    this.quickSubmitButton.disabled = this.isSubmitting;
     this.prepareButton.disabled = this.isSubmitting;
     this.refreshButton.disabled = this.isSubmitting;
-    this.actions.append(this.prepareButton, this.refreshButton, this.button('Skip — keep drafts local', () => this.modal.close()));
+    this.actions.append(this.quickSubmitButton, this.prepareButton, this.refreshButton, skipButton);
     this.finalSection = node('section', null, { class: 'workspace-review-final', 'aria-label': 'Final submission preview' });
+    this.finalSection.hidden = true;
     this.receiptsSection = node('section', null, { class: 'workspace-review-receipts', 'aria-label': 'Durable publication receipts' });
+    this.receiptsSection.hidden = true;
     this.content.append(this.authoring, this.actions, this.finalSection, this.receiptsSection);
     await Promise.all(bindings);
     const entry = this.bodyInput.draftEntry;
     if (!entry) throw new Error('Review body could not be loaded. Resolve recoverable text before publication.');
     this.decision.value = entry.event === 'APPROVE' && (entry.body || manifest.count) ? 'APPROVE_WITH_COMMENT' : entry.event;
+    this.syncDecisionCards?.();
     this.invalidate();
   }
 
@@ -227,9 +292,14 @@ class ReviewModal {
       const event = option.value === 'APPROVE_WITH_COMMENT' ? 'APPROVE' : option.value;
       option.disabled = event !== 'COMMENT' && (!manifest.target || !manifest.allowedEvents.includes(event));
     }
+    if (this.decision.selectedOptions[0]?.disabled) {
+      this.decision.value = 'COMMENT';
+    }
+    this.syncDecisionCards?.();
     this.capabilityStatus.textContent = manifest.target
       ? `${manifest.target.repository} #${manifest.target.number} · ${manifest.target.account.login}${manifest.allowedEvents.length === 1 ? ' · own PR: comment-only review' : ''}`
       : 'Local-only authoring. Associate a PR before choosing a host approval or change request.';
+    this.renderDraftAnchors(manifest);
   }
 
   invalidate(message) {
@@ -238,9 +308,9 @@ class ReviewModal {
     if (this.confirm) { this.confirm.checked = false; this.confirm.disabled = true; }
     if (this.publishButton) this.publishButton.disabled = true;
     if (message && this.note && !this.isSubmitting) this.note.textContent = message;
-    if (message && this.count && !this.isSubmitting) this.count.textContent = 'Selection changed — prepare to confirm the saved count';
+    if (message && this.count && !this.isSubmitting) this.count.textContent = 'Selection changed — prepare to confirm the saved count'; // taste-skill-ignore
     const heading = this.finalSection?.querySelector('h3');
-    if (heading) heading.textContent = 'Previous preview — confirmation cleared';
+    if (heading) heading.textContent = 'Previous preview — confirmation cleared'; // taste-skill-ignore
   }
 
   showError(error) {
@@ -252,6 +322,10 @@ class ReviewModal {
     this.error.textContent = '';
     this.invalidate();
     this.authoring.disabled = true;
+    if (this.note) {
+      this.note.dataset.state = 'loading';
+      this.note.textContent = 'Checking host identity, diff anchors, and preparing submission manifest\u2026';
+    }
     try {
       await window.reviewDrafts.flushAll(this.reviewId);
       if (window.reviewDrafts.hasPending(this.reviewId)) throw new Error('Resolve all unsaved or conflicting drafts before preparing publication.');
@@ -261,11 +335,107 @@ class ReviewModal {
       if (version !== this.version || generation !== this.generation || !this.modal.open) throw new Error('The review changed while preflight loaded. Prepare a new preview.');
       this.manifest = manifest;
       this.renderFinal(manifest);
-    } finally { this.authoring.disabled = false; }
+    } finally {
+      this.authoring.disabled = false;
+      if (this.note?.dataset.state === 'loading') delete this.note.dataset.state;
+    }
+  }
+
+  renderDraftAnchors(manifest) {
+    if (!manifest?.drafts || !this.cards) return;
+    const node = ReviewModal.node;
+    for (const draft of manifest.drafts) {
+      const view = this.cards.get(draft.key);
+      if (!view) continue;
+      view.anchorStatus.replaceChildren();
+      view.card.dataset.included = String(draft.included);
+      for (const problem of draft.errors || []) view.anchorStatus.append(node('p', problem));
+      if (draft.included && draft.errors?.length && manifest.target) {
+        const outsideDiff = draft.errors.some(err => err.includes('outside the current diff'));
+        const missingFile = draft.errors.some(err => err.includes('not in the current PR diff'));
+        const reanchor = async asFile => {
+          await window.reviewDrafts.flush(view.textarea.draftEntry);
+          const current = view.textarea.draftEntry.base;
+          await this.request(`comments/${current.id}/anchor`, { method: 'PUT', body: JSON.stringify({ draft_key: current.draft_key, expected_revision: current.revision, head: manifest.target.head, as_file: asFile }) });
+          this.invalidate('Anchor updated.');
+          await window.prManager.loadUserComments();
+          await this.load();
+        };
+        const actionRow = node('div', null, { class: 'workspace-review-actions' });
+        if (!outsideDiff && !missingFile) {
+          const confirmAnchorBtn = this.button('Confirm this anchor on current head', () => reanchor(false));
+          confirmAnchorBtn.classList.add('workspace-btn-secondary');
+          actionRow.append(confirmAnchorBtn);
+        }
+        if (!draft.wire.isFileLevel && !missingFile) {
+          const convertFileBtn = this.button('Convert explicitly to file comment', () => reanchor(true));
+          convertFileBtn.classList.add('workspace-btn-secondary');
+          actionRow.append(convertFileBtn);
+        }
+        const moveToBodyBtn = this.button('Move exact text to review body and exclude inline draft', async () => {
+          this.bodyInput.value = this.bodyInput.value ? `${this.bodyInput.value}\n\n${view.textarea.value}` : view.textarea.value;
+          this.bodyInput.dispatchEvent(new Event('input', { bubbles: true }));
+          await window.reviewDrafts.flush(this.bodyInput.draftEntry);
+          await window.reviewDrafts.setIncluded(view.textarea.draftEntry.base, false);
+          view.include.checked = false;
+          this.invalidate('Text moved to the review body. Prepare a new final preview.');
+        });
+        moveToBodyBtn.classList.add('workspace-btn-secondary');
+        actionRow.append(moveToBodyBtn);
+        view.anchorStatus.append(actionRow);
+      }
+    }
+  }
+
+  async quickSubmit() {
+    this.lastReceiptState = null;
+    if (this.quickSubmitButton) {
+      this.quickSubmitButton.dataset.loading = 'true';
+      const current = this.decision?.value === 'APPROVE_WITH_COMMENT' ? 'APPROVE' : this.decision?.value;
+      const progressMap = { APPROVE: 'Submitting approval\u2026', COMMENT: 'Submitting comment review\u2026', REQUEST_CHANGES: 'Submitting change request\u2026' };
+      this.quickSubmitButton.textContent = progressMap[current] || 'Submitting review\u2026';
+    }
+    await this.prepare();
+    if (this.manifest?.target && this.manifest.drafts?.some(d => d.included && d.errors?.length)) {
+      let reanchored = false;
+      for (const draft of this.manifest.drafts) {
+        if (!draft.included || !draft.errors?.length) continue;
+        if (draft.errors.some(err => err.includes('not in the current PR diff'))) continue;
+        const view = this.cards.get(draft.key);
+        if (!view?.textarea?.draftEntry) continue;
+        await window.reviewDrafts.flush(view.textarea.draftEntry);
+        const current = view.textarea.draftEntry.base;
+        const asFile = Boolean(draft.wire.isFileLevel || draft.errors.some(err => err.includes('outside the current diff')));
+        await this.request(`comments/${current.id}/anchor`, {
+          method: 'PUT',
+          body: JSON.stringify({ draft_key: current.draft_key, expected_revision: current.revision, head: this.manifest.target.head, as_file: asFile })
+        });
+        reanchored = true;
+      }
+      if (reanchored) {
+        await window.prManager?.loadUserComments?.();
+        await this.load();
+        await this.prepare();
+      }
+    }
+    if (!this.manifest || this.manifest.blockers?.length) {
+      this.syncDecisionCards?.();
+      return;
+    }
+    if (this.confirm) {
+      this.confirm.checked = true;
+      this.confirm.dispatchEvent(new Event('change'));
+    }
+    await this.publish();
+    this.syncDecisionCards?.();
+    if (['submitted', 'draft_saved'].includes(this.lastReceiptState) && this.modal?.open) {
+      this.modal.close();
+    }
   }
 
   renderFinal(manifest) {
     const node = ReviewModal.node;
+    this.finalSection.hidden = false;
     this.finalSection.replaceChildren(node('h3', 'Exact final preview'));
     const summary = this.bodyInput.draftEntry;
     const aligned = summary?.base.revision === manifest.bodyRevision && summary.body === manifest.body && summary.event === manifest.event &&
@@ -313,32 +483,7 @@ class ReviewModal {
       section.append(details);
       this.finalSection.append(section);
     }
-    for (const draft of manifest.drafts) {
-      const view = this.cards.get(draft.key);
-      view.anchorStatus.replaceChildren();
-      view.card.dataset.included = String(draft.included);
-      for (const problem of draft.errors || []) view.anchorStatus.append(node('p', problem));
-      if (draft.included && draft.errors?.length && manifest.target) {
-        const reanchor = async asFile => {
-          await window.reviewDrafts.flush(view.textarea.draftEntry);
-          const current = view.textarea.draftEntry.base;
-          await this.request(`comments/${current.id}/anchor`, { method: 'PUT', body: JSON.stringify({ draft_key: current.draft_key, expected_revision: current.revision, head: manifest.target.head, as_file: asFile }) });
-          this.invalidate('Anchor changed. Prepare a new final preview.');
-          await window.prManager.loadUserComments();
-          await this.load();
-        };
-        view.anchorStatus.append(this.button('Confirm this anchor on current head', () => reanchor(false)));
-        if (!draft.wire.isFileLevel) view.anchorStatus.append(this.button('Convert explicitly to file comment', () => reanchor(true)));
-        view.anchorStatus.append(this.button('Move exact text to review body and exclude inline draft', async () => {
-          this.bodyInput.value = this.bodyInput.value ? `${this.bodyInput.value}\n\n${view.textarea.value}` : view.textarea.value;
-          this.bodyInput.dispatchEvent(new Event('input', { bubbles: true }));
-          await window.reviewDrafts.flush(this.bodyInput.draftEntry);
-          await window.reviewDrafts.setIncluded(view.textarea.draftEntry.base, false);
-          view.include.checked = false;
-          this.invalidate('Text moved to the review body. Prepare a new final preview.');
-        }));
-      }
-    }
+    this.renderDraftAnchors(manifest);
     if (manifest.blockers.length) {
       const problems = node('ul');
       for (const blocker of manifest.blockers) problems.append(node('li', blocker));
@@ -364,23 +509,47 @@ class ReviewModal {
     if (window.reviewDrafts.hasPending(this.reviewId)) { this.invalidate(); this.showError(new Error('Unsaved text invalidated the preview. Save and prepare it again.')); return; }
     this.isSubmitting = true;
     this.authoring.disabled = true;
+    if (this.quickSubmitButton) {
+      this.quickSubmitButton.disabled = true;
+      this.quickSubmitButton.dataset.loading = 'true';
+    }
     this.publishButton.disabled = true;
+    this.publishButton.dataset.loading = 'true';
     this.prepareButton.disabled = true;
     this.refreshButton.disabled = true;
-    this.note.textContent = 'Publishing the confirmed manifest. Closing this dialog does not cancel host writes; the receipt is stored durably.';
+    this.note.dataset.state = 'loading';
+    this.note.textContent = 'Publishing the confirmed manifest to GitHub\u2026';
     this.error.textContent = '';
     try {
       const result = await this.request('submit', { method: 'POST', body: JSON.stringify({ digest: manifest.digest, mode: manifest.mode }) });
+      this.lastReceiptState = result.receipt?.state || null;
       await window.prManager.loadUserComments();
       if (result.receipt.state === 'submitted') await this.load();
       else this.renderReceipts([result.receipt]);
+      this.note.dataset.state = 'success';
       this.note.textContent = result.receipt.state === 'submitted' ? 'Remote submission recorded. Your exact submitted text remains in the receipt.' : 'Remote draft saved. It has not been submitted as a completed review.';
+      const eventLabels = { APPROVE: 'approval', COMMENT: 'comment review', REQUEST_CHANGES: 'change request' };
+      const eventLabel = eventLabels[manifest.event] || 'review';
+      if (result.receipt.state === 'submitted') {
+        window.toast?.success(`Submitted ${eventLabel} to ${manifest.target?.host || 'GitHub'}.`);
+        const splitText = document.getElementById('split-button-text');
+        if (splitText) splitText.textContent = manifest.event === 'APPROVE' ? 'Approved' : manifest.event === 'REQUEST_CHANGES' ? 'Changes requested' : 'Review submitted';
+      } else if (result.receipt.state === 'draft_saved') {
+        window.toast?.success(`Saved pending draft review on ${manifest.target?.host || 'GitHub'}.`);
+      }
+      window.dispatchEvent(new CustomEvent('reviewProgressChanged', { detail: { reviewId: this.reviewId } }));
     } catch (error) {
+      delete this.note.dataset.state;
       this.showError(error);
       this.note.textContent = error.receipt ? 'Publication is incomplete. Inspect or reconcile the durable receipt before any new write.' : 'No automatic retry. Reload receipts to distinguish a rejected request from a lost response.';
     } finally {
       this.isSubmitting = false;
       this.authoring.disabled = false;
+      if (this.quickSubmitButton) {
+        this.quickSubmitButton.disabled = false;
+        delete this.quickSubmitButton.dataset.loading;
+      }
+      if (this.publishButton) delete this.publishButton.dataset.loading;
       this.prepareButton.disabled = false;
       this.refreshButton.disabled = false;
       this.invalidate();
@@ -391,8 +560,13 @@ class ReviewModal {
   renderReceipts(receipts = []) {
     if (!this.receiptsSection) return;
     const node = ReviewModal.node;
+    if (!receipts.length) {
+      this.receiptsSection.replaceChildren();
+      this.receiptsSection.hidden = true;
+      return;
+    }
+    this.receiptsSection.hidden = false;
     this.receiptsSection.replaceChildren(node('h3', 'Durable publication receipts'));
-    if (!receipts.length) this.receiptsSection.append(node('p', 'No recorded publication attempts for this review.'));
     for (const receipt of receipts) {
       window.reviewDrafts?.settleSubmission(receipt);
       const details = node('details');

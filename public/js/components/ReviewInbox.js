@@ -102,11 +102,12 @@
       const heading = element('div', null, { class: 'workspace-inbox-heading' });
       heading.append(element('h1', 'Review inbox'), element('p', 'Decide what needs you. Inspect evidence before opening a review.', { class: 'workspace-muted' }));
       const tools = element('div', null, { class: 'workspace-inbox-tools', role: 'search', 'aria-label': 'Filter loaded reviews' });
-      this.search = element('input', null, { type: 'search', placeholder: 'Repository, author, title or PR number', 'aria-label': 'Filter loaded reviews' });
+      this.search = element('input', null, { type: 'search', name: 'inbox-search', autocomplete: 'off', spellcheck: 'false', placeholder: 'Repository, author, title, or PR number\u2026', 'aria-label': 'Filter loaded reviews' });
       this.view = element('select', null, { 'aria-label': 'Additional review filter' });
-      for (const [id, name] of [['all', 'All states'], ['individual', 'Individual requests'], ['teams', 'Team requests'], ['failed-ci', 'CI needs attention'], ['changed', 'New commits since your review'], ['pr-draft', 'Draft pull requests'], ['pr-ready', 'Non-draft pull requests'], ['running', 'Analysis running'], ['completed', 'Analysis completed'], ['unknown', 'Unknown or stale evidence']]) this.view.append(element('option', name, { value: id }));
+      for (const [id, name] of [['all', 'All states'], ['unapproved', 'Unapproved only'], ['approved', 'Approved by you'], ['ai-unreviewed', 'Not AI reviewed'], ['ai-reviewed', 'AI reviewed'], ['individual', 'Individual requests'], ['teams', 'Team requests'], ['failed-ci', 'CI needs attention'], ['changed', 'New commits since your review'], ['pr-draft', 'Draft pull requests'], ['pr-ready', 'Non-draft pull requests'], ['running', 'Analysis running'], ['completed', 'Analysis completed'], ['unknown', 'Unknown or stale evidence']]) this.view.append(element('option', name, { value: id }));
       this.view.value = localStorage.getItem('pair-review-inbox-filter') || 'all';
       if (!this.view.value) this.view.value = 'all';
+      this.hideApproved = localStorage.getItem('pair-review-hide-approved') === 'true';
       this.repository = element('select', null, { 'aria-label': 'Repository filter' });
       this.author = element('select', null, { 'aria-label': 'Author filter' });
       for (const select of [this.repository, this.author]) select.addEventListener('change', () => this.applyFilters(true));
@@ -127,11 +128,32 @@
       });
       this.sort = element('button', 'Apply next-action order', { type: 'button', title: 'Drafts and personal requests first, then waiting items; oldest activity breaks ties. Background updates stop reordering once you interact.' });
       this.sort.addEventListener('click', () => { this.applyFilters(true); this.sortRows(true); });
+      this.hideApprovedBtn = element('button', this.hideApproved ? 'Showing unapproved only' : 'Hide approved', {
+        type: 'button',
+        class: `workspace-hide-approved-btn${this.hideApproved ? ' active' : ''}`,
+        'aria-pressed': String(this.hideApproved),
+        title: 'Hide pull requests you have already approved'
+      });
+      this.hideApprovedBtn.addEventListener('click', () => {
+        this.hideApproved = !this.hideApproved;
+        localStorage.setItem('pair-review-hide-approved', String(this.hideApproved));
+        this.hideApprovedBtn.classList.toggle('active', this.hideApproved);
+        this.hideApprovedBtn.setAttribute('aria-pressed', String(this.hideApproved));
+        this.hideApprovedBtn.textContent = this.hideApproved ? 'Showing unapproved only' : 'Hide approved';
+        this.applyFilters(true);
+      });
+      this.clearApprovedBtn = element('button', 'Clear approved', {
+        type: 'button',
+        class: 'workspace-clear-approved-btn',
+        hidden: '',
+        title: 'Remove local history for pull requests you have already approved'
+      });
+      this.clearApprovedBtn.addEventListener('click', () => this.clearApprovedReviews());
       this.status = element('p', '', { class: 'workspace-muted', role: 'status', 'aria-live': 'polite' });
       this.filters = element('details', null, { class: 'workspace-filters' });
       this.filterSummary = element('summary', 'Filters and order');
       const options = element('div', null, { class: 'workspace-filter-options' });
-      options.append(this.repository, this.author, this.view, refresh, this.sort);
+      options.append(this.repository, this.author, this.view, this.hideApprovedBtn, this.clearApprovedBtn, refresh, this.sort);
       this.filters.append(this.filterSummary, options);
       const wide = matchMedia('(min-width: 769px)');
       this.filters.open = wide.matches;
@@ -166,15 +188,17 @@
         const host = row.dataset.host || (link ? new URL(link.href).searchParams.get('host') : null);
         const record = { row, repository, number, host, local, title: title.textContent, key: local ? `local:${row.dataset.sessionId}` : `${hostIdentity(host)}:${repository.toLowerCase()}#${number}` };
         const summary = element('div', null, { class: 'workspace-row-state' });
+        record.badge = element('span', '', { class: 'workspace-review-badge', hidden: '' });
         record.approvals = element('button', 'Approvals not fetched', { type: 'button', 'aria-haspopup': 'dialog' });
         record.checks = element('button', 'CI not fetched', { type: 'button', 'aria-haspopup': 'dialog' });
         record.reason = element('span', 'Responsibility not fetched');
-        record.activity = element('span');
+        record.activity = element('button', 'Not AI reviewed', { type: 'button', class: 'workspace-ai-pill', 'aria-haspopup': 'dialog' });
         record.draft = element('span');
         record.next = element('a', 'Inspect next action', { class: 'workspace-next-action', href: local ? `/local/${row.dataset.sessionId}` : link?.href || '#' });
         if (local) { record.approvals.textContent = 'Inspect local review'; record.checks.hidden = true; record.reason.textContent = 'Local only'; }
         for (const button of [record.approvals, record.checks]) button.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); this.inspect(record); });
-        summary.append(record.next, record.approvals, record.checks, record.reason, record.activity, record.draft);
+        record.activity.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); this.showAIHistory(record); });
+        summary.append(record.badge, record.next, record.approvals, record.checks, record.reason, record.activity, record.draft);
         title.append(summary);
         row.tabIndex = 0;
         this.records.set(row, record);
@@ -214,9 +238,10 @@
 
     sortRows(explicit = false) {
       if (!explicit && this.orderLocked) return;
-      const rank = record => hasDraft(this.local(record)) ? 0
-        : record.snapshot?.viewer?.requestedDirectly || record.snapshot?.viewer?.effectiveReview?.state === 'CHANGES_REQUESTED' && record.snapshot.viewer.newRevision ? 1
-          : record.snapshot?.viewer?.requestedViaTeam ? 2 : 3;
+      const rank = record => record.viewerApproved && !this.local(record)?.draftCount ? 4
+        : hasDraft(this.local(record)) ? 0
+          : record.snapshot?.viewer?.requestedDirectly || record.snapshot?.viewer?.effectiveReview?.state === 'CHANGES_REQUESTED' && record.snapshot.viewer.newRevision ? 1
+            : record.snapshot?.viewer?.requestedViaTeam ? 2 : 3;
       for (const tbody of this.root.querySelectorAll('tbody')) {
         const current = [...tbody.children];
         const sorted = current.filter(row => this.records.has(row)).sort((a, b) => {
@@ -321,18 +346,64 @@
       const write = (node, value) => { if (node.textContent !== value) node.textContent = value; };
       const stale = s?.availability === 'stale' || s?.fetchedAt && Date.now() - new Date(s.fetchedAt).getTime() > 120000;
       const partialReviews = s?.approvals?.availability === 'partial';
+      const viewerState = s?.viewer?.effectiveReview?.state
+        || (local?.status === 'submitted' ? (local.submittedEvent === 'APPROVE' ? 'APPROVED' : local.submittedEvent) : null);
+      const viewerApproved = viewerState === 'APPROVED' && !s?.viewer?.newRevision;
+      const viewerChangesRequested = viewerState === 'CHANGES_REQUESTED' && !s?.viewer?.newRevision;
+      record.viewerApproved = viewerApproved;
+      record.row.dataset.viewerApproved = viewerApproved ? 'true' : 'false';
+      if (record.badge) {
+        if (viewerApproved) {
+          record.badge.hidden = false;
+          record.badge.dataset.status = 'approved';
+          write(record.badge, 'Approved by you');
+        } else if (viewerChangesRequested) {
+          record.badge.hidden = false;
+          record.badge.dataset.status = 'changes-requested';
+          write(record.badge, 'Changes requested');
+        } else {
+          record.badge.hidden = true;
+          record.badge.removeAttribute('data-status');
+          write(record.badge, '');
+        }
+      }
       if (s) {
         const approving = s.approvals?.approving?.map(person => person.reviewer?.name || person.reviewer?.login || person.login).filter(Boolean) || [];
-        write(record.approvals, `${stale ? 'Stale: ' : ''}${partialReviews ? 'Review history partial · approvals unknown' : s.approvals?.observedCount == null ? 'Approvals unavailable' : `${s.approvals.observedCount} approved${approving.length ? ` · ${approving.join(', ')}` : ''} · ${s.approvals.requiredCount == null ? 'requirement unknown' : `${s.approvals.requiredCount} required`}`}`);
+        write(record.approvals, `${stale ? 'Stale: ' : ''}${partialReviews ? 'Review history partial · approvals unknown' : s.approvals?.observedCount == null ? 'Approvals unavailable' : `${s.approvals.observedCount} approved${approving.length ? ` · ${approving.join(', ')}` : ''}${s.approvals.requiredCount == null ? '' : ` · ${s.approvals.requiredCount} required`}`}`);
         write(record.checks, `${stale ? 'Stale: ' : ''}${checkLabel(s.checks)}`);
-        record.checks.dataset.tone = !stale && (s.checks?.counts?.failed || s.checks?.counts?.actionRequired) ? 'error' : '';
-        write(record.reason, `${stale ? 'Last observed: ' : ''}${s.viewer?.reason || 'Review responsibility unavailable'}`);
+        record.checks.dataset.tone = !stale && (s.checks?.counts?.failed || s.checks?.counts?.actionRequired) ? 'error' : !stale && s.checks?.counts?.passed && !s.checks?.counts?.pending ? 'good' : '';
+        const reasonText = s.viewer?.reason || 'Review responsibility unavailable';
+        write(record.reason, viewerApproved && reasonText.startsWith('You already approved') ? '' : `${stale ? 'Last observed: ' : ''}${reasonText}`);
         record.checks.title = `Head ${s.headSha || 'unknown'} · fetched ${s.fetchedAt ? new Date(s.fetchedAt).toLocaleString() : 'never'}`;
       }
       const run = this.runs?.filter(run => run.reviewId === local?.id).sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)))[0];
-      write(record.activity, run ? `Analysis ${run.status.replaceAll('_', ' ')}${!run.seenAt && ['completed', 'failed', 'partial', 'cancelled'].includes(run.status) ? ' · unread' : ''}` : '');
-      write(record.draft, hasDraft(local) ? draftLabel(local) : '');
-      write(record.next, hasDraft(local) ? 'Preview saved draft' : record.local ? 'Continue local review'
+      const latestAi = local?.latestAiRun || run || null;
+      const aiRunCount = Math.max(Number(local?.aiRunCount || 0), run ? 1 : 0);
+      const isAiRunning = Boolean(run && ['starting', 'queued', 'running', 'cancellation_requested'].includes(run.status));
+      record.aiReviewed = Boolean(aiRunCount > 0 || (latestAi && latestAi.status === 'completed'));
+      if (isAiRunning) {
+        record.activity.dataset.aiState = 'running';
+        write(record.activity, `AI reviewing \u00B7 ${run.stage || run.status.replaceAll('_', ' ')}`);
+      } else if (latestAi && aiRunCount > 0) {
+        const status = latestAi.status || 'completed';
+        const count = Number(latestAi.totalSuggestions ?? latestAi.suggestionsCount ?? 0);
+        const modelLabel = [latestAi.provider, latestAi.model].filter(Boolean).join('/');
+        const runsLabel = aiRunCount > 1 ? ` \u00B7 ${aiRunCount} runs` : '';
+        if (status === 'completed') {
+          record.activity.dataset.aiState = 'reviewed';
+          write(record.activity, `AI reviewed \u00B7 ${count === 0 ? '0 findings' : `${count} finding${count === 1 ? '' : 's'}`}${modelLabel ? ` \u00B7 ${modelLabel}` : ''}${runsLabel}`);
+        } else {
+          record.activity.dataset.aiState = status === 'failed' ? 'error' : 'reviewed';
+          write(record.activity, `AI ${status.replaceAll('_', ' ')}${modelLabel ? ` \u00B7 ${modelLabel}` : ''}${runsLabel}`);
+        }
+      } else {
+        record.activity.dataset.aiState = 'unreviewed';
+        write(record.activity, 'Not AI reviewed');
+      }
+      const hasActiveDraft = viewerApproved ? Number(local?.draftCount) > 0 : hasDraft(local);
+      write(record.draft, hasActiveDraft ? draftLabel(local) : '');
+      write(record.next, hasActiveDraft ? 'Preview saved draft' : record.local ? 'Continue local review'
+        : viewerApproved ? 'View review'
         : !s || stale ? 'Inspect available evidence' : s.viewer?.self ? 'Inspect your pull request'
           : s.viewer?.requestedDirectly || s.viewer?.effectiveReview?.state === 'CHANGES_REQUESTED' && s.viewer.newRevision ? 'Review requested changes'
             : s.viewer?.effectiveReview?.state === 'CHANGES_REQUESTED' ? 'Check author updates'
@@ -353,9 +424,13 @@
         const unavailable = !record.local && (!s || ['stale', 'unavailable'].includes(s.availability) || s.fetchedAt && Date.now() - new Date(s.fetchedAt).getTime() > 120000);
         const matches = filter => {
           if (filter === 'all') return true;
+          if (filter === 'unapproved') return !record.viewerApproved;
+          if (filter === 'approved') return Boolean(record.viewerApproved);
+          if (filter === 'ai-unreviewed') return !record.aiReviewed;
+          if (filter === 'ai-reviewed') return Boolean(record.aiReviewed);
           if (filter === 'drafts') return local ? hasDraft(local) : null;
           if (filter === 'running') return this.runs?.some(run => run.reviewId === local?.id && ['starting', 'queued', 'running', 'cancellation_requested'].includes(run.status)) ?? null;
-          if (filter === 'completed') return this.runs?.some(run => run.reviewId === local?.id && ['completed', 'partial', 'failed', 'cancelled'].includes(run.status)) ?? null;
+          if (filter === 'completed') return Boolean(record.aiReviewed);
           if (filter === 'changed' && local?.lastReviewedHead) {
             const head = record.local ? local.headSha : !unavailable ? s?.headSha : null;
             return head ? head !== local.lastReviewedHead : null;
@@ -384,7 +459,7 @@
         const secondary = matches(this.view.value);
         const author = record.row.querySelector('.col-author')?.textContent.trim() || s?.author?.login || '';
         const text = `${record.repository} ${record.local ? 'local' : `#${record.number}`} ${record.title} ${author}`.toLowerCase();
-        const hidden = primary === false || secondary === false || !query.every(term => text.includes(term))
+        const hidden = primary === false || secondary === false || (this.hideApproved && record.viewerApproved && this.view.value !== 'approved') || !query.every(term => text.includes(term))
           || !!this.repository.value && record.repository !== this.repository.value || !!this.author.value && author !== this.author.value;
         if (holdMembership && record.row.hidden !== hidden) deferred++;
         else record.row.hidden = hidden;
@@ -398,8 +473,97 @@
       const filterCount = Number(!!this.repository.value) + Number(!!this.author.value) + Number(this.view.value !== 'all');
       this.filterSummary.textContent = `Filters and order${filterCount ? ` · ${filterCount} active` : ''}`;
       window.dispatchEvent(new CustomEvent('workspaceFilterChanged'));
+      const clearableIds = [...this.records.values()]
+        .filter(r => r.viewerApproved && r.row.dataset.reviewId && !(Number(this.local(r)?.draftCount) > 0))
+        .map(r => Number(r.row.dataset.reviewId));
+      if (this.clearApprovedBtn) {
+        this.clearApprovedBtn.hidden = clearableIds.length === 0;
+        this.clearApprovedBtn.textContent = `Clear approved (${clearableIds.length})`;
+      }
     }
 
+
+    async clearApprovedReviews() {
+      const ids = [...this.records.values()]
+        .filter(r => r.viewerApproved && r.row.dataset.reviewId && !(Number(this.local(r)?.draftCount) > 0))
+        .map(r => Number(r.row.dataset.reviewId));
+      if (!ids.length) return;
+      this.clearApprovedBtn.disabled = true;
+      try {
+        const response = await fetch('/api/worktrees/bulk-delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Could not clear approved reviews');
+        for (const record of this.records.values()) {
+          if (ids.includes(Number(record.row.dataset.reviewId))) {
+            record.row.remove();
+          }
+        }
+        this.scan();
+        window.toast?.success(`Cleared ${data.deleted || ids.length} approved review${(data.deleted || ids.length) === 1 ? '' : 's'} from inbox.`);
+      } catch (error) {
+        window.toast?.error(`Clear approved failed: ${error.message}`);
+      } finally {
+        this.clearApprovedBtn.disabled = false;
+      }
+    }
+
+    async showAIHistory(record) {
+      const local = this.local(record);
+      const prUrl = record.local ? `/local/${record.row.dataset.sessionId}` : `/pr/${record.repository.split('/').map(encodeURIComponent).join('/')}/${record.number}${record.host ? `?host=${encodeURIComponent(record.host)}` : ''}`;
+      if (!this.aiHistoryModal) {
+        this.aiHistoryModal = this.workspace.makeDialog('workspace-ai-history-modal', 'AI review history');
+        this.aiHistoryBody = element('div', null, { class: 'workspace-run-list' });
+        this.aiHistoryModal.append(this.aiHistoryBody);
+      }
+      this.aiHistoryModal.querySelector('h2').textContent = `AI review history \u00B7 ${record.repository}${record.local ? '' : ` #${record.number}`}`;
+      this.aiHistoryBody.replaceChildren(element('p', 'Loading historic AI analysis runs\u2026', { class: 'workspace-muted' }));
+      this.workspace.open(this.aiHistoryModal);
+
+      if (!local?.id) {
+        this.aiHistoryBody.replaceChildren(
+          element('p', 'No AI analysis has been run on this pull request yet.'),
+          element('a', 'Open and analyze pull request', { href: `${prUrl}${prUrl.includes('?') ? '&' : '?'}analyze=true`, class: 'workspace-next-action' })
+        );
+        return;
+      }
+
+      try {
+        const response = await fetch(`/api/analyses/runs?reviewId=${local.id}`);
+        const data = await response.json();
+        const runs = data.runs || [];
+        this.aiHistoryBody.replaceChildren();
+        if (!runs.length) {
+          this.aiHistoryBody.append(
+            element('p', 'No AI analysis runs recorded for this review yet.'),
+            element('a', 'Open and analyze pull request', { href: `${prUrl}${prUrl.includes('?') ? '&' : '?'}analyze=true`, class: 'workspace-next-action' })
+          );
+          return;
+        }
+        runs.forEach((run, idx) => {
+          const card = element('article', null, { class: 'workspace-run', 'data-state': run.status || 'completed' });
+          const count = Number(run.total_suggestions || 0);
+          const header = element('p');
+          const badge = element('strong', idx === 0 ? `Latest (#${runs.length})` : `Run #${runs.length - idx}`);
+          const meta = element('span', ` \u00B7 ${[run.provider, run.model].filter(Boolean).join('/')} \u00B7 ${count === 0 ? '0 findings' : `${count} finding${count === 1 ? '' : 's'}`} \u00B7 ${run.completed_at || run.started_at || ''}${run.head_sha ? ` \u00B7 @${String(run.head_sha).slice(0, 7)}` : ''}`);
+          header.append(badge, meta);
+          card.append(header);
+          if (run.summary) {
+            card.append(element('p', run.summary, { class: 'workspace-muted' }));
+          }
+          const openLink = element('a', `Open this AI review run (${count === 0 ? '0 findings' : `${count} findings`})`, {
+            href: `${prUrl}${prUrl.includes('?') ? '&' : '?'}runId=${encodeURIComponent(run.id)}`
+          });
+          card.append(openLink);
+          this.aiHistoryBody.append(card);
+        });
+      } catch (error) {
+        this.aiHistoryBody.replaceChildren(element('p', `Could not load AI history: ${error.message}`, { role: 'alert' }));
+      }
+    }
     onKey(event) {
       if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing || event.target.closest('input,textarea,select,button,a,[contenteditable]')) return;
       const rows = [...this.records.keys()].filter(row => row.getClientRects().length);

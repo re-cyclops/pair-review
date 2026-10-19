@@ -343,8 +343,8 @@
       var repoParts = session.repository.split('/');
       var settingsLink = '/repo-settings.html?owner=' + encodeURIComponent(repoParts[0]) + '&repo=' + encodeURIComponent(repoParts[1]);
       settingsHtml =
-        '<a href="' + settingsLink + '" class="btn-repo-settings" title="Repository settings">' +
-          '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">' +
+        '<a href="' + settingsLink + '" class="btn-repo-settings" title="Repository settings" aria-label="Repository settings">' +
+          '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">' +
             '<path d="M8 0a8.2 8.2 0 0 1 .701.031C9.444.095 9.99.645 10.16 1.29l.288 1.107c.018.066.079.158.212.224.231.114.454.243.668.386.123.082.233.09.299.071l1.103-.303c.644-.176 1.392.021 1.82.63.27.385.506.792.704 1.218.315.675.111 1.422-.364 1.891l-.814.806c-.049.048-.098.147-.088.294.016.257.016.515 0 .772-.01.147.038.246.088.294l.814.806c.475.469.679 1.216.364 1.891a7.977 7.977 0 0 1-.704 1.217c-.428.61-1.176.807-1.82.63l-1.102-.302c-.067-.019-.177-.011-.3.071a5.909 5.909 0 0 1-.668.386c-.133.066-.194.158-.211.224l-.29 1.106c-.168.646-.715 1.196-1.458 1.26a8.006 8.006 0 0 1-1.402 0c-.743-.064-1.289-.614-1.458-1.26l-.289-1.106c-.018-.066-.079-.158-.212-.224a5.738 5.738 0 0 1-.668-.386c-.123-.082-.233-.09-.299-.071l-1.103.303c-.644.176-1.392-.021-1.82-.63a8.12 8.12 0 0 1-.704-1.218c-.315-.675-.111-1.422.363-1.891l.815-.806c.05-.048.098-.147.088-.294a6.214 6.214 0 0 1 0-.772c.01-.147-.038-.246-.088-.294l-.815-.806C.635 6.045.431 5.298.746 4.623a7.92 7.92 0 0 1 .704-1.217c.428-.61 1.176-.807 1.82-.63l1.102.302c.067.019.177.011.3-.071.214-.143.437-.272.668-.386.133-.066.194-.158.211-.224l.29-1.106C6.009.645 6.556.095 7.299.03 7.53.01 7.764 0 8 0Zm-.571 1.525c-.036.003-.108.036-.137.146l-.289 1.105c-.147.561-.549.967-.998 1.189-.173.086-.34.183-.5.29-.417.278-.97.423-1.529.27l-1.103-.303c-.109-.03-.175.016-.195.045-.22.312-.412.644-.573.99-.014.031-.021.11.059.19l.815.806c.411.406.562.957.53 1.456a4.709 4.709 0 0 0 0 .582c.032.499-.119 1.05-.53 1.456l-.815.806c-.081.08-.073.159-.059.19.162.346.353.677.573.989.02.03.085.076.195.046l1.102-.303c.56-.153 1.113-.008 1.53.27.161.107.328.204.501.29.447.222.85.629.997 1.189l.289 1.105c.029.109.101.143.137.146a6.6 6.6 0 0 0 1.142 0c.036-.003.108-.036.137-.146l.289-1.105c.147-.561.549-.967.998-1.189.173-.086.34-.183.5-.29.417-.278.97-.423 1.529-.27l1.103.303c.109.029.175-.016.195-.045.22-.313.411-.644.573-.99.014-.031.021-.11-.059-.19l-.815-.806c-.411-.406-.562-.957-.53-1.456a4.709 4.709 0 0 0 0-.582c-.032-.499.119-1.05.53-1.456l.815-.806c.081-.08.073-.159.059-.19a6.464 6.464 0 0 0-.573-.989c-.02-.03-.085-.076-.195-.046l-1.102.303c-.56.153-1.113.008-1.53-.27a4.44 4.44 0 0 0-.501-.29c-.447-.222-.85-.629-.997-1.189l-.289-1.105c-.029-.11-.101-.143-.137-.146a6.6 6.6 0 0 0-1.142 0ZM11 8a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM9.5 8a1.5 1.5 0 1 0-3.001.001A1.5 1.5 0 0 0 9.5 8Z"/>' +
           '</svg>' +
         '</a>';
@@ -360,12 +360,14 @@
         '<td class="col-actions">' +
           settingsHtml +
           '<button' +
+            ' type="button"' +
             ' class="btn-delete-session"' +
             ' data-session-id="' + session.id + '"' +
             ' data-session-path="' + escapeHtmlAttribute(pathDisplay) + '"' +
             ' title="Delete session"' +
+            ' aria-label="Delete session"' +
           '>' +
-            '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">' +
+            '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">' +
               '<path fill-rule="evenodd" d="M6.5 1.75a.25.25 0 01.25-.25h2.5a.25.25 0 01.25.25V3h-3V1.75zm4.5 0V3h2.25a.75.75 0 010 1.5H2.75a.75.75 0 010-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75zM4.496 6.675a.75.75 0 10-1.492.15l.66 6.6A1.75 1.75 0 005.405 15h5.19a1.75 1.75 0 001.741-1.575l.66-6.6a.75.75 0 00-1.492-.15l-.66 6.6a.25.25 0 01-.249.225h-5.19a.25.25 0 01-.249-.225l-.66-6.6z"></path>' +
             '</svg>' +
           '</button>' +
@@ -483,9 +485,9 @@
     if (clearBtn) clearBtn.hidden = !value;
   }
 
-  var GITHUB_ACTION_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>';
-  var GRAPHITE_ACTION_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M9.7932,1.3079L3.101,3.101l-1.7932,6.6921,4.899,4.899,6.6921-1.7931,1.7932-6.6921L9.7932,1.3079Zm1.0936,11.6921H5.1133l-2.8867-5L5.1133,3h5.7735l2.8867,5-2.8867,5Z"/><polygon points="11.3504 4.6496 6.7737 3.4232 3.4232 6.7737 4.6496 11.3504 9.2263 12.5768 12.5768 9.2263 11.3504 4.6496"/></svg>';
-  var EXTERNAL_ACTION_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M3.75 2A1.75 1.75 0 0 0 2 3.75v8.5C2 13.216 2.784 14 3.75 14h8.5A1.75 1.75 0 0 0 14 12.25v-3a.75.75 0 0 0-1.5 0v3a.25.25 0 0 1-.25.25h-8.5a.25.25 0 0 1-.25-.25v-8.5a.25.25 0 0 1 .25-.25h3a.75.75 0 0 0 0-1.5h-3Zm6.97-.53a.75.75 0 0 0 0 1.06l1.72 1.72-4.97 4.97a.75.75 0 1 0 1.06 1.06l4.97-4.97 1.72 1.72a.75.75 0 0 0 1.28-.53V2.75A.75.75 0 0 0 14.75 2h-3.5a.75.75 0 0 0-.53 1.28Z"/></svg>';
+  var GITHUB_ACTION_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>';
+  var GRAPHITE_ACTION_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M9.7932,1.3079L3.101,3.101l-1.7932,6.6921,4.899,4.899,6.6921-1.7931,1.7932-6.6921L9.7932,1.3079Zm1.0936,11.6921H5.1133l-2.8867-5L5.1133,3h5.7735l2.8867,5-2.8867,5Z"/><polygon points="11.3504 4.6496 6.7737 3.4232 3.4232 6.7737 4.6496 11.3504 9.2263 12.5768 12.5768 9.2263 11.3504 4.6496"/></svg>';
+  var EXTERNAL_ACTION_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M3.75 2A1.75 1.75 0 0 0 2 3.75v8.5C2 13.216 2.784 14 3.75 14h8.5A1.75 1.75 0 0 0 14 12.25v-3a.75.75 0 0 0-1.5 0v3a.25.25 0 0 1-.25.25h-8.5a.25.25 0 0 1-.25-.25v-8.5a.25.25 0 0 1 .25-.25h3a.75.75 0 0 0 0-1.5h-3Zm6.97-.53a.75.75 0 0 0 0 1.06l1.72 1.72-4.97 4.97a.75.75 0 1 0 1.06 1.06l4.97-4.97 1.72 1.72a.75.75 0 0 0 1.28-.53V2.75A.75.75 0 0 0 14.75 2h-3.5a.75.75 0 0 0-.53 1.28Z"/></svg>';
 
   /**
    * Render the configured external-host icon, falling back to the generic
@@ -540,7 +542,7 @@
     }
 
     if (repoLinks.github !== false) {
-      html += '<a href="' + escapeHtmlAttribute(defaultUrl) + '" target="_blank" rel="noopener" class="btn-github-link" title="Open on GitHub">' +
+      html += '<a href="' + escapeHtmlAttribute(defaultUrl) + '" target="_blank" rel="noopener" class="btn-github-link" title="Open on GitHub" aria-label="Open on GitHub">' +
         GITHUB_ACTION_ICON +
         '</a>';
     }
@@ -548,7 +550,7 @@
     if (repoLinks.graphite !== false && window.__pairReview?.enableGraphite
         && typeof context.html_url === 'string' && /^https:\/\/github\.com\//i.test(defaultUrl)) {
       var graphiteUrl = window.__pairReview.toGraphiteUrl(defaultUrl);
-      html += '<a href="' + escapeHtmlAttribute(graphiteUrl) + '" target="_blank" rel="noopener" class="btn-github-link" title="Open on Graphite">' +
+      html += '<a href="' + escapeHtmlAttribute(graphiteUrl) + '" target="_blank" rel="noopener" class="btn-github-link" title="Open on Graphite" aria-label="Open on Graphite">' +
         GRAPHITE_ACTION_ICON +
         '</a>';
     }
@@ -1176,8 +1178,11 @@
       host: review.host
     });
 
+    var hostAttr = review.setup_host ? ' data-host="' + escapeHtmlAttribute(review.setup_host) + '"' : '';
+    var prUrlAttr = review.html_url ? ' data-pr-url="' + escapeHtmlAttribute(review.html_url) + '"' : '';
+
     return '' +
-      '<tr data-review-id="' + review.id + '"' + reviewIdAttr + '>' +
+      '<tr data-review-id="' + review.id + '" data-owner="' + escapeHtmlAttribute(owner) + '" data-repo="' + escapeHtmlAttribute(repo) + '" data-number="' + review.pr_number + '"' + prUrlAttr + hostAttr + reviewIdAttr + '>' +
         '<td class="col-repo">' + escapeHtml(review.repository) + '</td>' +
         '<td class="col-pr"><a href="' + link + '">#' + review.pr_number + '</a></td>' +
         '<td class="col-title" title="' + escapeHtmlAttribute(review.pr_title) + '">' + escapeHtml(review.pr_title) + '</td>' +
@@ -1185,19 +1190,21 @@
         '<td class="col-time">' + relativeTime + '</td>' +
         '<td class="col-actions">' +
           actionLinks +
-          '<a href="' + settingsLink + '" class="btn-repo-settings" title="Repository settings">' +
-            '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">' +
+          '<a href="' + settingsLink + '" class="btn-repo-settings" title="Repository settings" aria-label="Repository settings">' +
+            '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">' +
               '<path d="M8 0a8.2 8.2 0 0 1 .701.031C9.444.095 9.99.645 10.16 1.29l.288 1.107c.018.066.079.158.212.224.231.114.454.243.668.386.123.082.233.09.299.071l1.103-.303c.644-.176 1.392.021 1.82.63.27.385.506.792.704 1.218.315.675.111 1.422-.364 1.891l-.814.806c-.049.048-.098.147-.088.294.016.257.016.515 0 .772-.01.147.038.246.088.294l.814.806c.475.469.679 1.216.364 1.891a7.977 7.977 0 0 1-.704 1.217c-.428.61-1.176.807-1.82.63l-1.102-.302c-.067-.019-.177-.011-.3.071a5.909 5.909 0 0 1-.668.386c-.133.066-.194.158-.211.224l-.29 1.106c-.168.646-.715 1.196-1.458 1.26a8.006 8.006 0 0 1-1.402 0c-.743-.064-1.289-.614-1.458-1.26l-.289-1.106c-.018-.066-.079-.158-.212-.224a5.738 5.738 0 0 1-.668-.386c-.123-.082-.233-.09-.299-.071l-1.103.303c-.644.176-1.392-.021-1.82-.63a8.12 8.12 0 0 1-.704-1.218c-.315-.675-.111-1.422.363-1.891l.815-.806c.05-.048.098-.147.088-.294a6.214 6.214 0 0 1 0-.772c.01-.147-.038-.246-.088-.294l-.815-.806C.635 6.045.431 5.298.746 4.623a7.92 7.92 0 0 1 .704-1.217c.428-.61 1.176-.807 1.82-.63l1.102.302c.067.019.177.011.3-.071.214-.143.437-.272.668-.386.133-.066.194-.158.211-.224l.29-1.106C6.009.645 6.556.095 7.299.03 7.53.01 7.764 0 8 0Zm-.571 1.525c-.036.003-.108.036-.137.146l-.289 1.105c-.147.561-.549.967-.998 1.189-.173.086-.34.183-.5.29-.417.278-.97.423-1.529.27l-1.103-.303c-.109-.03-.175.016-.195.045-.22.312-.412.644-.573.99-.014.031-.021.11.059.19l.815.806c.411.406.562.957.53 1.456a4.709 4.709 0 0 0 0 .582c.032.499-.119 1.05-.53 1.456l-.815.806c-.081.08-.073.159-.059.19.162.346.353.677.573.989.02.03.085.076.195.046l1.102-.303c.56-.153 1.113-.008 1.53.27.161.107.328.204.501.29.447.222.85.629.997 1.189l.289 1.105c.029.109.101.143.137.146a6.6 6.6 0 0 0 1.142 0c.036-.003.108-.036.137-.146l.289-1.105c.147-.561.549-.967.998-1.189.173-.086.34-.183.5-.29.417-.278.97-.423 1.529-.27l1.103.303c.109.029.175-.016.195-.045.22-.313.411-.644.573-.99.014-.031.021-.11-.059-.19l-.815-.806c-.411-.406-.562-.957-.53-1.456a4.709 4.709 0 0 0 0-.582c-.032-.499.119-1.05.53-1.456l.815-.806c.081-.08.073-.159.059-.19a6.464 6.464 0 0 0-.573-.989c-.02-.03-.085-.076-.195-.046l-1.102.303c-.56.153-1.113.008-1.53-.27a4.44 4.44 0 0 0-.501-.29c-.447-.222-.85-.629-.997-1.189l-.289-1.105c-.029-.11-.101-.143-.137-.146a6.6 6.6 0 0 0-1.142 0ZM11 8a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM9.5 8a1.5 1.5 0 1 0-3.001.001A1.5 1.5 0 0 0 9.5 8Z"/>' +
             '</svg>' +
           '</a>' +
           '<button' +
+            ' type="button"' +
             ' class="btn-delete-review"' +
             ' data-review-id="' + review.id + '"' +
             ' data-repository="' + escapeHtmlAttribute(review.repository) + '"' +
             ' data-pr-number="' + review.pr_number + '"' +
             ' title="Remove local history and drafts"' +
+            ' aria-label="Remove local history and drafts"' +
           '>' +
-            '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">' +
+            '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">' +
               '<path fill-rule="evenodd" d="M6.5 1.75a.25.25 0 01.25-.25h2.5a.25.25 0 01.25.25V3h-3V1.75zm4.5 0V3h2.25a.75.75 0 010 1.5H2.75a.75.75 0 010-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75zM4.496 6.675a.75.75 0 10-1.492.15l.66 6.6A1.75 1.75 0 005.405 15h5.19a1.75 1.75 0 001.741-1.575l.66-6.6a.75.75 0 00-1.492-.15l-.66 6.6a.25.25 0 01-.249.225h-5.19a.25.25 0 01-.249-.225l-.66-6.6z"></path>' +
             '</svg>' +
           '</button>' +
@@ -1862,6 +1869,7 @@
     for (var i = 0; i < this.config.actions.length; i++) {
       var action = this.config.actions[i];
       var btn = document.createElement('button');
+      btn.type = 'button';
       btn.className = action.className;
       btn.textContent = action.label;
       btn.disabled = true;
@@ -1879,9 +1887,11 @@
     var confirmSpan = document.createElement('span');
     confirmSpan.className = 'bulk-confirm-buttons';
     var confirmYes = document.createElement('button');
+    confirmYes.type = 'button';
     confirmYes.className = 'btn-bulk-delete';
     confirmYes.textContent = 'Confirm';
     var confirmNo = document.createElement('button');
+    confirmNo.type = 'button';
     confirmNo.className = 'btn-bulk-cancel';
     confirmNo.textContent = 'Cancel';
     confirmSpan.appendChild(confirmYes);
@@ -1890,6 +1900,7 @@
 
     // Cancel button (exits selection mode)
     var cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
     cancelBtn.className = 'btn-bulk-cancel';
     cancelBtn.textContent = 'Cancel';
     cancelBtn.addEventListener('click', function () {
@@ -2037,6 +2048,9 @@
     tbodyId: 'recent-reviews-tbody',
     rowIdAttr: 'reviewId',
     actions: [
+      { label: 'Open', className: 'btn-bulk-open', handler: handleBulkOpen },
+      { label: 'Analyze', className: 'btn-bulk-analyze', handler: handleBulkAnalyze },
+      { label: 'Submit review', className: 'btn-bulk-submit', handler: handleBulkSubmitReview },
       { label: 'Remove local history', className: 'btn-bulk-delete', handler: handleBulkDeletePR }
     ]
   });
@@ -2058,7 +2072,8 @@
     rowIdAttr: 'prUrl',
     actions: [
       { label: 'Open', className: 'btn-bulk-open', handler: handleBulkOpen },
-      { label: 'Analyze', className: 'btn-bulk-analyze', handler: handleBulkAnalyze }
+      { label: 'Analyze', className: 'btn-bulk-analyze', handler: handleBulkAnalyze },
+      { label: 'Submit review', className: 'btn-bulk-submit', handler: handleBulkSubmitReview }
     ]
   });
 
@@ -2069,7 +2084,8 @@
     rowIdAttr: 'prUrl',
     actions: [
       { label: 'Open', className: 'btn-bulk-open', handler: handleBulkOpen },
-      { label: 'Analyze', className: 'btn-bulk-analyze', handler: handleBulkAnalyze }
+      { label: 'Analyze', className: 'btn-bulk-analyze', handler: handleBulkAnalyze },
+      { label: 'Submit review', className: 'btn-bulk-submit', handler: handleBulkSubmitReview }
     ]
   });
 
@@ -2080,7 +2096,8 @@
     rowIdAttr: 'prUrl',
     actions: [
       { label: 'Open', className: 'btn-bulk-open', handler: handleBulkOpen },
-      { label: 'Analyze', className: 'btn-bulk-analyze', handler: handleBulkAnalyze }
+      { label: 'Analyze', className: 'btn-bulk-analyze', handler: handleBulkAnalyze },
+      { label: 'Submit review', className: 'btn-bulk-submit', handler: handleBulkSubmitReview }
     ]
   });
 
@@ -2184,10 +2201,15 @@
    * @returns {Array<{owner: string, repo: string, number: string, prUrl: string, host: string|undefined}>}
    */
   function getSelectedCollectionRows(selectedIds, tbodyId) {
-    var selection = Object.values(collectionSelections).find(value => value.config.tbodyId === tbodyId);
-    const visibleRows = new Map([...document.querySelectorAll(`#${tbodyId} tr[data-pr-url]`)].map(row => [row.dataset.prUrl, row.dataset]));
-    return [...selectedIds].map(id => visibleRows.get(id) || selection?.selectedRows.get(id)).filter(row => row?.owner && row?.repo && row?.number)
-      .map(row => ({ owner: row.owner, repo: row.repo, number: row.number, prUrl: row.prUrl, host: row.host }));
+    var selection = [prSelection, ...Object.values(collectionSelections)].find(value => value.config.tbodyId === tbodyId);
+    const rowAttr = selection ? selection.config.rowIdAttr : 'prUrl';
+    const visibleRows = new Map([...document.querySelectorAll(`#${tbodyId} tr`)].filter(row => row.dataset[rowAttr]).map(row => [row.dataset[rowAttr], row.dataset]));
+    return [...selectedIds].map(id => {
+      const row = visibleRows.get(id) || selection?.selectedRows.get(id);
+      return row?.owner && row?.repo && row?.number
+        ? { selectId: id, owner: row.owner, repo: row.repo, number: row.number, prUrl: row.prUrl, host: row.host, analysisReviewId: row.analysisReviewId }
+        : null;
+    }).filter(Boolean);
   }
 
   function buildReviewUrlsFromRows(rows, query) {
@@ -2379,6 +2401,260 @@
     }
   }
 
+  function handleBulkSubmitReview(selectedIds, selectionInstance) {
+    var rows = getSelectedCollectionRows(selectedIds, selectionInstance.config.tbodyId);
+    if (rows.length === 0) return;
+
+    var modal = document.getElementById('bulk-submit-review-modal');
+    if (!modal) {
+      if (window.reviewWorkspace?.makeDialog) {
+        modal = window.reviewWorkspace.makeDialog('bulk-submit-review-modal', 'Submit review');
+        modal.classList.add('workspace-review');
+      } else {
+        modal = document.createElement('dialog');
+        modal.id = 'bulk-submit-review-modal';
+        modal.className = 'workspace-dialog workspace-review';
+        document.body.appendChild(modal);
+      }
+    }
+
+    var content = modal.querySelector('.workspace-review-content');
+    if (!content) {
+      content = document.createElement('div');
+      content.className = 'workspace-review-content';
+      modal.appendChild(content);
+    }
+    content.replaceChildren();
+
+    var statusNote = document.createElement('p');
+    statusNote.setAttribute('role', 'status');
+    statusNote.textContent = 'Submit a review across ' + rows.length + ' selected pull request' + (rows.length === 1 ? '' : 's') + '. Any saved inline comments on each PR are included.';
+
+    var errorNote = document.createElement('p');
+    errorNote.className = 'workspace-review-error';
+    errorNote.setAttribute('role', 'alert');
+
+    var fieldset = document.createElement('fieldset');
+    fieldset.className = 'workspace-review-authoring';
+    var legend = document.createElement('legend');
+    legend.textContent = 'Submit review';
+    fieldset.appendChild(legend);
+
+    var decisionLabel = document.createElement('label');
+    decisionLabel.setAttribute('for', 'bulk-review-decision');
+    decisionLabel.textContent = 'Decision ';
+    var decisionSelect = document.createElement('select');
+    decisionSelect.id = 'bulk-review-decision';
+    [
+      ['APPROVE', 'Approve'],
+      ['COMMENT', 'Comment only'],
+      ['REQUEST_CHANGES', 'Request changes']
+    ].forEach(function (pair) {
+      var opt = document.createElement('option');
+      opt.value = pair[0];
+      opt.textContent = pair[1];
+      decisionSelect.appendChild(opt);
+    });
+    decisionLabel.appendChild(decisionSelect);
+
+    var decisionCards = document.createElement('div');
+    decisionCards.className = 'workspace-decision-cards';
+    decisionCards.setAttribute('role', 'group');
+    decisionCards.setAttribute('aria-label', 'Review decision');
+    var decisionCardButtons = new Map();
+    [
+      ['APPROVE', '✓ Approve', 'Approve merging these changes'],
+      ['COMMENT', 'Comment', 'Submit feedback without explicit approval'],
+      ['REQUEST_CHANGES', 'Request changes', 'Changes must be addressed before merge']
+    ].forEach(function (cardDef) {
+      var value = cardDef[0];
+      var titleText = cardDef[1];
+      var descText = cardDef[2];
+      var cardBtn = document.createElement('button');
+      cardBtn.type = 'button';
+      cardBtn.className = 'workspace-decision-card';
+      cardBtn.dataset.decision = value;
+      var strong = document.createElement('strong');
+      strong.textContent = titleText;
+      var span = document.createElement('span');
+      span.textContent = descText;
+      cardBtn.appendChild(strong);
+      cardBtn.appendChild(span);
+      cardBtn.addEventListener('click', function () {
+        if (cardBtn.disabled) return;
+        decisionSelect.value = value;
+        decisionSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      decisionCards.appendChild(cardBtn);
+      decisionCardButtons.set(value, cardBtn);
+    });
+
+    var bodyLabel = document.createElement('label');
+    bodyLabel.setAttribute('for', 'bulk-review-body');
+    bodyLabel.textContent = 'Review body (optional Markdown)';
+    var bodyInput = document.createElement('textarea');
+    bodyInput.id = 'bulk-review-body';
+    bodyInput.rows = 4;
+    bodyInput.setAttribute('autocomplete', 'off');
+    bodyInput.placeholder = 'Optional review summary applied to selected PRs…';
+
+    var keepExistingLabel = document.createElement('label');
+    var keepExistingCb = document.createElement('input');
+    keepExistingCb.type = 'checkbox';
+    keepExistingCb.checked = true;
+    keepExistingLabel.appendChild(keepExistingCb);
+    keepExistingLabel.appendChild(document.createTextNode(' Keep each PR’s existing saved summary when the body above is blank'));
+
+    var prListHeading = document.createElement('h3');
+    prListHeading.textContent = rows.length + ' selected pull request' + (rows.length === 1 ? '' : 's');
+    var prList = document.createElement('ul');
+    prList.className = 'bulk-submit-pr-list';
+    var rowStatusNodes = new Map();
+    rows.forEach(function (row) {
+      var li = document.createElement('li');
+      var titleSpan = document.createElement('strong');
+      titleSpan.textContent = row.owner + '/' + row.repo + ' #' + row.number;
+      var stateSpan = document.createElement('span');
+      stateSpan.className = 'workspace-muted';
+      stateSpan.textContent = ' · ready';
+      li.appendChild(titleSpan);
+      li.appendChild(stateSpan);
+      prList.appendChild(li);
+      rowStatusNodes.set(row.selectId, stateSpan);
+    });
+
+    fieldset.append(decisionCards, decisionLabel, bodyLabel, bodyInput, keepExistingLabel, prListHeading, prList);
+
+    var actions = document.createElement('div');
+    actions.className = 'workspace-review-actions';
+    var submitBtn = document.createElement('button');
+    submitBtn.type = 'button';
+    submitBtn.id = 'bulk-submit-review-confirm';
+    submitBtn.className = 'btn btn-primary workspace-submit-primary';
+    var cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', function () {
+      modal.close();
+    });
+
+    function syncDecisionCards() {
+      var current = decisionSelect.value;
+      decisionCardButtons.forEach(function (btn, val) {
+        var isActive = val === current;
+        btn.classList.toggle('active', isActive);
+        btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+      });
+      if (submitBtn && !submitBtn.disabled) {
+        var labelMap = {
+          APPROVE: 'Submit approval (' + rows.length + ')',
+          COMMENT: 'Submit comment review (' + rows.length + ')',
+          REQUEST_CHANGES: 'Submit change request (' + rows.length + ')'
+        };
+        submitBtn.textContent = labelMap[current] || ('Submit review (' + rows.length + ')');
+      }
+    }
+
+    decisionSelect.addEventListener('change', syncDecisionCards);
+    syncDecisionCards();
+
+    actions.append(submitBtn, cancelBtn);
+    content.append(statusNote, errorNote, fieldset, actions);
+
+    submitBtn.addEventListener('click', async function () {
+      errorNote.textContent = '';
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Submitting…';
+      fieldset.disabled = true;
+      var succeeded = 0;
+      var failed = 0;
+      var decision = decisionSelect.value;
+      var sharedBody = bodyInput.value;
+      var keepExisting = keepExistingCb.checked;
+
+      for (var i = 0; i < rows.length; i++) {
+        var row = rows[i];
+        var statusEl = rowStatusNodes.get(row.selectId);
+        if (statusEl) statusEl.textContent = ' · preparing…';
+        try {
+          var reviewId = row.analysisReviewId ? Number(row.analysisReviewId) : null;
+          if (!reviewId) {
+            var resResp = await fetch('/api/reviews/resolve', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ owner: row.owner, repo: row.repo, number: Number(row.number) })
+            });
+            var resData = await resResp.json();
+            if (!resResp.ok) throw new Error(resData.error || 'Could not resolve review');
+            reviewId = resData.reviewId;
+          }
+
+          var draftResp = await fetch('/api/reviews/' + reviewId + '/draft');
+          var draftData = await draftResp.json();
+          if (!draftResp.ok) throw new Error(draftData.error || 'Could not load draft');
+
+          var finalBody = sharedBody.trim() ? sharedBody : (keepExisting ? (draftData.body || '') : '');
+          var saveResp = await fetch('/api/reviews/' + reviewId + '/draft', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              body: finalBody,
+              event: decision,
+              expected_revision: draftData.revision
+            })
+          });
+          var saveData = await saveResp.json();
+          if (!saveResp.ok) throw new Error(saveData.error || 'Could not save draft');
+
+          var manifestResp = await fetch('/api/reviews/' + reviewId + '/manifest?mode=submit');
+          var manifest = await manifestResp.json();
+          if (!manifestResp.ok) throw new Error(manifest.error || 'Could not prepare submission manifest');
+          if (Array.isArray(manifest.blockers) && manifest.blockers.length > 0) {
+            throw new Error(manifest.blockers.join(' '));
+          }
+
+          if (statusEl) statusEl.textContent = ' · publishing…';
+          var pubResp = await fetch('/api/reviews/' + reviewId + '/submit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ digest: manifest.digest, mode: 'submit' })
+          });
+          var pubData = await pubResp.json();
+          if (!pubResp.ok) throw new Error(pubData.error || 'Submission failed');
+
+          succeeded++;
+          selectionInstance.selectedIds.delete(row.selectId);
+          if (statusEl) {
+            statusEl.textContent = ' · submitted (' + manifest.count + ' inline comment' + (manifest.count === 1 ? '' : 's') + ')';
+          }
+        } catch (err) {
+          failed++;
+          if (statusEl) statusEl.textContent = ' · failed: ' + err.message;
+        }
+      }
+
+      fieldset.disabled = false;
+      submitBtn.disabled = false;
+      syncDecisionCards();
+      statusNote.textContent = 'Submitted ' + succeeded + ' of ' + rows.length + ' review' + (rows.length === 1 ? '' : 's') + (failed ? ' (' + failed + ' failed).' : '.');
+      if (failed === 0) {
+        window.toast?.success('Submitted ' + succeeded + ' review' + (succeeded === 1 ? '' : 's') + '.');
+        selectionInstance.exit();
+        modal.close();
+      } else {
+        window.toast?.error('Submitted ' + succeeded + '; ' + failed + ' failed. See dialog for details.');
+        selectionInstance._updateInlineActions();
+      }
+      await loadRecentReviews();
+    });
+
+    if (window.reviewWorkspace?.open) {
+      window.reviewWorkspace.open(modal);
+    } else {
+      modal.showModal();
+    }
+  }
+
   // ─── Event Delegation ───────────────────────────────────────────────────────
 
   // Event delegation for buttons, show-more, tab switching
@@ -2438,6 +2714,18 @@
       var instance = instances[tabId];
       if (instance) instance.toggle();
       return;
+    }
+
+    var selectableRow = event.target.closest('tr[data-review-id], tr[data-session-id]');
+    if (selectableRow && !event.target.closest('a, button, .col-select')) {
+      if (activeSelection && activeSelection.active && selectableRow.closest('.selection-mode')) {
+        var selectableCb = selectableRow.querySelector('.col-select input[type="checkbox"]');
+        if (selectableCb) {
+          selectableCb.checked = !selectableCb.checked;
+          selectableCb.dispatchEvent(new Event('change'));
+        }
+        return;
+      }
     }
 
     // Click on a collection PR row — toggle checkbox in selection mode, else start review
@@ -2841,7 +3129,8 @@
       showLocalPathUrlError: showLocalPathUrlError,
       handleLocalPathInput: handleLocalPathInput,
       renderCollectionPrRow: renderCollectionPrRow,
-      renderRecentReviewRow: renderRecentReviewRow
+      renderRecentReviewRow: renderRecentReviewRow,
+      handleBulkSubmitReview: handleBulkSubmitReview
     };
   }
 

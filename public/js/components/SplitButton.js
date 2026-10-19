@@ -108,7 +108,7 @@ class SplitButton {
     let menuItems = `
       <button class="split-button-menu-item" data-action="submit" role="menuitem">
         <span class="menu-item-check">${isSubmitDefault ? '&#10003;' : ''}</span>
-        <span class="menu-item-text">Preview review</span>
+        <span class="menu-item-text">Submit review</span>
       </button>`;
 
     menuItems += `
@@ -313,7 +313,7 @@ class SplitButton {
    * @returns {string} Button text
    */
   getButtonText() {
-    const actionText = this.defaultAction === 'submit' ? 'Preview review' : 'Export selected comments';
+    const actionText = this.defaultAction === 'submit' ? 'Submit review' : 'Export selected comments';
     if (this.countState) return `${actionText} · ${this.countState}`;
     if (this.commentCount > 0) {
       return `${actionText} (${this.commentCount})`;

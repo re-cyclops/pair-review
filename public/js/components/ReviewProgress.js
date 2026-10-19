@@ -163,12 +163,12 @@ class ReviewProgress {
       const diff = document.getElementById('diff-container');
       if (!diff) return;
       this.panel = node('section', null, { class: 'workspace-review-progress', 'aria-label': 'Review progress' });
-      this.summary = node('p', '', { role: 'status' });
-      this.message = node('p', '', { class: 'workspace-muted' });
+      this.summary = node('p', '', { role: 'status', class: 'workspace-progress-summary' });
+      this.message = node('p', '', { class: 'workspace-muted workspace-progress-notice' });
       const actions = node('div', null, { class: 'workspace-progress-actions' });
-      const compare = node('button', 'Changes since reviewed…', { type: 'button' });
+      const compare = node('button', 'Changes since reviewed…', { type: 'button', class: 'workspace-progress-pill' });
       compare.addEventListener('click', () => this.showComparison());
-      this.mark = node('button', 'Mark revision reviewed…', { type: 'button' });
+      this.mark = node('button', 'Mark revision reviewed…', { type: 'button', class: 'workspace-progress-pill workspace-progress-pill--primary' });
       this.mark.addEventListener('click', () => this.confirmReviewed());
       this.panel.append(this.summary, this.message, actions);
       actions.append(compare, this.mark);
@@ -177,10 +177,14 @@ class ReviewProgress {
     const s = this.state;
     this.mark.disabled = !s?.available;
     if (!s) { this.summary.textContent = 'Review progress unavailable'; return; }
-    this.summary.textContent = `${s.visitedFiles}/${s.totalFiles} files visited · ${s.reviewedFiles}/${s.totalFiles} content-bound viewed marks · ${s.triagedFindings} findings triaged · ${s.selectedComments} comments selected${s.submitted ? ' · prior submission recorded' : ''}`;
+    this.summary.textContent = `${s.reviewedFiles}/${s.totalFiles} viewed · ${s.visitedFiles}/${s.totalFiles} visited · ${s.triagedFindings} triaged · ${s.selectedComments} comment${s.selectedComments === 1 ? '' : 's'} selected${s.submitted ? ' · submitted' : ''}`;
     this.message.removeAttribute('role');
-    this.message.textContent = !s.available ? 'Current diff unavailable. Any existing reviewed baseline is preserved.'
-      : `${s.lastReviewed ? `Last explicitly reviewed ${s.lastReviewed.head.slice(0, 12)}${s.newCommits ? ' · new head since review' : s.changedContent ? ' · comparison content or scope changed' : ''}` : 'No revision explicitly marked reviewed'} · opening or AI completion never marks a revision reviewed.${s.staleDrafts ? ` ${s.staleDrafts} drafts need current-head anchor review; text is retained.` : ''}${s.legacyViewedCount ? ` ${s.legacyViewedCount} older marks lack revision evidence; mark current content again.` : ''}`;
+    const notices = [];
+    if (!s.available) notices.push('Current diff unavailable. Any existing reviewed baseline is preserved.');
+    else if (s.lastReviewed) notices.push(`Last reviewed ${s.lastReviewed.head.slice(0, 7)}${s.newCommits ? ' (new commits)' : s.changedContent ? ' (content changed)' : ''}`);
+    if (s.staleDrafts) notices.push(`${s.staleDrafts} draft${s.staleDrafts === 1 ? '' : 's'} need anchor check`);
+    if (s.legacyViewedCount) notices.push(`${s.legacyViewedCount} older mark${s.legacyViewedCount === 1 ? '' : 's'} unverified`);
+    this.message.textContent = notices.join(' · ');
   }
 
   confirmReviewed() {

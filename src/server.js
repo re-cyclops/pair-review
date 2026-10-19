@@ -23,6 +23,9 @@ let server = null;
 let chatSessionManager = null;
 let shutdownPromise = null;
 
+let lastActivityAt = Date.now();
+let idleCheckInterval = null;
+const PASSIVE_POLL_PATHS = /^(\/health|\/api\/analyses\/activity|\/api\/reviews\/recent|\/api\/server\/status|\/api\/pr\/[^/]+\/[^/]+\/\d+\/snapshot|\/api\/reviews\/\d+\/progress)$/;
 /**
  * Assemble the GET /health response body. Kept as a standalone factory so the
  * exact payload the delegation handshake depends on can be unit-tested without
@@ -541,6 +544,33 @@ async function startServer(sharedDb = null, sharedPoolLifecycle = null, options 
     app.get('/health', (req, res) => {
       res.json(buildHealthPayload(dbId));
     });
+
+    const rawIdleHours = process.env.PAIR_REVIEW_IDLE_HOURS ?? config.idle_timeout_hours ?? 4;
+    const idleTimeoutHours = Number.isFinite(Number(rawIdleHours)) && Number(rawIdleHours) > 0 ? Number(rawIdleHours) : 0;
+    const idleTimeoutMs = idleTimeoutHours * 60 * 60 * 1000;
+    lastActivityAt = Date.now();
+
+    app.use((req, _res, next) => {
+      if (req.method !== 'GET' || !PASSIVE_POLL_PATHS.test(req.path)) {
+        lastActivityAt = Date.now();
+      }
+      next();
+    });
+
+    app.get('/api/server/status', (_req, res) => {
+      res.json({
+        running: true,
+        pid: process.pid,
+        lastActivityAt: new Date(lastActivityAt).toISOString(),
+        idleTimeoutHours,
+        expiresAt: idleTimeoutMs > 0 ? new Date(lastActivityAt + idleTimeoutMs).toISOString() : null
+      });
+    });
+
+    app.post('/api/server/stop', (_req, res) => {
+      res.json({ stopping: true, message: 'Pair-review server is shutting down.' });
+      setImmediate(() => gracefulShutdown('UI_STOP'));
+    });
     
     // Store database instance, GitHub token, and config for routes
     // (`globalSettings` was built and overlaid onto `config` above, right after
@@ -703,6 +733,22 @@ async function startServer(sharedDb = null, sharedPoolLifecycle = null, options 
       console.error('Server error after startup:', error);
     });
 
+    clearInterval(idleCheckInterval);
+    if (idleTimeoutMs > 0) {
+      const { activeAnalyses } = require('./routes/shared');
+      idleCheckInterval = setInterval(() => {
+        if (activeAnalyses && activeAnalyses.size > 0) {
+          lastActivityAt = Date.now();
+          return;
+        }
+        if (Date.now() - lastActivityAt >= idleTimeoutMs) {
+          console.log(`Server idle for ${idleTimeoutHours}h; shutting down automatically...`);
+          gracefulShutdown('IDLE');
+        }
+      }, 60000);
+      idleCheckInterval.unref();
+    }
+
     // Return the actual port the server started on
     return port;
 
@@ -726,6 +772,10 @@ function gracefulShutdown(signal) {
   if (shutdownPromise) return shutdownPromise;
   shutdownPromise = (async () => {
     console.log('\nServer shutting down...');
+    if (idleCheckInterval) {
+      clearInterval(idleCheckInterval);
+      idleCheckInterval = null;
+    }
     const { shutdownAnalyses } = require('./routes/shared');
     // Stop accepting work before draining owned execution. Existing requests
     // cannot admit another run once shutdownAnalyses closes the admission gate.

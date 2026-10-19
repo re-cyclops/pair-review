@@ -226,6 +226,7 @@ class AnalysisHistoryManager {
 
     if (this.runs.length === 0) {
       this.hide();
+      this.syncToolbarStatus();
       return [];
     }
 
@@ -241,6 +242,7 @@ class AnalysisHistoryManager {
     this.renderDropdown(this.runs);
 
     this.show();
+    this.syncToolbarStatus();
     return this.runs;
   }
 
@@ -264,15 +266,23 @@ class AnalysisHistoryManager {
         ? 'council'
         : `${this.formatProviderName(run.provider)} - ${run.model || 'Unknown'}`;
 
+      const runIndexLabel = runs.indexOf(run) === 0 ? 'Latest' : `#${runs.length - runs.indexOf(run)}`;
+      const suggestionCount = Number(run.total_suggestions || 0);
+      const countBadge = run.status === 'completed'
+        ? `<span class="analysis-history-count-badge ${suggestionCount === 0 ? 'count-zero' : 'count-nonzero'}">${suggestionCount === 0 ? '0 findings' : `${suggestionCount} finding${suggestionCount === 1 ? '' : 's'}`}</span>`
+        : `<span class="analysis-history-count-badge">${this.escapeHtml(run.status || 'run')}</span>`;
+      const shaText = run.head_sha ? ` &middot; ${this.escapeHtml(String(run.head_sha).slice(0, 7))}` : '';
+
       return `
         <button class="analysis-history-item ${isSelected ? 'selected' : ''}" data-run-id="${run.id}">
           <div class="analysis-history-item-main" title="${this.escapeHtml(fullTitle)}">
             <span class="analysis-history-item-provider">${providerName}</span>
             <span class="analysis-history-item-model" ${isCouncil ? `data-council-id="${this.escapeHtml(run.model)}"` : ''}>&middot; ${modelName}</span>
+            ${countBadge}
           </div>
           <div class="analysis-history-item-meta">
-            <span>${timeAgo}</span>
-            ${run.status === 'completed' && run.total_suggestions > 0 ? `<span class="analysis-history-chat-btn" data-run-id="${run.id}" title="Chat about this run" role="button" tabindex="-1"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 1h8.5c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0 1 10.25 10H7.061l-2.574 2.573A1.458 1.458 0 0 1 2 11.543V10h-.25A1.75 1.75 0 0 1 0 8.25v-5.5C0 1.784.784 1 1.75 1ZM1.5 2.75v5.5c0 .138.112.25.25.25h1a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h3.5a.25.25 0 0 0 .25-.25v-5.5a.25.25 0 0 0-.25-.25h-8.5a.25.25 0 0 0-.25.25Zm13 2a.25.25 0 0 0-.25-.25h-.5a.75.75 0 0 1 0-1.5h.5c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0 1 14.25 12H14v1.543a1.458 1.458 0 0 1-2.487 1.03L9.22 12.28a.749.749 0 0 1 .326-1.275.749.749 0 0 1 .734.215l2.22 2.22v-2.19a.75.75 0 0 1 .75-.75h1a.25.25 0 0 0 .25-.25Z"/></svg></span>` : ''}
+            <span>${runIndexLabel} &middot; ${timeAgo}${shaText}</span>
+            ${run.status === 'completed' && run.total_suggestions > 0 ? `<span class="analysis-history-chat-btn" data-run-id="${run.id}" title="Chat about this run" role="button" tabindex="-1"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.75 1h8.5c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0 1 10.25 10H7.061l-2.574 2.573A1.458 1.458 0 0 1 2 11.543V10h-.25A1.75 1.75 0 0 1 0 8.25v-5.5C0 1.784.784 1 1.75 1ZM1.5 2.75v5.5c0 .138.112.25.25.25h1a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h3.5a.25.25 0 0 0 .25-.25v-5.5a.25.25 0 0 0-.25-.25h-8.5a.25.25 0 0 0-.25.25Zm13 2a.25.25 0 0 0-.25-.25h-.5a.75.75 0 0 1 0-1.5h.5c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0 1 14.25 12H14v1.543a1.458 1.458 0 0 1-2.487 1.03L9.22 12.28a.749.749 0 0 1 .326-1.275.749.749 0 0 1 .734.215l2.22 2.22v-2.19a.75.75 0 0 1 .75-.75h1a.25.25 0 0 0 .25-.25Z"/></svg></span>` : ''}
           </div>
         </button>
       `;
@@ -394,6 +404,52 @@ class AnalysisHistoryManager {
       const model = run.model || 'Unknown';
       this.historyLabel.textContent = `${timeAgo} \u00B7 ${provider} \u00B7 ${model}`;
     }
+    this.syncToolbarStatus();
+  }
+
+  syncToolbarStatus() {
+    if (typeof document === 'undefined') return;
+    const analyzeBtn = document.getElementById('analyze-btn');
+    const toolbarActions = analyzeBtn?.parentElement;
+    if (!toolbarActions) return;
+    let pill = document.getElementById('toolbar-ai-status');
+    if (!pill) {
+      pill = document.createElement('button');
+      pill.type = 'button';
+      pill.id = 'toolbar-ai-status';
+      pill.className = 'toolbar-ai-status-pill';
+      pill.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!this.runs || this.runs.length === 0) {
+          analyzeBtn?.click();
+          return;
+        }
+        const aiPanel = document.getElementById('ai-panel');
+        if (aiPanel?.classList.contains('collapsed')) {
+          window.aiPanel?.toggle?.();
+        }
+        setTimeout(() => this.showDropdown(), 60);
+      });
+      toolbarActions.insertBefore(pill, analyzeBtn);
+    }
+    if (!this.runs || this.runs.length === 0) {
+      pill.dataset.state = 'unreviewed';
+      pill.textContent = 'Not AI reviewed';
+      pill.title = 'No AI analysis has been run on this pull request yet. Click to configure and run AI analysis.';
+      pill.setAttribute('aria-label', 'Not AI reviewed. Click to analyze with AI.');
+      return;
+    }
+    const run = this.selectedRun || this.runs[0];
+    const provider = this.formatProviderName(run.provider);
+    const model = run.provider === 'council' ? 'Council' : (run.model || 'default');
+    const count = Number(run.total_suggestions || 0);
+    const countText = count === 0 ? '0 findings' : `${count} finding${count === 1 ? '' : 's'}`;
+    const timeAgo = this.formatRelativeTime(run.completed_at || run.started_at);
+    const historySuffix = this.runs.length > 1 ? ` \u00B7 ${this.runs.length} runs \u25BE` : ' \u25BE';
+    pill.dataset.state = 'reviewed';
+    pill.textContent = `AI reviewed \u00B7 ${provider}/${model} \u00B7 ${countText} \u00B7 ${timeAgo}${historySuffix}`;
+    pill.title = `Click to view ${this.runs.length} AI analysis run${this.runs.length === 1 ? '' : 's'} and summary`;
+    pill.setAttribute('aria-label', pill.textContent);
   }
 
   /**

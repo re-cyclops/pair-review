@@ -43,9 +43,12 @@ router.get('/api/reviews/recent', (req, res) => {
   const through = req.query.through && req.query.through !== 'end' ? decode(req.query.through) : null;
   if (!valid(before) || req.query.through && req.query.through !== 'end' && !valid(through)) return res.status(400).json({ error: 'Invalid review cursor' });
   const limit = Math.min(200, Math.max(1, Math.floor(Number(req.query.limit) || 200)));
-  const rows = db.prepare(`SELECT r.id, r.repository, r.pr_number, r.review_type, r.name, r.updated_at, r.local_head_sha,
+  const rows = db.prepare(`SELECT r.id, r.repository, r.pr_number, r.review_type, r.name, r.status, r.submitted_at, r.updated_at, r.local_head_sha,
+      json_extract(r.review_data, '$.event') AS submitted_event,
       p.title, p.host, p.pr_data, MAX(COALESCE(julianday(p.last_accessed_at), 0), julianday(r.updated_at)) AS touched,
       d.draft_count, d.has_summary, json_extract(r.review_progress, '$.reviewed.head') AS last_reviewed_head,
+      (SELECT COUNT(*) FROM analysis_runs a WHERE a.review_id = r.id AND a.parent_run_id IS NULL) AS ai_run_count,
+      (SELECT json_object('id', a.id, 'status', a.status, 'provider', a.provider, 'model', a.model, 'totalSuggestions', a.total_suggestions, 'completedAt', a.completed_at, 'startedAt', a.started_at, 'headSha', a.head_sha) FROM analysis_runs a WHERE a.review_id = r.id AND a.parent_run_id IS NULL ORDER BY julianday(a.started_at) DESC, a.rowid DESC LIMIT 1) AS latest_ai_run,
       (SELECT activity_state FROM analysis_runs a WHERE a.review_id = r.id AND a.parent_run_id IS NULL ORDER BY julianday(a.started_at) DESC, a.rowid DESC LIMIT 1) AS activity
     FROM reviews r LEFT JOIN pr_metadata p ON p.repository = r.repository COLLATE NOCASE AND p.pr_number = r.pr_number
     JOIN (${getDraftStateQuery()}) d ON d.review_id = r.id
@@ -57,8 +60,11 @@ router.get('/api/reviews/recent', (req, res) => {
     return { id: row.id, reviewType: row.review_type, repository: local ? path.basename(row.repository) : row.repository,
       number: row.pr_number, title: row.title || row.name || path.basename(row.repository),
       headSha: local ? row.local_head_sha : pr.head_sha || null, host: row.host || null,
+      status: row.status || null, submittedAt: row.submitted_at || null, submittedEvent: row.submitted_event || null,
       draftCount: row.draft_count, hasDraftSummary: Boolean(row.has_summary),
       lastReviewedHead: row.last_reviewed_head || null,
+      aiRunCount: Number(row.ai_run_count || 0),
+      latestAiRun: safeParseJson(row.latest_ai_run),
       updatedAt: row.updated_at, activity: safeParseJson(row.activity),
       url: local ? `/local/${row.id}` : `/pr/${row.repository.split('/').map(encodeURIComponent).join('/')}/${row.pr_number}${row.host ? `?host=${encodeURIComponent(row.host)}` : ''}` };
   });
@@ -67,6 +73,23 @@ router.get('/api/reviews/recent', (req, res) => {
   // record was deleted or moved to the front. Each response remains bounded.
   const covered = !hasMore || !!(through && last && (last.touched < through.at || last.touched === through.at && last.id <= through.id));
   res.json({ reviews, hasMore, covered, next: hasMore ? Buffer.from(JSON.stringify({ at: last.touched, id: last.id })).toString('base64url') : null });
+});
+
+router.post('/api/reviews/resolve', async (req, res) => {
+  try {
+    const { owner, repo, number } = req.body || {};
+    const prNumber = Number(number);
+    if (!owner || !repo || !Number.isInteger(prNumber) || prNumber < 1) {
+      return res.status(400).json({ error: 'Valid owner, repo, and PR number required' });
+    }
+    const db = req.app.get('db');
+    const reviewRepo = new ReviewRepository(db);
+    const repository = normalizeRepository(owner, repo);
+    const { review } = await reviewRepo.getOrCreate({ prNumber, repository });
+    res.json({ reviewId: review.id, repository, prNumber });
+  } catch (error) {
+    submissionError(res, error);
+  }
 });
 
 router.get('/api/reviews/:reviewId/progress', validateReviewId, async (req, res) => {

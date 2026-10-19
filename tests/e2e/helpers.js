@@ -28,7 +28,7 @@ async function waitForDiffToRender(page, timeout = 10000) {
 
 async function openReviewAuthoring(page) {
   await waitForDiffToRender(page);
-  await page.getByRole('button', { name: /^Preview review/ }).click();
+  await page.getByRole('button', { name: /^Submit review/ }).click();
   await page.locator('#review-body-modal').waitFor({ state: 'visible' });
 }
 

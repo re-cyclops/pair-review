@@ -75,9 +75,12 @@
       this.rail = node('nav', null, { class: 'workspace-rail', 'aria-label': 'Review workspace' });
       this.activityButton = node('button', 'Connecting to activity…', { type: 'button', 'aria-haspopup': 'dialog', class: 'workspace-activity-button' });
       this.activityButton.addEventListener('click', () => this.showActivity());
-      const commands = node('button', `Commands ${this.shortcutHint}`, { type: 'button', 'aria-haspopup': 'dialog', 'aria-keyshortcuts': `${this.isMac ? 'Meta' : 'Control'}+K` });
+      const commands = node('button', null, { type: 'button', 'aria-haspopup': 'dialog', 'aria-keyshortcuts': `${this.isMac ? 'Meta' : 'Control'}+K`, class: 'workspace-rail-commands' });
+      commands.append(node('span', 'Commands '), node('kbd', this.shortcutHint, { class: 'workspace-kbd' }));
       commands.addEventListener('click', () => this.showPalette());
-      this.rail.append(node('a', 'Review inbox', { href: '/' }), this.activityButton, commands);
+      this.stopServerBtn = node('button', 'Stop server', { type: 'button', 'aria-haspopup': 'dialog', class: 'workspace-stop-server-btn', title: 'Stop the background pair-review server' });
+      this.stopServerBtn.addEventListener('click', () => this.showStopServerModal());
+      this.rail.append(node('a', 'Review inbox', { href: '/' }), this.activityButton, commands, this.stopServerBtn);
       if (this.currentTarget) {
         const evidence = node('button', this.currentTarget.local ? 'Local context' : 'Review evidence', { type: 'button', 'aria-haspopup': 'dialog' });
         evidence.addEventListener('click', () => this.showCurrentEvidence());
@@ -98,7 +101,7 @@
       });
       this.drawer.append(this.identityLabel, this.activityList, notifications);
       this.palette = this.makeDialog('workspace-commands', 'Commands');
-      this.search = node('input', null, { type: 'search', role: 'combobox', 'aria-label': 'Search commands, reviews or a PR URL', 'aria-controls': 'workspace-command-results', 'aria-expanded': 'true', 'aria-autocomplete': 'list', autocomplete: 'off', placeholder: 'Find a review or action…' });
+      this.search = node('input', null, { type: 'search', name: 'workspace-command-search', role: 'combobox', 'aria-label': 'Search commands, reviews or a PR URL', 'aria-controls': 'workspace-command-results', 'aria-expanded': 'true', 'aria-autocomplete': 'list', autocomplete: 'off', spellcheck: 'false', placeholder: 'Find a review or action…' });
       this.results = node('div', null, { id: 'workspace-command-results', role: 'listbox', 'aria-label': 'Matching commands' });
       this.commandStatus = node('p', '', { role: 'status', 'aria-live': 'polite', class: 'workspace-muted' });
       this.moreReviews = node('button', 'Load older saved reviews', { type: 'button' });
@@ -194,6 +197,7 @@
       this.register('open-selected', 'Open this pull request on its canonical host', () => window.ReviewEvidence.externalLink('Open pull request', this.currentSnapshot.identity.url).click(), { available: () => !!window.ReviewEvidence.externalUrl(this.currentSnapshot?.identity?.url) });
       const failing = () => window.ReviewEvidence.failingCheck(window.reviewInbox?.selected?.snapshot || this.currentSnapshot);
       this.register('failing-check', 'Open observed failing check…', () => window.ReviewEvidence.externalLink('Check details', failing().url).click(), { available: () => !!failing() });
+      this.register('stop-server', 'Stop pair-review server\u2026', () => this.showStopServerModal());
     }
 
     showPalette(group = null) {
@@ -455,6 +459,59 @@
     }
 
     showActivity() { this.open(this.drawer); this.renderActivityList(); this.refresh(); }
+    async showStopServerModal() {
+      if (!this.stopModal) {
+        this.stopModal = this.makeDialog('workspace-stop-server', 'Stop pair-review server');
+        this.stopModalBody = node('div', null, { class: 'workspace-progress-body' });
+        this.stopModal.append(this.stopModalBody);
+      }
+      const runningCount = [...this.runs.values()].filter(run => !settled.has(run.status)).length;
+      this.stopModalBody.replaceChildren(
+        node('p', runningCount
+          ? `${runningCount} AI analysis ${runningCount === 1 ? 'is' : 'are'} currently running. Stopping the server will cancel active runs; saved drafts and completed reviews remain in SQLite.`
+          : 'Shut down the local background pair-review server? All saved drafts, comments, and completed AI reviews remain stored in SQLite.'),
+        node('p', 'Checking server idle timer\u2026', { class: 'workspace-muted', id: 'workspace-idle-status' })
+      );
+      const actions = node('div', null, { class: 'workspace-review-actions' });
+      const confirmBtn = node('button', 'Stop server now', { type: 'button', class: 'workspace-stop-confirm-btn' });
+      const cancelBtn = node('button', 'Keep server running', { type: 'button', class: 'workspace-btn-secondary' });
+      cancelBtn.addEventListener('click', () => this.stopModal.close());
+      confirmBtn.addEventListener('click', async () => {
+        confirmBtn.disabled = true;
+        confirmBtn.dataset.loading = 'true';
+        confirmBtn.textContent = 'Stopping server\u2026';
+        try {
+          await post('/api/server/stop');
+          clearTimeout(this.timer);
+          this.available = false;
+          this.activityButton.textContent = 'Server stopped \u00B7 run ,pr_review --ui to restart';
+          this.stopServerBtn.disabled = true;
+          this.stopServerBtn.textContent = 'Server stopped';
+          this.stopModalBody.replaceChildren(
+            node('p', 'Pair-review server has been stopped. Run ,pr_review --ui in your terminal whenever you want to start it again.')
+          );
+          window.toast?.success('Pair-review server stopped.');
+        } catch (error) {
+          confirmBtn.disabled = false;
+          delete confirmBtn.dataset.loading;
+          confirmBtn.textContent = 'Stop server now';
+          this.stopModalBody.append(node('p', `Could not stop server: ${error.message}`, { role: 'alert' }));
+        }
+      });
+      actions.append(confirmBtn, cancelBtn);
+      this.stopModalBody.append(actions);
+      this.open(this.stopModal);
+      try {
+        const status = await json('/api/server/status');
+        const idleEl = this.stopModalBody.querySelector('#workspace-idle-status');
+        if (idleEl && status) {
+          const expiresText = status.expiresAt ? ` (next auto-stop at ${new Date(status.expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })})` : '';
+          idleEl.textContent = status.idleTimeoutHours
+            ? `Server PID ${status.pid} \u00B7 auto-stops after ${status.idleTimeoutHours}h of inactivity${expiresText}.`
+            : `Server PID ${status.pid} \u00B7 automatic idle shutdown disabled.`;
+        }
+      } catch { /* ignore status fetch errors */ }
+    }
     renderActivityList() {
       this.identityLabel.textContent = this.identity ? `Connected instance ${this.identity.instanceId.slice(0, 8)} · database ${this.identity.dbId.slice(0, 8)} · ${location.origin}. Other processes or machines may not be observed.` : 'Connection unavailable';
       const focusedId = this.drawer.contains(document.activeElement) ? document.activeElement.dataset.actionId : null;
