@@ -535,8 +535,9 @@ async function kickOffTourJob({
   }
 
   const worker = deps.generateTourForReview || generateTourForReview;
-  return queue.enqueue(reviewId, 'tour', (signal) =>
-    worker({
+  return queue.enqueue(reviewId, 'tour', (signal) => {
+    require('../review-removal').assertReviewAvailable(db, reviewId);
+    return worker({
       db,
       config,
       reviewId,
@@ -551,8 +552,8 @@ async function kickOffTourJob({
       // a user-initiated cancel reaches the upstream provider call.
       abortSignal: signal,
       _deps
-    })
-  );
+    });
+  });
 }
 
 module.exports = {

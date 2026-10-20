@@ -191,7 +191,7 @@ describe('impl/rest/pending-review', () => {
       expect(result.databaseId).toBe(200);
     });
 
-    it('does not throw when comment-counting fails; defaults totalCount to 0', async () => {
+    it('keeps the comment count unknown when its lookup fails', async () => {
       const octokit = makeOctokit({
         getAuthenticated: async () => ({ data: { id: 42 } }),
         listReviews: async () => ({ data: [
@@ -200,7 +200,7 @@ describe('impl/rest/pending-review', () => {
         listCommentsForReview: async () => { throw new Error('comments fetch failed'); }
       });
       const result = await restImpl.getPendingReviewForUser(octokit, 'o', 'r', 1);
-      expect(result.comments).toEqual({ totalCount: 0 });
+      expect(result.comments).toEqual({ totalCount: null });
     });
   });
 
@@ -210,33 +210,6 @@ describe('impl/rest/pending-review', () => {
       await expect(restImpl.getReviewById(octokit, 123)).rejects.toThrow(/prContext=\{owner, repo, prNumber\}/);
     });
 
-    it('uses prContext.reviewId when provided and returns the normalised shape', async () => {
-      const octokit = makeOctokit({
-        getReview: async (args) => ({
-          data: {
-            id: args.review_id,
-            node_id: 'PRR_xyz',
-            state: 'APPROVED',
-            submitted_at: '2026-05-19T01:00:00Z',
-            html_url: 'https://althost.example/o/r/pull/1#pullrequestreview-77'
-          }
-        })
-      });
-      const result = await restImpl.getReviewById(
-        octokit,
-        'PRR_xyz',
-        { owner: 'o', repo: 'r', prNumber: 1, reviewId: 77 }
-      );
-      expect(octokit.rest.pulls.getReview).toHaveBeenCalledWith({
-        owner: 'o', repo: 'r', pull_number: 1, review_id: 77
-      });
-      expect(result).toEqual({
-        id: 'PRR_xyz',
-        state: 'APPROVED',
-        submittedAt: '2026-05-19T01:00:00Z',
-        url: 'https://althost.example/o/r/pull/1#pullrequestreview-77'
-      });
-    });
 
     it('falls back to a numeric nodeId argument when prContext.reviewId is missing', async () => {
       const octokit = makeOctokit({

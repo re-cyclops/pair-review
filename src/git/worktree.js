@@ -983,6 +983,24 @@ class GitWorktreeManager {
   }
 
   /**
+   * Remove a user-selected checkout without forcing away local files or Git
+   * locks. Unlike failed-creation cleanup, errors leave its registry intact.
+   */
+  async removeWorktree(worktreePath, { dryRun = false } = {}) {
+    if (!await this.pathExists(worktreePath)) return;
+    const owningRepo = await this.resolveOwningRepo(worktreePath);
+    if (!owningRepo) throw new Error('Cannot identify the checkout owner; nothing was removed');
+    if (dryRun) {
+      const status = await this._gitFor(worktreePath).status();
+      if (!status.isClean()) {
+        throw Object.assign(new Error('Checkout has local changes or untracked files. Nothing was removed.'), { statusCode: 409 });
+      }
+      return;
+    }
+    await owningRepo.raw(['worktree', 'remove', '--', worktreePath]);
+  }
+
+  /**
    * Cleanup a specific worktree
    * @param {string} worktreePath - Path to worktree to cleanup
    * @returns {Promise<void>}

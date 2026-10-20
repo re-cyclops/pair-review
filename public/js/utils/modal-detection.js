@@ -18,6 +18,7 @@
  * @type {string[]}
  */
 const MODAL_SELECTORS = [
+  'dialog[open]',
   '.modal-overlay:not(#keyboard-shortcuts-help)',
   '.review-modal-overlay',
   '.preview-modal-overlay',

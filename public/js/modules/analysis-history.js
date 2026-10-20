@@ -194,10 +194,11 @@ class AnalysisHistoryManager {
    * @param {HTMLElement} element - Element to update
    * @param {string} councilId - Council ID to resolve
    * @param {function} formatter - Takes the resolved name, returns the text to set on the element
+   * @param {function} isCurrent - Optional guard for a shared label that may now show another run
    */
-  async _patchCouncilName(element, councilId, formatter) {
+  async _patchCouncilName(element, councilId, formatter, isCurrent = () => true) {
     const name = await this.resolveCouncilName(councilId);
-    if (element && element.isConnected) {
+    if (element && element.isConnected && isCurrent()) {
       element.textContent = formatter(name);
     }
   }
@@ -226,6 +227,7 @@ class AnalysisHistoryManager {
 
     if (this.runs.length === 0) {
       this.hide();
+      this.syncToolbarStatus();
       return [];
     }
 
@@ -241,7 +243,19 @@ class AnalysisHistoryManager {
     this.renderDropdown(this.runs);
 
     this.show();
+    this.syncToolbarStatus();
     return this.runs;
+  }
+
+  actualModelLabel(run) {
+    const models = Array.isArray(run.actualModels) ? run.actualModels : [];
+    const identities = models.filter(item => item && typeof item.model === 'string' && item.model.trim())
+      .map(item => [item.provider, item.model].filter(Boolean).join('/'));
+    return [...new Set(identities)].join(', ') || 'model not recorded';
+  }
+
+  requestedModelLabel(run) {
+    return [run.provider, run.model].filter(Boolean).join('/') || 'not recorded';
   }
 
   /**
@@ -258,21 +272,27 @@ class AnalysisHistoryManager {
       const timeAgo = this.formatRelativeTime(run.completed_at || run.started_at);
 
       const isCouncil = run.provider === 'council';
-      const modelName = isCouncil ? 'council' : this.escapeHtml(run.model || 'Unknown');
-      const providerName = this.escapeHtml(this.formatProviderName(run.provider));
-      const fullTitle = isCouncil
-        ? 'council'
-        : `${this.formatProviderName(run.provider)} - ${run.model || 'Unknown'}`;
+      const modelName = this.escapeHtml(this.actualModelLabel(run));
+      const fullTitle = `Actual: ${this.actualModelLabel(run)} · Requested: ${this.requestedModelLabel(run)}`;
+
+      const runIndexLabel = runs.indexOf(run) === 0 ? 'Latest' : `#${runs.length - runs.indexOf(run)}`;
+      const suggestionCount = Number(run.total_suggestions || 0);
+      const countBadge = run.status === 'completed'
+        ? `<span class="analysis-history-count-badge ${suggestionCount === 0 ? 'count-zero' : 'count-nonzero'}">${suggestionCount === 0 ? '0 findings' : `${suggestionCount} finding${suggestionCount === 1 ? '' : 's'}`}</span>`
+        : `<span class="analysis-history-count-badge">${this.escapeHtml(run.status || 'run')}</span>`;
+      const shaText = run.head_sha ? ` &middot; ${this.escapeHtml(String(run.head_sha).slice(0, 7))}` : '';
 
       return `
         <button class="analysis-history-item ${isSelected ? 'selected' : ''}" data-run-id="${run.id}">
           <div class="analysis-history-item-main" title="${this.escapeHtml(fullTitle)}">
-            <span class="analysis-history-item-provider">${providerName}</span>
-            <span class="analysis-history-item-model" ${isCouncil ? `data-council-id="${this.escapeHtml(run.model)}"` : ''}>&middot; ${modelName}</span>
+            <span class="analysis-history-item-provider">Actual</span>
+            <span class="analysis-history-item-model">&middot; ${modelName}</span>
+            ${isCouncil ? `<span class="analysis-history-council-reference" data-council-id="${this.escapeHtml(run.model || '')}">&middot; Council</span>` : ''}
+            ${countBadge}
           </div>
           <div class="analysis-history-item-meta">
-            <span>${timeAgo}</span>
-            ${run.status === 'completed' && run.total_suggestions > 0 ? `<span class="analysis-history-chat-btn" data-run-id="${run.id}" title="Chat about this run" role="button" tabindex="-1"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 1h8.5c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0 1 10.25 10H7.061l-2.574 2.573A1.458 1.458 0 0 1 2 11.543V10h-.25A1.75 1.75 0 0 1 0 8.25v-5.5C0 1.784.784 1 1.75 1ZM1.5 2.75v5.5c0 .138.112.25.25.25h1a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h3.5a.25.25 0 0 0 .25-.25v-5.5a.25.25 0 0 0-.25-.25h-8.5a.25.25 0 0 0-.25.25Zm13 2a.25.25 0 0 0-.25-.25h-.5a.75.75 0 0 1 0-1.5h.5c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0 1 14.25 12H14v1.543a1.458 1.458 0 0 1-2.487 1.03L9.22 12.28a.749.749 0 0 1 .326-1.275.749.749 0 0 1 .734.215l2.22 2.22v-2.19a.75.75 0 0 1 .75-.75h1a.25.25 0 0 0 .25-.25Z"/></svg></span>` : ''}
+            <span>${runIndexLabel} &middot; ${timeAgo}${shaText}</span>
+            ${run.status === 'completed' && run.total_suggestions > 0 ? `<span class="analysis-history-chat-btn" data-run-id="${run.id}" title="Chat about this run" role="button" tabindex="-1"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.75 1h8.5c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0 1 10.25 10H7.061l-2.574 2.573A1.458 1.458 0 0 1 2 11.543V10h-.25A1.75 1.75 0 0 1 0 8.25v-5.5C0 1.784.784 1 1.75 1ZM1.5 2.75v5.5c0 .138.112.25.25.25h1a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h3.5a.25.25 0 0 0 .25-.25v-5.5a.25.25 0 0 0-.25-.25h-8.5a.25.25 0 0 0-.25.25Zm13 2a.25.25 0 0 0-.25-.25h-.5a.75.75 0 0 1 0-1.5h.5c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0 1 14.25 12H14v1.543a1.458 1.458 0 0 1-2.487 1.03L9.22 12.28a.749.749 0 0 1 .326-1.275.749.749 0 0 1 .734.215l2.22 2.22v-2.19a.75.75 0 0 1 .75-.75h1a.25.25 0 0 0 .25-.25Z"/></svg></span>` : ''}
           </div>
         </button>
       `;
@@ -283,7 +303,7 @@ class AnalysisHistoryManager {
     if (councilRuns.length > 0) {
       Promise.all(councilRuns.map(async (run) => {
         const modelSpan = this.listElement.querySelector(
-          `.analysis-history-item[data-run-id="${run.id}"] .analysis-history-item-model[data-council-id]`
+          `.analysis-history-item[data-run-id="${run.id}"] .analysis-history-council-reference[data-council-id]`
         );
         await this._patchCouncilName(modelSpan, run.model, n => `\u00B7 ${n}`);
         // Skip title update if a newer render has occurred since we started
@@ -291,7 +311,7 @@ class AnalysisHistoryManager {
         // Update the parent title too (name is now cached from _patchCouncilName)
         const mainDiv = modelSpan?.closest('.analysis-history-item-main');
         if (mainDiv && mainDiv.isConnected) {
-          mainDiv.title = `council \u00B7 ${this.councilNameCache[run.model] || 'Unknown Council'}`;
+          mainDiv.title = `Actual: ${this.actualModelLabel(run)} · Requested: ${this.requestedModelLabel(run)} · Council: ${this.councilNameCache[run.model] || 'Unknown Council'}`;
         }
       }));
     }
@@ -384,16 +404,59 @@ class AnalysisHistoryManager {
 
     const run = this.selectedRun;
     const timeAgo = this.formatRelativeTime(run.completed_at || run.started_at);
-    const provider = this.formatProviderName(run.provider);
-
+    const actual = this.actualModelLabel(run);
+    this.historyLabel.title = `Actual: ${actual} · Requested: ${this.requestedModelLabel(run)}`;
     if (run.provider === 'council' && run.model) {
-      // Show placeholder immediately, then resolve council name async
-      this.historyLabel.textContent = `${timeAgo} \u00B7 council`;
-      this._patchCouncilName(this.historyLabel, run.model, name => `${timeAgo} \u00B7 council \u00B7 ${name}`);
+      this.historyLabel.textContent = `${timeAgo} \u00B7 ${actual} \u00B7 Council`;
+      this._patchCouncilName(this.historyLabel, run.model, name => `${timeAgo} \u00B7 ${actual} \u00B7 Council: ${name}`, () => this.selectedRun === run);
     } else {
-      const model = run.model || 'Unknown';
-      this.historyLabel.textContent = `${timeAgo} \u00B7 ${provider} \u00B7 ${model}`;
+      this.historyLabel.textContent = `${timeAgo} \u00B7 ${actual}`;
     }
+    this.syncToolbarStatus();
+  }
+
+  syncToolbarStatus() {
+    if (typeof document === 'undefined') return;
+    const analyzeBtn = document.getElementById('analyze-btn');
+    const toolbarActions = analyzeBtn?.parentElement;
+    if (!toolbarActions) return;
+    let pill = document.getElementById('toolbar-ai-status');
+    if (!pill) {
+      pill = document.createElement('button');
+      pill.type = 'button';
+      pill.id = 'toolbar-ai-status';
+      pill.className = 'toolbar-ai-status-pill';
+      pill.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!this.runs || this.runs.length === 0) {
+          analyzeBtn?.click();
+          return;
+        }
+        const aiPanel = document.getElementById('ai-panel');
+        if (aiPanel?.classList.contains('collapsed')) {
+          window.aiPanel?.toggle?.();
+        }
+        setTimeout(() => this.showDropdown(), 60);
+      });
+      toolbarActions.insertBefore(pill, analyzeBtn);
+    }
+    if (!this.runs || this.runs.length === 0) {
+      pill.dataset.state = 'unreviewed';
+      pill.textContent = 'Not AI reviewed';
+      pill.title = 'No AI analysis has been run on this pull request yet. Click to configure and run AI analysis.';
+      pill.setAttribute('aria-label', 'Not AI reviewed. Click to analyze with AI.');
+      return;
+    }
+    const run = this.selectedRun || this.runs[0];
+    const actual = this.actualModelLabel(run);
+    const count = Number(run.total_suggestions || 0);
+    const countText = count === 0 ? '0 findings' : `${count} finding${count === 1 ? '' : 's'}`;
+    const timeAgo = this.formatRelativeTime(run.completed_at || run.started_at);
+    const historySuffix = this.runs.length > 1 ? ` \u00B7 ${this.runs.length} runs \u25BE` : ' \u25BE';
+    pill.dataset.state = 'reviewed';
+    pill.textContent = `AI reviewed \u00B7 ${actual} \u00B7 ${countText} \u00B7 ${timeAgo}${historySuffix}`;
+    pill.title = `Actual: ${actual} · Requested: ${this.requestedModelLabel(run)}. Click to view ${this.runs.length} AI analysis run${this.runs.length === 1 ? '' : 's'} and summary`;
+    pill.setAttribute('aria-label', pill.textContent);
   }
 
   /**
@@ -431,29 +494,37 @@ class AnalysisHistoryManager {
     // Format status
     const statusInfo = this.formatStatus(run.status);
 
-    // Format model in lowercase
-    const modelDisplay = run.model ? run.model.toLowerCase() : 'unknown';
+    // Requested configuration is not evidence of the model that served a run.
+    const modelDisplay = run.model || 'not recorded';
     const isCouncil = run.provider === 'council';
 
-    let html = '';
+    let html = `
+      <div class="analysis-preview-row">
+        <span class="analysis-preview-label">Actual models</span>
+        <span class="analysis-preview-value">${this.escapeHtml(this.actualModelLabel(run))}</span>
+      </div>
+      <div class="analysis-preview-row">
+        <span class="analysis-preview-label">Requested configuration</span>
+        <span class="analysis-preview-value">${this.escapeHtml(this.requestedModelLabel(run))}</span>
+      </div>`;
 
     if (isCouncil) {
-      // For council runs, show a single "Council" row with name (resolved async)
+      // Keep the requested council reference separate from observed execution.
       const cachedName = run.model ? this.councilNameCache[run.model] : null;
       const councilDisplay = cachedName || 'Loading\u2026';
       html += `
       <div class="analysis-preview-row">
-        <span class="analysis-preview-label">Council</span>
+        <span class="analysis-preview-label">Requested council</span>
         <span class="analysis-preview-value analysis-preview-council-name" data-council-id="${this.escapeHtml(run.model || '')}">${this.escapeHtml(councilDisplay)}</span>
       </div>`;
     } else {
       html += `
       <div class="analysis-preview-row">
-        <span class="analysis-preview-label">Provider</span>
-        <span class="analysis-preview-value">${this.escapeHtml(this.formatProviderName(run.provider))}</span>
+        <span class="analysis-preview-label">Requested provider</span>
+        <span class="analysis-preview-value">${this.escapeHtml(run.provider || 'not recorded')}</span>
       </div>
       <div class="analysis-preview-row">
-        <span class="analysis-preview-label">Model</span>
+        <span class="analysis-preview-label">Requested model</span>
         <span class="analysis-preview-value">${this.escapeHtml(modelDisplay)}</span>
       </div>
       <div class="analysis-preview-row">
@@ -618,7 +689,7 @@ class AnalysisHistoryManager {
 
     // Async-resolve council name and patch the preview panel element
     if (isCouncil && run.model && !this.councilNameCache[run.model]) {
-      const el = this.previewPanel.querySelector(`.analysis-preview-council-name[data-council-id="${run.model}"]`);
+      const el = [...this.previewPanel.querySelectorAll('.analysis-preview-council-name')].find(element => element.dataset.councilId === run.model);
       this._patchCouncilName(el, run.model, name => name);
     }
   }

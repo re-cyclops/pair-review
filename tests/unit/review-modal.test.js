@@ -1,606 +1,197 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
-/**
- * Unit tests for ReviewModal component
- *
- * Tests the updatePendingDraftNotice method, specifically the draft radio label
- * text changing based on pending draft existence.
- *
- * IMPORTANT: These tests import the actual ReviewModal class from production code.
- */
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+const draftModule = require.resolve('../../public/js/modules/draft-store.js');
+delete require.cache[draftModule];
+require(draftModule);
+const { ReviewModal } = require('../../public/js/components/ReviewModal.js');
+const drafts = window.reviewDrafts;
+const modal = window.reviewModal || new ReviewModal();
+let manifest;
 
-// Setup minimal DOM globals before importing ReviewModal
-beforeEach(() => {
-  // Reset mocks
-  vi.resetAllMocks();
-
-  // Create a minimal document mock
-  global.document = {
-    readyState: 'complete',
-    getElementById: vi.fn().mockReturnValue(null),
-    createElement: vi.fn().mockImplementation((tag) => {
-      return createMockElement(tag);
-    }),
-    body: {
-      appendChild: vi.fn()
-    },
-    addEventListener: vi.fn(),
-    querySelectorAll: vi.fn().mockReturnValue([])
+beforeEach(async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('Unexpected network request'); }));
+  sessionStorage.clear();
+  drafts.entries.clear();
+  drafts.connect({ dbId: 'modal-test-db', instanceId: 'modal-test-instance' });
+  window.prManager = { currentPR: { id: 1, head_sha: 'head' } };
+  window.aiPanel = { getSummary: () => 'AI finding\n\n    keepIndentation();\n' };
+  document.body.replaceChildren(drafts.button);
+  modal.reviewId = 1;
+  modal.isSubmitting = false;
+  modal.isQuickSubmitting = false;
+  modal.isPreparing = false;
+  modal.cleanupPending = false;
+  modal.lastReceipt = null;
+  modal.modal = document.createElement('dialog');
+  modal.modal.open = true;
+  modal.content = document.createElement('div');
+  modal.modal.append(modal.content);
+  document.body.append(modal.modal);
+  modal.error = document.createElement('p');
+  modal.note = document.createElement('p');
+  modal.savedSummary = { id: 1, revision: 2, body: 'Existing review body\n', event: 'COMMENT' };
+  const comment = { id: 10, draft_key: 'draft-10', revision: 3, included: 1, file: 'a.js',
+    line_start: 2, line_end: 2, side: 'RIGHT', body: 'Exact draft\n', status: 'active' };
+  modal.comments = new Map([[comment.id, comment]]);
+  manifest = {
+    reviewType: 'pr', body: modal.savedSummary.body, bodyRevision: 2, event: 'COMMENT', mode: 'submit',
+    count: 1, digest: 'confirmed-server-manifest', fetchedAt: '2026-10-08T12:00:00Z', blockers: [],
+    allowedEvents: ['COMMENT', 'APPROVE', 'REQUEST_CHANGES'],
+    target: { repository: 'owner/repo', number: 1, host: 'github.com', head: 'head',
+      account: { id: 7, login: 'reviewer' }, url: 'https://github.com/owner/repo/pull/1' },
+    drafts: [{ id: 10, key: comment.draft_key, revision: 3, included: true, body: comment.body,
+      wire: { path: 'a.js', line: 2, side: 'RIGHT', isFileLevel: false }, errors: [] }]
   };
-
-  // Create a minimal window mock
-  global.window = {
-    reviewModal: null,
-    prManager: null,
-    aiPanel: null,
-    toast: null,
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn()
-  };
-
-  // Create a localStorage mock
-  global.localStorage = {
-    _store: {},
-    getItem: vi.fn((key) => global.localStorage._store[key] ?? null),
-    setItem: vi.fn((key, value) => { global.localStorage._store[key] = value; }),
-    removeItem: vi.fn((key) => { delete global.localStorage._store[key]; }),
-    clear: vi.fn(() => { global.localStorage._store = {}; })
-  };
+  await modal.renderAuthoring(manifest);
 });
 
 afterEach(() => {
-  vi.restoreAllMocks();
-  delete global.document;
-  delete global.window;
-  delete global.localStorage;
+  vi.clearAllTimers();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  drafts.entries.clear();
+  sessionStorage.clear();
 });
 
-/**
- * Create a mock DOM element with querySelector support.
- * Maintains an innerHTML-based child structure for querySelector to traverse.
- */
-function createMockElement(tag) {
-  const children = [];
-  let innerHTML = '';
-  const element = {
-    tagName: tag?.toUpperCase(),
-    id: '',
-    className: '',
-    style: {},
-    innerHTML: '',
-    textContent: '',
-    value: '',
-    disabled: false,
-    checked: false,
-    title: '',
-    href: '',
-    _children: children,
-    appendChild: vi.fn((child) => {
-      children.push(child);
-    }),
-    remove: vi.fn(),
-    querySelector: vi.fn(),
-    querySelectorAll: vi.fn().mockReturnValue([]),
-    addEventListener: vi.fn(),
-    closest: vi.fn(),
-    setAttribute: vi.fn(),
-    getAttribute: vi.fn(),
-    classList: {
-      add: vi.fn(),
-      remove: vi.fn(),
-      contains: vi.fn().mockReturnValue(false)
-    },
-    focus: vi.fn()
-  };
-  return element;
-}
-
-/**
- * Build a ReviewModal instance for testing with mock DOM wired up.
- * Returns the instance and references to key mock elements.
- */
-function createTestReviewModal() {
-  // Import the actual ReviewModal class
-  const { ReviewModal } = require('../../public/js/components/ReviewModal.js');
-
-  // Reset the static listeners flag so constructor can register listeners
-  ReviewModal._listenersRegistered = false;
-
-  // Create the mock modal container element
-  const modalContainer = createMockElement('div');
-
-  // Create mock elements that updatePendingDraftNotice needs
-  const pendingDraftNotice = createMockElement('div');
-  pendingDraftNotice.id = 'pending-draft-notice';
-  pendingDraftNotice.style = { display: 'none' };
-
-  const pendingDraftCount = createMockElement('strong');
-  pendingDraftCount.id = 'pending-draft-count';
-  pendingDraftCount.textContent = '0';
-
-  const pendingDraftLink = createMockElement('a');
-  pendingDraftLink.id = 'pending-draft-link';
-  pendingDraftLink.style = { display: 'inline' };
-  pendingDraftLink.href = '';
-
-  // Create a persistent textarea element
-  const textarea = createMockElement('textarea');
-  textarea.id = 'review-body-modal';
-  textarea.value = '';
-
-  // Create assisted-by checkbox and toggle
-  const assistedByCheckbox = createMockElement('input');
-  assistedByCheckbox.type = 'checkbox';
-  assistedByCheckbox.id = 'assisted-by-checkbox';
-  assistedByCheckbox.checked = false;
-
-  const assistedByToggle = createMockElement('label');
-  assistedByToggle.id = 'assisted-by-toggle';
-  assistedByToggle.className = 'assisted-by-toggle';
-
-  // Create the DRAFT radio input and its label
-  const draftRadioInput = createMockElement('input');
-  draftRadioInput.type = 'radio';
-  draftRadioInput.value = 'DRAFT';
-
-  const draftTypeLabel = createMockElement('span');
-  draftTypeLabel.className = 'review-type-label';
-  draftTypeLabel.textContent = 'Save as Draft';
-
-  const draftTypeOption = createMockElement('label');
-  draftTypeOption.className = 'review-type-option';
-  draftTypeOption.querySelector = vi.fn().mockImplementation((sel) => {
-    if (sel === '.review-type-label') return draftTypeLabel;
-    return null;
+describe('Review authorization and durable authoring', () => {
+  it('appends an explicitly requested AI summary into the real recoverable editor without rewriting either text', () => {
+    modal.appendAISummary();
+    const expected = 'Existing review body\n\n\nAI finding\n\n    keepIndentation();\n';
+    expect(modal.bodyInput.value).toBe(expected);
+    expect(modal.bodyInput.draftEntry.body).toBe(expected);
+    expect(drafts.hasPending(1)).toBe(true);
+    expect(JSON.parse(sessionStorage.getItem(`${drafts.prefix}1:summary:1`)).body).toBe(expected);
+    expect(document.activeElement).toBe(modal.bodyInput);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
-  draftRadioInput.closest = vi.fn().mockImplementation((sel) => {
-    if (sel === '.review-type-option') return draftTypeOption;
-    return null;
+  it('clears a confirmed publication when the user edits, retaining the new text for recovery', async () => {
+    modal.manifest = manifest;
+    modal.renderFinal(manifest);
+    expect(modal.publishButton.disabled).toBe(true);
+    modal.confirm.checked = true;
+    modal.confirm.dispatchEvent(new Event('change'));
+    expect(modal.publishButton.disabled).toBe(false);
+    const textarea = modal.cards.get('draft-10').textarea;
+    textarea.value = 'New unsubmitted text\n';
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(modal.confirm.checked).toBe(false);
+    expect(modal.confirm.disabled).toBe(true);
+    expect(modal.publishButton.disabled).toBe(true);
+    expect(textarea.value).toBe('New unsubmitted text\n');
+    expect(drafts.hasPending(1)).toBe(true);
+    await modal.publish();
+    expect(fetch).not.toHaveBeenCalled();
   });
 
-  // Wire up querySelector on pendingDraftNotice
-  pendingDraftNotice.querySelector = vi.fn().mockImplementation((sel) => {
-    if (sel === '#pending-draft-count') return pendingDraftCount;
-    if (sel === '#pending-draft-link') return pendingDraftLink;
-    return null;
+  it.each(['revision', 'body', 'included'])('refuses a fresh manifest whose %s differs from the visible authoring view', field => {
+    if (field === 'revision') manifest.drafts[0].revision++;
+    if (field === 'body') manifest.drafts[0].body = 'Peer edit';
+    if (field === 'included') manifest.drafts[0].included = false;
+    modal.manifest = manifest;
+    modal.renderFinal(manifest);
+    expect(modal.manifest).toBeNull();
+    expect(modal.finalSection.querySelector('input[type=checkbox]')).toBeNull();
+    expect(modal.cards.get('draft-10').textarea.value).toBe('Exact draft\n');
+    expect(fetch).not.toHaveBeenCalled();
   });
 
-  // Wire up querySelector on modalContainer
-  modalContainer.querySelector = vi.fn().mockImplementation((sel) => {
-    if (sel === '#pending-draft-notice') return pendingDraftNotice;
-    if (sel === 'input[name="review-event"][value="DRAFT"]') return draftRadioInput;
-    if (sel === '#review-body-modal') return textarea;
-    if (sel === '#assisted-by-checkbox') return assistedByCheckbox;
-    if (sel === '#assisted-by-toggle') return assistedByToggle;
-    if (sel === 'input[name="review-event"]:checked') {
-      const radio = createMockElement('input');
-      radio.value = 'COMMENT';
-      return radio;
+  it('keeps a host-blocked preview non-publishable even if a stale caller invokes publication', async () => {
+    manifest.blockers = ['Current revision cannot be verified'];
+    modal.manifest = manifest;
+    modal.renderFinal(manifest);
+    expect(modal.confirm.disabled).toBe(true);
+    modal.confirm.checked = true;
+    await modal.publish();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(modal.bodyInput.value).toBe('Existing review body\n');
+  });
+
+  it('restores the selected action after a failed quick preflight', async () => {
+    const actionLabel = modal.quickSubmitButton.textContent;
+    fetch.mockResolvedValue({ ok: false, status: 503, json: async () => ({ error: 'Host unavailable' }) });
+    await expect(modal.quickSubmit()).rejects.toThrow('Host unavailable');
+    expect(modal.quickSubmitButton.textContent).toBe(actionLabel);
+    expect(modal.quickSubmitButton.disabled).toBe(false);
+    expect(modal.quickSubmitButton.dataset.loading).toBeUndefined();
+    expect(modal.authoring.disabled).toBe(false);
+  });
+
+  it.each(['quick approval', 'explicit preview'])('locks conflicting actions during %s and ignores a second invocation', async mode => {
+    const actionLabel = modal.quickSubmitButton.textContent;
+    let release;
+    const response = new Promise(resolve => { release = resolve; });
+    fetch.mockReturnValue(response);
+    const first = mode === 'quick approval' ? modal.quickSubmit() : modal.prepare();
+    let second;
+    try {
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+      expect(modal.prepareButton.disabled).toBe(true);
+      expect(modal.refreshButton.disabled).toBe(true);
+      expect(modal.authoring.disabled).toBe(true);
+      second = modal.quickSubmit();
+    } finally {
+      release({ ok: true, json: async () => ({ ...manifest, blockers: ['Publication blocked by host'] }) });
+      await Promise.allSettled([first, second]);
     }
-    if (sel === '.review-comment-count') return createMockElement('div');
-    if (sel === '#review-error-message') return createMockElement('div');
-    if (sel === '#large-review-warning') return createMockElement('div');
-    if (sel === '#copy-ai-summary-link') return createMockElement('a');
-    return null;
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(modal.quickSubmitButton.disabled).toBe(false);
+    expect(modal.quickSubmitButton.textContent).toBe(actionLabel);
+    expect(modal.finalSection.textContent).toContain('Publication blocked by host');
   });
 
-  // Prevent the constructor from creating real DOM elements
-  document.getElementById = vi.fn().mockReturnValue(null);
-  document.createElement = vi.fn().mockReturnValue(modalContainer);
-
-  // Create the ReviewModal instance
-  const modal = Object.create(ReviewModal.prototype);
-  modal.modal = modalContainer;
-  modal.isVisible = false;
-  modal.isSubmitting = false;
-  modal.assistedByUrl = 'https://github.com/in-the-loop-labs/pair-review';
-
-  return {
-    modal,
-    modalContainer,
-    textarea,
-    assistedByCheckbox,
-    assistedByToggle,
-    pendingDraftNotice,
-    pendingDraftCount,
-    pendingDraftLink,
-    draftRadioInput,
-    draftTypeLabel,
-    draftTypeOption
-  };
-}
-
-describe('ReviewModal', () => {
-  describe('updatePendingDraftNotice', () => {
-    it('should change draft label to "Add to Draft" when pendingDraft exists', () => {
-      const { modal, pendingDraftNotice, draftTypeLabel } = createTestReviewModal();
-
-      // Set up pending draft on prManager
-      global.window.prManager = {
-        currentPR: {
-          pendingDraft: {
-            github_url: 'https://github.com/owner/repo/pull/1',
-            comments_count: 5
-          }
-        }
-      };
-
-      modal.updatePendingDraftNotice();
-
-      // Draft label should change
-      expect(draftTypeLabel.textContent).toBe('Add to Draft');
-
-      // Notice should be visible
-      expect(pendingDraftNotice.style.display).toBe('flex');
+  it('acknowledges a submitted review and retires its draft before a delayed comment refresh finishes', async () => {
+    let release, started;
+    const refresh = new Promise(resolve => { release = resolve; });
+    const refreshStarted = new Promise(resolve => { started = resolve; });
+    window.prManager.loadUserComments = () => { started(); return refresh; };
+    window.prManager.updateCommentCount = () => {};
+    const receipt = {
+      id: 'attempt-1', reviewId: 1, state: 'submitted', phase: 'settled', error: null,
+      updatedAt: manifest.fetchedAt, items: [],
+      manifest: { ...manifest, comments: manifest.drafts }
+    };
+    fetch.mockImplementation(async (_url, options) => {
+      if (options.method !== 'POST') throw new Error('Unexpected post-submission preflight');
+      return { ok: true, json: async () => ({ receipt }) };
     });
-
-    it('should keep draft label as "Save as Draft" when no pendingDraft exists', () => {
-      const { modal, pendingDraftNotice, draftTypeLabel } = createTestReviewModal();
-
-      // No pending draft
-      global.window.prManager = {
-        currentPR: {
-          pendingDraft: null
-        }
-      };
-
-      modal.updatePendingDraftNotice();
-
-      // Draft label should remain the default
-      expect(draftTypeLabel.textContent).toBe('Save as Draft');
-
-      // Notice should be hidden
-      expect(pendingDraftNotice.style.display).toBe('none');
-    });
-
-    it('should restore draft label to "Save as Draft" when pendingDraft is removed', () => {
-      const { modal, draftTypeLabel } = createTestReviewModal();
-
-      // First, set pending draft to change the label
-      global.window.prManager = {
-        currentPR: {
-          pendingDraft: {
-            github_url: 'https://github.com/owner/repo/pull/1',
-            comments_count: 3
-          }
-        }
-      };
-      modal.updatePendingDraftNotice();
-      expect(draftTypeLabel.textContent).toBe('Add to Draft');
-
-      // Now remove the pending draft
-      global.window.prManager.currentPR.pendingDraft = null;
-      modal.updatePendingDraftNotice();
-
-      // Label should revert
-      expect(draftTypeLabel.textContent).toBe('Save as Draft');
-    });
-
-    it('should update pending draft comment count', () => {
-      const { modal, pendingDraftCount } = createTestReviewModal();
-
-      global.window.prManager = {
-        currentPR: {
-          pendingDraft: {
-            github_url: 'https://github.com/owner/repo/pull/1',
-            comments_count: 7
-          }
-        }
-      };
-
-      modal.updatePendingDraftNotice();
-
-      expect(pendingDraftCount.textContent).toBe('7');
-    });
-
-    it('should hide pending draft link when no github_url', () => {
-      const { modal, pendingDraftLink } = createTestReviewModal();
-
-      global.window.prManager = {
-        currentPR: {
-          pendingDraft: {
-            github_url: null,
-            comments_count: 2
-          }
-        }
-      };
-
-      modal.updatePendingDraftNotice();
-
-      expect(pendingDraftLink.style.display).toBe('none');
-    });
-
-    it('should show pending draft link when github_url exists', () => {
-      const { modal, pendingDraftLink } = createTestReviewModal();
-
-      global.window.prManager = {
-        currentPR: {
-          pendingDraft: {
-            github_url: 'https://github.com/owner/repo/pull/1',
-            comments_count: 2
-          }
-        }
-      };
-
-      modal.updatePendingDraftNotice();
-
-      expect(pendingDraftLink.style.display).toBe('inline');
-      expect(pendingDraftLink.href).toBe('https://github.com/owner/repo/pull/1');
-    });
-
-    it('should handle missing prManager gracefully (pending draft)', () => {
-      const { modal, pendingDraftNotice, draftTypeLabel } = createTestReviewModal();
-
-      // No prManager at all
-      global.window.prManager = null;
-
-      // Should not throw
-      expect(() => modal.updatePendingDraftNotice()).not.toThrow();
-
-      // Notice should be hidden (no pendingDraft found)
-      expect(pendingDraftNotice.style.display).toBe('none');
-
-      // Label should be the default
-      expect(draftTypeLabel.textContent).toBe('Save as Draft');
-    });
-  });
-
-  describe('Assisted-by Footer Toggle', () => {
-    it('should restore checkbox ON from localStorage', () => {
-      global.localStorage._store['pair-review-assisted-by'] = 'true';
-      const { modal, assistedByCheckbox } = createTestReviewModal();
-
-      modal.restoreAssistedByToggle();
-
-      expect(assistedByCheckbox.checked).toBe(true);
-    });
-
-    it('should restore checkbox OFF from localStorage', () => {
-      global.localStorage._store['pair-review-assisted-by'] = 'false';
-      const { modal, assistedByCheckbox } = createTestReviewModal();
-
-      modal.restoreAssistedByToggle();
-
-      expect(assistedByCheckbox.checked).toBe(false);
-    });
-
-    it('should default to checked when no localStorage key', () => {
-      const { modal, assistedByCheckbox } = createTestReviewModal();
-
-      modal.restoreAssistedByToggle();
-
-      expect(assistedByCheckbox.checked).toBe(true);
-    });
-
-    it('should save true to localStorage when toggled ON', () => {
-      const { modal, assistedByCheckbox } = createTestReviewModal();
-      assistedByCheckbox.checked = true;
-
-      modal.handleAssistedByToggle();
-
-      expect(global.localStorage.setItem).toHaveBeenCalledWith('pair-review-assisted-by', 'true');
-    });
-
-    it('should save false to localStorage when toggled OFF', () => {
-      const { modal, assistedByCheckbox } = createTestReviewModal();
-      assistedByCheckbox.checked = false;
-
-      modal.handleAssistedByToggle();
-
-      expect(global.localStorage.setItem).toHaveBeenCalledWith('pair-review-assisted-by', 'false');
-    });
-
-    it('should append AI summary to textarea', () => {
-      const { modal, textarea } = createTestReviewModal();
-      textarea.value = 'Existing text';
-      global.window.aiPanel = { getSummary: () => 'AI generated summary' };
-      global.window.toast = { showSuccess: vi.fn(), showWarning: vi.fn() };
-
-      modal.appendAISummary();
-
-      expect(textarea.value).toContain('Existing text');
-      expect(textarea.value).toContain('AI generated summary');
-    });
-
-    it('should use configured URL in footer', () => {
-      const { modal } = createTestReviewModal();
-      modal.assistedByUrl = 'https://custom.example.com/review';
-
-      const footer = modal.getAssistedByFooter();
-
-      expect(footer).toContain('https://custom.example.com/review');
-    });
-
-    it('should disable toggle when Draft is selected', () => {
-      const { modal, modalContainer, assistedByToggle } = createTestReviewModal();
-
-      // Mock the checked radio to be DRAFT
-      const draftRadio = createMockElement('input');
-      draftRadio.value = 'DRAFT';
-      modalContainer.querySelector = vi.fn().mockImplementation((sel) => {
-        if (sel === '#review-body-modal') return createMockElement('textarea');
-        if (sel === 'input[name="review-event"]:checked') return draftRadio;
-        if (sel === '#assisted-by-toggle') return assistedByToggle;
-        return null;
-      });
-
-      modal.updateTextareaState();
-
-      expect(assistedByToggle.classList.add).toHaveBeenCalledWith('disabled');
-    });
-
-    it('should append footer to review body on submit when toggle is checked', () => {
-      const { modal, assistedByCheckbox, textarea } = createTestReviewModal();
-      assistedByCheckbox.checked = true;
-      textarea.value = 'Great work!';
-
-      // Verify getAssistedByFooter produces a footer containing pair-review
-      const footer = modal.getAssistedByFooter();
-      expect(footer).toContain('pair-review');
-    });
-  });
-
-  describe('Cmd/Ctrl+Enter keyboard shortcut', () => {
-    /**
-     * Create a ReviewModal via its real constructor with document.addEventListener
-     * mocked to capture the keydown handler. Returns the instance and the handler.
-     */
-    function setupKeydownTest() {
-      const { ReviewModal } = require('../../public/js/components/ReviewModal.js');
-      ReviewModal._listenersRegistered = false;
-
-      let keydownHandler;
-      document.addEventListener = vi.fn().mockImplementation((event, handler) => {
-        if (event === 'keydown') keydownHandler = handler;
-      });
-
-      const instance = new ReviewModal();
-      instance.submitReview = vi.fn();
-      instance.hide = vi.fn();
-      global.window.reviewModal = instance;
-
-      return { instance, keydownHandler };
+    modal.manifest = manifest;
+    modal.renderFinal(manifest);
+    modal.confirm.checked = true;
+    const publication = modal.publish();
+    try {
+      await refreshStarted;
+      expect(modal.isSubmitting).toBe(false);
+      expect(modal.note.textContent).toContain('Remote submission recorded');
+      expect(modal.error.textContent).toBe('');
+      expect(drafts.entries.has('draft-10')).toBe(false);
+      expect(modal.quickSubmitButton.dataset.loading).toBeUndefined();
+    } finally {
+      modal.modal.open = false;
+      release();
+      await publication;
     }
-
-    it('should register a keydown listener on document', () => {
-      setupKeydownTest();
-
-      const keydownCalls = document.addEventListener.mock.calls.filter(c => c[0] === 'keydown');
-      expect(keydownCalls.length).toBeGreaterThan(0);
-    });
-
-    it('should call submitReview on Cmd+Enter when modal is visible and not submitting', () => {
-      const { instance, keydownHandler } = setupKeydownTest();
-      instance.isVisible = true;
-      instance.isSubmitting = false;
-
-      const event = {
-        metaKey: true,
-        ctrlKey: false,
-        key: 'Enter',
-        preventDefault: vi.fn()
-      };
-      keydownHandler(event);
-
-      expect(event.preventDefault).toHaveBeenCalled();
-      expect(instance.submitReview).toHaveBeenCalled();
-    });
-
-    it('should call submitReview on Ctrl+Enter when modal is visible and not submitting', () => {
-      const { instance, keydownHandler } = setupKeydownTest();
-      instance.isVisible = true;
-      instance.isSubmitting = false;
-
-      const event = {
-        metaKey: false,
-        ctrlKey: true,
-        key: 'Enter',
-        preventDefault: vi.fn()
-      };
-      keydownHandler(event);
-
-      expect(event.preventDefault).toHaveBeenCalled();
-      expect(instance.submitReview).toHaveBeenCalled();
-    });
-
-    it('should NOT call submitReview when modal is not visible', () => {
-      const { instance, keydownHandler } = setupKeydownTest();
-      instance.isVisible = false;
-      instance.isSubmitting = false;
-
-      const event = {
-        metaKey: true,
-        ctrlKey: false,
-        key: 'Enter',
-        preventDefault: vi.fn()
-      };
-      keydownHandler(event);
-
-      expect(instance.submitReview).not.toHaveBeenCalled();
-    });
-
-    it('should NOT call submitReview when already submitting', () => {
-      const { instance, keydownHandler } = setupKeydownTest();
-      instance.isVisible = true;
-      instance.isSubmitting = true;
-
-      const event = {
-        metaKey: true,
-        ctrlKey: false,
-        key: 'Enter',
-        preventDefault: vi.fn()
-      };
-      keydownHandler(event);
-
-      expect(instance.submitReview).not.toHaveBeenCalled();
-    });
-
-    it('should still close on Escape when modal is visible', () => {
-      const { instance, keydownHandler } = setupKeydownTest();
-      instance.isVisible = true;
-      instance.isSubmitting = false;
-
-      const event = {
-        metaKey: false,
-        ctrlKey: false,
-        key: 'Escape',
-        preventDefault: vi.fn()
-      };
-      keydownHandler(event);
-
-      expect(instance.hide).toHaveBeenCalled();
-    });
   });
 
-  describe('resolveDraftPrUrl (post-draft-submit open URL)', () => {
-    let ReviewModal;
-    beforeEach(() => {
-      ({ ReviewModal } = require('../../public/js/components/ReviewModal.js'));
-    });
+  it('keeps acknowledged cleanup failures from authorizing another approval until local cleanup settles', async () => {
+    const receipt = {
+      id: 'attempt-1', reviewId: 1, state: 'submitted', phase: 'settled',
+      error: 'Review submitted successfully, but local draft cleanup failed: storage unavailable',
+      updatedAt: manifest.fetchedAt, items: [],
+      manifest: { ...manifest, comments: manifest.drafts }
+    };
+    modal.renderReceipts([receipt]);
+    expect(modal.quickSubmitButton.disabled).toBe(true);
+    expect(drafts.entries.has('draft-10')).toBe(true);
+    await modal.quickSubmit();
+    expect(fetch).not.toHaveBeenCalled();
 
-    it('prefers the templated url (RepoLinks.externalUrl) over pr.html_url and github_url', () => {
-      global.window.RepoLinks = {
-        externalUrl: () => 'https://meteorite.example/o/r/pull/7'
-      };
-      const pr = { html_url: 'https://ghe.example.com/o/r/pull/7' };
-      const result = { github_url: 'https://github.com/o/r/issues/7' };
-      expect(ReviewModal.resolveDraftPrUrl(pr, result)).toBe('https://meteorite.example/o/r/pull/7');
-    });
-
-    it('falls back to pr.html_url when RepoLinks yields no templated url', () => {
-      global.window.RepoLinks = { externalUrl: () => null };
-      const pr = { html_url: 'https://ghe.example.com/o/r/pull/7' };
-      const result = { github_url: 'https://github.com/o/r/issues/7' };
-      expect(ReviewModal.resolveDraftPrUrl(pr, result)).toBe('https://ghe.example.com/o/r/pull/7');
-    });
-
-    it('prefers the PR canonical html_url over the review github_url', () => {
-      const pr = { html_url: 'https://ghe.example.com/o/r/pull/42', owner: 'o', repo: 'r', number: 42 };
-      const result = { github_url: 'https://github.com/o/r/issues/42' };
-      expect(ReviewModal.resolveDraftPrUrl(pr, result)).toBe('https://ghe.example.com/o/r/pull/42');
-    });
-
-    it('opens the alt-host PR page even when the review url is a github.com /issues/ URL (regression)', () => {
-      // Alt-hosts (e.g. gitstream) return the pending-review html_url as a
-      // github.com `/issues/<n>` URL. We must open the host's own PR page.
-      const pr = { html_url: 'https://staging-2.gitstream.shopify.io/shop/world-gitstream-perf/pull/2000121' };
-      const result = { github_url: 'https://github.com/shop/world-gitstream-perf/issues/2000121' };
-      expect(ReviewModal.resolveDraftPrUrl(pr, result))
-        .toBe('https://staging-2.gitstream.shopify.io/shop/world-gitstream-perf/pull/2000121');
-    });
-
-    it('falls back to the server github_url when the PR has no html_url', () => {
-      const result = { github_url: 'https://github.com/o/r/pull/1' };
-      expect(ReviewModal.resolveDraftPrUrl(null, result)).toBe('https://github.com/o/r/pull/1');
-      expect(ReviewModal.resolveDraftPrUrl({}, result)).toBe('https://github.com/o/r/pull/1');
-    });
-
-    it('never fabricates a github.com URL — returns null when nothing is available', () => {
-      expect(ReviewModal.resolveDraftPrUrl(null, null)).toBeNull();
-      expect(ReviewModal.resolveDraftPrUrl({}, {})).toBeNull();
-      expect(ReviewModal.resolveDraftPrUrl(undefined, undefined)).toBeNull();
-    });
+    modal.renderReceipts([{ ...receipt, error: null }]);
+    expect(modal.quickSubmitButton.disabled).toBe(false);
+    expect(drafts.entries.has('draft-10')).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
   });
 });

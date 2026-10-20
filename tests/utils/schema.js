@@ -37,7 +37,12 @@ const SCHEMA_SQL = {
       local_base_branch TEXT,
       local_head_branch TEXT,
       local_scope_start TEXT DEFAULT 'unstaged',
-      local_scope_end TEXT DEFAULT 'untracked'
+      local_scope_end TEXT DEFAULT 'untracked',
+      draft_body TEXT NOT NULL DEFAULT '',
+      draft_event TEXT NOT NULL DEFAULT 'COMMENT' CHECK(draft_event IN ('COMMENT', 'APPROVE', 'REQUEST_CHANGES')),
+      draft_revision INTEGER NOT NULL DEFAULT 1,
+      associated_pr TEXT,
+      review_progress TEXT NOT NULL DEFAULT '{}'
     )
   `,
 
@@ -69,6 +74,10 @@ const SCHEMA_SQL = {
       voice_id TEXT,
       is_raw INTEGER DEFAULT 0,
       severity TEXT,
+      draft_key TEXT,
+      revision INTEGER NOT NULL DEFAULT 1,
+      included INTEGER NOT NULL DEFAULT 1 CHECK(included IN (0, 1)),
+      deleted_at TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (review_id) REFERENCES reviews(id) ON DELETE CASCADE,
@@ -133,6 +142,16 @@ const SCHEMA_SQL = {
     )
   `,
 
+  worktree_locks: `
+    CREATE TABLE IF NOT EXISTS worktree_locks (
+      path TEXT PRIMARY KEY,
+      holder_id TEXT NOT NULL,
+      repository TEXT,
+      pr_number INTEGER,
+      locked_at TEXT NOT NULL
+    )
+  `,
+
   analysis_runs: `
     CREATE TABLE IF NOT EXISTS analysis_runs (
       id TEXT PRIMARY KEY,
@@ -156,6 +175,9 @@ const SCHEMA_SQL = {
       config_type TEXT DEFAULT 'single',
       levels_config TEXT,
       level_outcomes TEXT,
+      activity_state TEXT,
+      review_baseline TEXT,
+      protocol_snapshot TEXT,
       scope_start TEXT,
       scope_end TEXT,
       FOREIGN KEY (review_id) REFERENCES reviews(id) ON DELETE CASCADE
@@ -285,6 +307,19 @@ const SCHEMA_SQL = {
       collection TEXT NOT NULL,
       host TEXT,
       fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `,
+
+  github_collection_observations: `
+    CREATE TABLE IF NOT EXISTS github_collection_observations (
+      collection TEXT NOT NULL,
+      source TEXT NOT NULL,
+      credential_hash TEXT,
+      fetched_at TEXT,
+      availability TEXT NOT NULL DEFAULT 'unavailable',
+      error TEXT,
+      request_id TEXT,
+      PRIMARY KEY (collection, source)
     )
   `,
 
@@ -434,6 +469,8 @@ function createTestDatabase() {
   for (const sql of INDEX_SQL) {
     db.exec(sql);
   }
+  require('../../src/database').initializeDraftTracking(db);
+  require('../../src/review-submission').initializeSubmissionState(db);
 
   return db;
 }

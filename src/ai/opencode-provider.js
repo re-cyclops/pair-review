@@ -138,7 +138,7 @@ class OpenCodeProvider extends AIProvider {
 
       // Register process for cancellation tracking if analysisId provided
       if (analysisId && registerProcess) {
-        registerProcess(analysisId, opencode);
+        registerProcess(analysisId, opencode, signal => killChildSafely(opencode, { shell: this.useShell, signal }));
         logger.info(`${levelPrefix} Registered process ${pid} for analysis ${analysisId}`);
       }
 

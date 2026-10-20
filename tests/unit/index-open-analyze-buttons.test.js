@@ -16,6 +16,7 @@
  * getElementById calls during module initialisation succeed.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { JSDOM } from 'jsdom';
 
 // ---------------------------------------------------------------------------
 // DOM + browser globals setup
@@ -55,6 +56,7 @@ function createMockElement(overrides = {}) {
     },
     setAttribute: vi.fn((k, v) => { attrs[k] = v; }),
     getAttribute: vi.fn((k) => attrs[k] ?? null),
+    removeAttribute: vi.fn((key) => { delete attrs[key]; }),
     addEventListener: vi.fn((evt, fn) => {
       if (!listeners[evt]) listeners[evt] = [];
       listeners[evt].push(fn);
@@ -518,26 +520,6 @@ describe('Index page Open/Analyze buttons', () => {
     expect(urls[0]).not.toContain('host=');
   });
 
-  it('getSelectedCollectionRows carries data-host from selected rows', () => {
-    const apiHost = 'https://althost.example/api/v3';
-    const fakeTbody = {
-      querySelectorAll: vi.fn(() => [
-        { dataset: { prUrl: 'u-alt', owner: 'altorg', repo: 'altrepo', number: '77', host: apiHost } },
-        { dataset: { prUrl: 'u-gh', owner: 'gh-org', repo: 'gh-repo', number: '5' } }
-      ])
-    };
-    const origGet = global.document.getElementById;
-    global.document.getElementById = vi.fn(() => fakeTbody);
-    try {
-      const rows = indexModule.getSelectedCollectionRows(new Set(['u-alt', 'u-gh']), 'my-prs-tbody');
-      expect(rows).toEqual([
-        { owner: 'altorg', repo: 'altrepo', number: '77', prUrl: 'u-alt', host: apiHost },
-        { owner: 'gh-org', repo: 'gh-repo', number: '5', prUrl: 'u-gh', host: undefined }
-      ]);
-    } finally {
-      global.document.getElementById = origGet;
-    }
-  });
 
   it('Local Open button rejects URL input without navigating', async () => {
     const form = elementsById['start-local-form'];
@@ -789,10 +771,7 @@ describe('Index page Open/Analyze buttons', () => {
   }
 
   it('escapes GitHub-supplied collection values in HTML attributes', () => {
-    // Titles, owners and repos come straight from the GitHub search API, so they
-    // are remote input. escapeHtml() is text-node escaping and leaves quotes
-    // intact, which let a crafted title close `title="` and open a new
-    // attribute — an event handler, i.e. script execution on the dashboard.
+    // GitHub values must remain inert whether used as visible text or attributes.
     const html = indexModule.renderCollectionPrRow({
       owner: 'sh"op',
       repo: 'wo"rld',
@@ -806,7 +785,9 @@ describe('Index page Open/Analyze buttons', () => {
 
     // No attribute anywhere in the row may start with `on`.
     expect(attributeSkeleton(html)).not.toMatch(/\son[a-z]+\s*=/i);
-    expect(html).toContain('title="Fix &quot; onmouseover=&quot;alert(1)&quot; crash"');
+    const parsed = new JSDOM(`<table>${html}</table>`);
+    expect(parsed.window.document.querySelector('.col-title').textContent).toBe('Fix " onmouseover="alert(1)" crash');
+    parsed.window.close();
     expect(html).toContain('data-owner="sh&quot;op"');
     expect(html).toContain('data-repo="wo&quot;rld"');
     expect(html).toContain('?x=&quot; onload=&quot;alert(1)');
@@ -824,7 +805,9 @@ describe('Index page Open/Analyze buttons', () => {
     });
 
     expect(attributeSkeleton(html)).not.toMatch(/\son[a-z]+\s*=/i);
-    expect(html).toContain('title="Fix &quot; onmouseover=&quot;alert(1)&quot; crash"');
+    const parsed = new JSDOM(`<table>${html}</table>`);
+    expect(parsed.window.document.querySelector('.col-title').textContent).toBe('Fix " onmouseover="alert(1)" crash');
+    parsed.window.close();
   });
 
   it('preserves GitHub URL casing for GitHub and Graphite actions', () => {

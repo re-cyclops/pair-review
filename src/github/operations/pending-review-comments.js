@@ -12,10 +12,8 @@ const hostImpl = require('../impl/host/pending-review-comments');
  * `"host"` and provide an extension endpoint.
  *
  * Dispatch:
- *   - `"graphql"` (default for github.com): delegates to
- *     `impl/graphql/pending-review-comments.js`. Identical behaviour to
- *     `GitHubClient.addCommentsInBatches` prior to the Phase 3 refactor,
- *     including the adaptive batch-size halving on complexity errors.
+ *   - `"graphql"` (default for github.com): one aliased mutation, returning
+ *     stable comment/thread receipts without retrying uncertain writes.
  *   - `"rest"`: rejected with a clear error. GitHub REST cannot reliably
  *     attach comments to a pending draft (see plan Hazards).
  *   - `"host"`: delegates to `impl/host/pending-review-comments.js`,
@@ -36,28 +34,13 @@ function selectFeature(features) {
 }
 
 /**
- * Add a list of comments to a pending review.
- *
- * The `prNodeId` / `reviewId` arguments are GraphQL-shaped (opaque node
- * IDs) for the GraphQL path. For the `"host"` path, `prContext` supplies
- * the path components and `reviewId` is interpreted as the host's review
- * identifier (a REST id returned by the host's `review_lifecycle` impl).
- *
- * @param {Object} octokit - Octokit instance bound to the host's baseUrl
- * @param {Object} features - Feature-flag object from the host binding
- * @param {string} prNodeId - GraphQL node ID for the PR (graphql path)
- * @param {string} reviewId - Review identifier. GraphQL node ID on the
- *   graphql path; the host's REST review id on the host path.
- * @param {Array} comments - Comments with path, line (optional), side, body, isFileLevel
- * @param {number} [batchSize=10]
- * @param {Object} [prContext] - `{ owner, repo, prNumber }`. Required for
- *   the `"host"` path; ignored on the graphql path.
- * @returns {Promise<{successCount: number, failed: boolean, failedDetails: string[]}>}
+ * Send one already-recorded batch. The caller owns durable intent/receipts.
+ * GraphQL returns stable IDs; count-only host extensions cannot promise them.
  */
-async function addCommentsInBatches(octokit, features, prNodeId, reviewId, comments, batchSize, prContext) {
+async function addCommentBatch(octokit, features, prNodeId, reviewId, comments, prContext) {
   const mode = selectFeature(features);
   if (mode === 'graphql') {
-    return graphqlImpl.addCommentsInBatches(octokit, prNodeId, reviewId, comments, batchSize);
+    return graphqlImpl.addCommentBatch(octokit, prNodeId, reviewId, comments);
   }
   if (mode === 'rest') {
     throw new Error(
@@ -67,13 +50,13 @@ async function addCommentsInBatches(octokit, features, prNodeId, reviewId, comme
     );
   }
   if (mode === 'host') {
-    return hostImpl.addCommentsInBatches(octokit, features, prContext, reviewId, comments, batchSize);
+    return hostImpl.addCommentBatch(octokit, features, prContext, reviewId, comments);
   }
   throw new Error(`Unknown features.pending_review_comments value: "${mode}"`);
 }
 
 module.exports = {
-  addCommentsInBatches,
+  addCommentBatch,
   AREA,
   IMPLEMENTED_MODES
 };

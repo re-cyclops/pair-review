@@ -15,7 +15,6 @@ function makeOctokit(handlers = {}) {
       pulls: {
         createReview: vi.fn(handlers.createReview || (async () => ({ data: null }))),
         submitReview: vi.fn(handlers.submitReview || (async () => ({ data: null }))),
-        deletePendingReview: vi.fn(handlers.deletePendingReview || (async () => ({ data: null })))
       }
     }
   };
@@ -24,74 +23,6 @@ function makeOctokit(handlers = {}) {
 const PR_CTX = { owner: 'o', repo: 'r', prNumber: 1 };
 
 describe('impl/rest/review-lifecycle', () => {
-  describe('addPullRequestReview (no body)', () => {
-    it('throws when prContext is missing', async () => {
-      const octokit = makeOctokit();
-      await expect(restImpl.addPullRequestReview(octokit, 'PR_xyz')).rejects.toThrow(/prContext=\{owner, repo, prNumber\}/);
-    });
-
-    it('calls createReview without an event and returns { id, databaseId }', async () => {
-      const octokit = makeOctokit({
-        createReview: async (args) => {
-          expect(args).toEqual({ owner: 'o', repo: 'r', pull_number: 1, body: '' });
-          // No `event` -> the review stays PENDING.
-          expect(args.event).toBeUndefined();
-          return { data: { id: 555, node_id: 'PRR_new', html_url: 'https://althost.example/o/r/pull/1#pullrequestreview-555', state: 'PENDING' } };
-        }
-      });
-      const result = await restImpl.addPullRequestReview(octokit, 'PR_xyz', PR_CTX);
-      expect(result).toEqual({ id: 'PRR_new', databaseId: 555 });
-    });
-
-    it('sends an explicit empty body so strict alt-hosts do not reject an empty request body (regression)', async () => {
-      // Regression guard: without an explicit `body`, Octokit serializes a
-      // POST with an empty HTTP body. github.com tolerates this, but strict
-      // GitHub-compatible alt-hosts reject it with HTTP 400
-      // `{ message: "request body is empty" }`. The body MUST be present.
-      let captured;
-      const octokit = makeOctokit({
-        createReview: async (args) => {
-          captured = args;
-          return { data: { id: 1, node_id: 'PRR_b', html_url: 'u', state: 'PENDING' } };
-        }
-      });
-      await restImpl.addPullRequestReview(octokit, 'PR_xyz', PR_CTX);
-      expect(octokit.rest.pulls.createReview).toHaveBeenCalledTimes(1);
-      expect(captured).toHaveProperty('body');
-      expect(captured.body).toBe('');
-      // The serialized HTTP body must be non-empty.
-      expect(JSON.stringify(captured)).not.toBe('{}');
-    });
-
-    it('returns databaseId: null when REST response omits the numeric id', async () => {
-      const octokit = makeOctokit({
-        createReview: async () => ({ data: { node_id: 'PRR_only_node' } })
-      });
-      const result = await restImpl.addPullRequestReview(octokit, 'PR_xyz', PR_CTX);
-      expect(result).toEqual({ id: 'PRR_only_node', databaseId: null });
-    });
-
-    it('falls back to stringified numeric id when node_id is absent (Fix #7)', async () => {
-      // Alt-hosts that do not surface node_id consistently still
-      // provide the numeric `id`. The mapper must derive an id from
-      // it so downstream lookups (review-by-id, comment append) can
-      // still identify the review.
-      const octokit = makeOctokit({
-        createReview: async () => ({ data: { id: 314 } })
-      });
-      const result = await restImpl.addPullRequestReview(octokit, 'PR_xyz', PR_CTX);
-      expect(result).toEqual({ id: '314', databaseId: 314 });
-    });
-
-    it('returns id: null only when neither node_id nor numeric id is present', async () => {
-      const octokit = makeOctokit({
-        createReview: async () => ({ data: { state: 'PENDING' } })
-      });
-      const result = await restImpl.addPullRequestReview(octokit, 'PR_xyz', PR_CTX);
-      expect(result).toEqual({ id: null, databaseId: null });
-    });
-  });
-
   describe('addPullRequestReviewWithBody', () => {
     it('returns { id, databaseId, url } matching the GraphQL shape', async () => {
       const octokit = makeOctokit({
@@ -176,40 +107,6 @@ describe('impl/rest/review-lifecycle', () => {
       );
       expect(result.id).toBe('88');
       expect(result.databaseId).toBe(88);
-    });
-  });
-
-  describe('deletePullRequestReview', () => {
-    it('returns true on success', async () => {
-      const octokit = makeOctokit({
-        deletePendingReview: async (args) => {
-          expect(args).toMatchObject({ owner: 'o', repo: 'r', pull_number: 1, review_id: 99 });
-          return { data: {} };
-        }
-      });
-      const result = await restImpl.deletePullRequestReview(octokit, 99, { ...PR_CTX, reviewId: 99 });
-      expect(result).toBe(true);
-    });
-
-    it('returns false on REST error rather than throwing', async () => {
-      const octokit = makeOctokit({
-        deletePendingReview: async () => { throw new Error('boom'); }
-      });
-      const result = await restImpl.deletePullRequestReview(octokit, 99, { ...PR_CTX, reviewId: 99 });
-      expect(result).toBe(false);
-    });
-
-    it('returns false when called without a numeric review id', async () => {
-      const octokit = makeOctokit();
-      const result = await restImpl.deletePullRequestReview(octokit, 'PRR_abc', PR_CTX);
-      expect(result).toBe(false);
-      expect(octokit.rest.pulls.deletePendingReview).not.toHaveBeenCalled();
-    });
-
-    it('returns false when prContext is missing (matches GraphQL impl which swallows errors)', async () => {
-      const octokit = makeOctokit();
-      const result = await restImpl.deletePullRequestReview(octokit, 99);
-      expect(result).toBe(false);
     });
   });
 

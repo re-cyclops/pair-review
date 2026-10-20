@@ -14,10 +14,10 @@ const { GitHubApiError } = require('../../errors');
  */
 
 const PENDING_REVIEW_QUERY = `
-  query($owner: String!, $repo: String!, $prNumber: Int!) {
+  query($owner: String!, $repo: String!, $prNumber: Int!, $cursor: String) {
     repository(owner: $owner, name: $repo) {
       pullRequest(number: $prNumber) {
-        reviews(states: PENDING, first: 1) {
+        reviews(states: PENDING, first: 100, after: $cursor) {
           nodes {
             id
             databaseId
@@ -30,6 +30,7 @@ const PENDING_REVIEW_QUERY = `
               totalCount
             }
           }
+          pageInfo { hasNextPage endCursor }
         }
       }
     }
@@ -37,13 +38,18 @@ const PENDING_REVIEW_QUERY = `
 `;
 
 const REVIEW_BY_ID_QUERY = `
-  query($nodeId: ID!) {
+  query($nodeId: ID!, $cursor: String) {
     node(id: $nodeId) {
       ... on PullRequestReview {
-        id
-        state
-        submittedAt
-        url
+        id databaseId body state submittedAt url viewerDidAuthor
+        author { login }
+        commit { oid }
+        repository { nameWithOwner }
+        pullRequest { number }
+        comments(first: 100, after: $cursor) {
+          nodes { id databaseId body path line startLine subjectType url }
+          pageInfo { hasNextPage endCursor }
+        }
       }
     }
   }
@@ -63,14 +69,17 @@ async function getPendingReviewForUser(octokit, owner, repo, prNumber) {
   try {
     logger.debug(`Checking for pending review on PR #${prNumber} in ${owner}/${repo}`);
 
-    const result = await octokit.graphql(PENDING_REVIEW_QUERY, {
-      owner,
-      repo,
-      prNumber
-    });
-
-    const reviews = result.repository?.pullRequest?.reviews?.nodes || [];
-    const userPendingReview = reviews.find(review => review.viewerDidAuthor);
+    let cursor = null;
+    let userPendingReview = null;
+    for (let page = 0; page < 100; page++) {
+      const result = await octokit.graphql(PENDING_REVIEW_QUERY, { owner, repo, prNumber, cursor });
+      const connection = result.repository?.pullRequest?.reviews;
+      if (!Array.isArray(connection?.nodes) || !connection.pageInfo) throw new Error('Pending review information is incomplete');
+      userPendingReview = connection.nodes.find(review => review?.viewerDidAuthor);
+      if (userPendingReview || connection.pageInfo.hasNextPage === false) break;
+      if (!connection.pageInfo.endCursor || connection.pageInfo.endCursor === cursor || page === 99) throw new Error('Pending review information is truncated');
+      cursor = connection.pageInfo.endCursor;
+    }
 
     if (userPendingReview) {
       logger.debug(`Found pending review for user: ${userPendingReview.id} with ${userPendingReview.comments.totalCount} comments`);
@@ -117,34 +126,39 @@ async function getPendingReviewForUser(octokit, owner, repo, prNumber) {
  * @returns {Promise<Object|null>} Review data or null if not found
  */
 async function getReviewById(octokit, nodeId) {
-  try {
-    logger.debug(`Fetching review by node ID: ${nodeId}`);
-
-    const result = await octokit.graphql(REVIEW_BY_ID_QUERY, { nodeId });
-
-    if (!result.node || !result.node.id) {
-      logger.debug(`Review not found for node ID: ${nodeId}`);
-      return null;
+  let cursor = null;
+  let review = null;
+  const comments = [];
+  for (let page = 0; page < 100; page++) {
+    let result;
+    try {
+      result = await octokit.graphql(REVIEW_BY_ID_QUERY, { nodeId, cursor });
+    } catch (error) {
+      if (error.status === 404 || error.errors?.some(item => item.type === 'NOT_FOUND')) return null;
+      throw error;
     }
-
-    const review = result.node;
-    logger.debug(`Found review ${nodeId}: state=${review.state}, submittedAt=${review.submittedAt}`);
-
-    return {
-      id: review.id,
-      state: review.state,
-      submittedAt: review.submittedAt,
-      url: review.url
-    };
-  } catch (error) {
-    if (error.errors?.some(e => e.type === 'NOT_FOUND' || e.message?.includes('not found'))) {
-      logger.debug(`Review not found for node ID: ${nodeId}`);
-      return null;
+    if (!result.node) return null;
+    review = result.node;
+    const connection = review.comments;
+    if (!Array.isArray(connection?.nodes) || !connection.pageInfo) throw new Error('Remote review comments are unavailable');
+    for (const comment of connection.nodes) {
+      if (!comment?.id) throw new Error('Remote review contains an unidentified comment');
+      comments.push({
+        id: comment.id, databaseId: comment.databaseId, body: comment.body, path: comment.path,
+        line: comment.line, start_line: comment.startLine, isFileLevel: comment.subjectType === 'FILE', url: comment.url
+      });
     }
-
-    logger.warn(`Error fetching review by node ID ${nodeId}: ${error.message}`);
-    return null;
+    if (connection.pageInfo.hasNextPage === false) {
+      return { id: review.id, databaseId: review.databaseId, body: review.body,
+        state: review.state, submittedAt: review.submittedAt, url: review.url,
+        headSha: review.commit?.oid, author: review.author?.login,
+        viewerDidAuthor: review.viewerDidAuthor, repository: review.repository?.nameWithOwner,
+        prNumber: review.pullRequest?.number, comments };
+    }
+    if (!connection.pageInfo.endCursor || connection.pageInfo.endCursor === cursor) break;
+    cursor = connection.pageInfo.endCursor;
   }
+  throw new Error('Remote review comments are truncated; publication is blocked');
 }
 
 module.exports = {

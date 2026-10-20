@@ -45,6 +45,8 @@ class VoiceCentricConfigTab {
   constructor(modal) {
     this.modal = modal;
     this.councils = [];
+    this.templates = [];
+    this._templateActive = false;
     this.selectedCouncilId = null;
     this.providers = {};
     this._injected = false;
@@ -99,6 +101,8 @@ class VoiceCentricConfigTab {
       const data = await response.json();
       // Only show voice-centric councils (legacy councils without a type are level-centric, shown in Advanced tab)
       this.councils = (data.councils || []).filter(c => c.type === 'council');
+      this.templates = data.templates || [];
+      this._renderTemplates();
       this._councilsLoaded = true;
       this._renderCouncilSelector();
     } catch (error) {
@@ -165,6 +169,8 @@ class VoiceCentricConfigTab {
    * Auto-save council if dirty before analysis starts.
    */
   async autoSaveIfDirty() {
+    // Applying a template is ephemeral; only explicit Save creates a council.
+    if (this._templateActive) return;
     if (!this._isDirty && this.selectedCouncilId) return;
 
     const config = this._readConfigFromUI();
@@ -256,9 +262,14 @@ class VoiceCentricConfigTab {
    */
   reset() {
     this.selectedCouncilId = null;
+    this._templateActive = false;
     this._pendingDefaultCouncilId = null;
     this._isDirty = false;
     if (!this._injected) return;
+    const templateSelector = this.modal.querySelector('#vc-template-selector');
+    if (templateSelector) templateSelector.value = '';
+    const templateDescription = this.modal.querySelector('#vc-template-description');
+    if (templateDescription) templateDescription.textContent = '';
     const selector = this.modal.querySelector('#vc-council-selector');
     if (selector) {
       selector.value = '';
@@ -288,7 +299,7 @@ class VoiceCentricConfigTab {
         <h4 class="section-title">Council ${VoiceCentricConfigTab.buildInfoTipButton('council')}</h4>
         ${VoiceCentricConfigTab.buildInfoTipContent('council', 'A Review Council runs your code review through multiple AI models in parallel, then consolidates their findings. Different models catch different issues, giving you broader coverage than a single reviewer.')}
         <div class="council-selector-row">
-          <select id="vc-council-selector" class="council-select new-council-selected">
+          <select id="vc-council-selector" class="council-select new-council-selected" aria-label="Saved council">
             <option value="" class="council-option-new">+ New Council</option>
           </select>
           <button class="btn btn-sm btn-save-council" id="vc-council-save-btn" title="Save" disabled>Save</button>
@@ -300,6 +311,11 @@ class VoiceCentricConfigTab {
             </svg>
           </button>
         </div>
+        <label for="vc-template-selector">Start from a template</label>
+        <select id="vc-template-selector" class="council-select">
+          <option value="">Choose a four-model template…</option>
+        </select>
+        <p id="vc-template-description" class="section-hint-text" aria-live="polite"></p>
       </section>
 
       <section class="config-section">
@@ -308,7 +324,7 @@ class VoiceCentricConfigTab {
         <div class="voice-list" id="vc-reviewer-list">
           ${this._buildReviewerRowHTML(0)}
         </div>
-        <button class="btn btn-sm btn-icon add-voice-btn" id="vc-add-reviewer-btn" title="Add Reviewer">+</button>
+        <button class="btn btn-sm btn-icon add-voice-btn" id="vc-add-reviewer-btn" title="Add Reviewer" aria-label="Add reviewer">+</button>
       </section>
 
       <section class="config-section">
@@ -339,9 +355,9 @@ class VoiceCentricConfigTab {
         <p class="section-hint-text">Model used for cross-reviewer consolidation</p>
         <div class="orchestration-card" id="vc-orchestration-card">
           <div class="voice-row" id="vc-orchestration-voice">
-            <select class="voice-provider" data-target="orchestration"></select>
-            <select class="voice-model" data-target="orchestration"></select>
-            <select class="voice-tier" data-target="orchestration">
+            <select class="voice-provider" data-target="orchestration" aria-label="Consolidation provider"></select>
+            <select class="voice-model" data-target="orchestration" aria-label="Consolidation model"></select>
+            <select class="voice-tier" data-target="orchestration" aria-label="Consolidation prompt tier">
               <option value="fast">Fast</option>
               <option value="balanced" selected>Balanced</option>
               <option value="thorough">Thorough</option>
@@ -365,9 +381,9 @@ class VoiceCentricConfigTab {
       <div class="participant-wrapper vc-reviewer" data-index="${index}">
         <div class="participant-card">
           <div class="voice-row" data-index="${index}">
-            <select class="voice-provider" data-index="${index}"></select>
-            <select class="voice-model" data-index="${index}"></select>
-            <select class="voice-tier" data-index="${index}">
+            <select class="voice-provider" data-index="${index}" aria-label="Reviewer ${index + 1} provider"></select>
+            <select class="voice-model" data-index="${index}" aria-label="Reviewer ${index + 1} model"></select>
+            <select class="voice-tier" data-index="${index}" aria-label="Reviewer ${index + 1} prompt tier">
               <option value="fast">Fast</option>
               <option value="balanced" selected>Balanced</option>
               <option value="thorough">Thorough</option>
@@ -380,7 +396,7 @@ class VoiceCentricConfigTab {
             <textarea class="voice-instructions-input" data-index="${index}" placeholder="Per-reviewer instructions (e.g., Focus on security)" rows="2"></textarea>
           </div>
         </div>
-        <button class="btn btn-sm btn-icon remove-voice-btn" data-index="${index}" title="Remove Reviewer">&minus;</button>
+        <button class="btn btn-sm btn-icon remove-voice-btn" data-index="${index}" title="Remove Reviewer" aria-label="Remove reviewer ${index + 1}">&minus;</button>
       </div>
     `;
   }
@@ -443,8 +459,24 @@ class VoiceCentricConfigTab {
   }
 
   _setupListeners(panel) {
+    panel.querySelector('#vc-template-selector')?.addEventListener('change', (e) => {
+      const template = this.templates.find(t => t.id === e.target.value);
+      if (!template) return;
+      this.selectedCouncilId = null;
+      this._templateActive = true;
+      const selector = panel.querySelector('#vc-council-selector');
+      selector.value = '';
+      selector.classList.add('new-council-selected');
+      panel.querySelector('#vc-template-description').textContent =
+        `${template.description} Four OMP reviewers: GLM Flash, Gemini Flash, Muse Wonder Full, and Sol. Muse Wonder Full consolidates. Adjust below, Analyze directly, or Save to reuse.`;
+      this._applyConfigToUI(template.config);
+      this._markDirty();
+    });
     // Council selector
     panel.querySelector('#vc-council-selector')?.addEventListener('change', (e) => {
+      this._templateActive = false;
+      panel.querySelector('#vc-template-selector').value = '';
+      panel.querySelector('#vc-template-description').textContent = '';
       this.selectedCouncilId = e.target.value || null;
       e.target.classList.toggle('new-council-selected', !this.selectedCouncilId);
       if (this.selectedCouncilId) {
@@ -669,6 +701,10 @@ class VoiceCentricConfigTab {
       wrapper.querySelectorAll('[data-index]').forEach(el => {
         el.dataset.index = newIndex;
       });
+      wrapper.querySelector('.voice-provider')?.setAttribute('aria-label', `Reviewer ${newIndex + 1} provider`);
+      wrapper.querySelector('.voice-model')?.setAttribute('aria-label', `Reviewer ${newIndex + 1} model`);
+      wrapper.querySelector('.voice-tier')?.setAttribute('aria-label', `Reviewer ${newIndex + 1} prompt tier`);
+      wrapper.querySelector('.remove-voice-btn')?.setAttribute('aria-label', `Remove reviewer ${newIndex + 1}`);
     });
   }
 
@@ -799,8 +835,8 @@ class VoiceCentricConfigTab {
     });
   }
 
-  _populateProviderDropdown(select) {
-    const currentValue = select.value;
+  _populateProviderDropdown(select, configuredProvider = select.value) {
+    const currentValue = configuredProvider;
     const isConsolidation = select.dataset.target === 'orchestration';
     select.innerHTML = '';
     const providerIds = Object.keys(this.providers).filter(id => {
@@ -817,6 +853,11 @@ class VoiceCentricConfigTab {
       select.appendChild(opt);
     }
 
+    if (currentValue && !providerIds.includes(currentValue)) {
+      const name = this.providers[currentValue]?.name || currentValue;
+      select.add(new Option(`${name} (unavailable)`, currentValue));
+      providerIds.push(currentValue);
+    }
     if (currentValue && providerIds.includes(currentValue)) {
       select.value = currentValue;
     } else if (providerIds.length > 0) {
@@ -829,14 +870,15 @@ class VoiceCentricConfigTab {
   _updateModelDropdown(providerSelect) {
     const providerId = providerSelect.value;
     const provider = this.providers[providerId];
-    if (!provider) return;
 
     const container = providerSelect.closest('.voice-row');
     const modelSelect = container?.querySelector('.voice-model');
     if (!modelSelect) return;
 
-    const currentModel = modelSelect.value;
-    const models = [...(provider.models || [])].sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+    const currentModel = !modelSelect.dataset.provider || modelSelect.dataset.provider === providerId
+      ? modelSelect.value : '';
+    modelSelect.dataset.provider = providerId;
+    const models = [...(provider?.models || [])].sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
     modelSelect.innerHTML = '';
     for (const model of models) {
       const opt = document.createElement('option');
@@ -846,7 +888,11 @@ class VoiceCentricConfigTab {
       modelSelect.appendChild(opt);
     }
 
-    if (currentModel && models.some(m => m.id === currentModel)) {
+    // Keep explicit saved/template selections even when a menu catalog is stale.
+    if (currentModel && !models.some(m => m.id === currentModel)) {
+      modelSelect.add(new Option(currentModel, currentModel));
+    }
+    if (currentModel) {
       modelSelect.value = currentModel;
     } else {
       const defaultModel = models.find(m => m.default) || models[0];
@@ -1135,13 +1181,17 @@ class VoiceCentricConfigTab {
         const row = reviewerWrapper?.querySelector('.voice-row');
         const providerSelect = row?.querySelector('.voice-provider');
         if (providerSelect) {
-          this._populateProviderDropdown(providerSelect);
-          providerSelect.value = voice.provider;
+          this._populateProviderDropdown(providerSelect, voice.provider);
           providerSelect.dataset.previousProvider = voice.provider;
           this._updateModelDropdown(providerSelect);
           this._updateExecutableState(providerSelect);
           const modelSelect = row.querySelector('.voice-model');
-          if (modelSelect) modelSelect.value = voice.model;
+          if (modelSelect) {
+            if (![...modelSelect.options].some(o => o.value === voice.model)) {
+              modelSelect.add(new Option(voice.model, voice.model));
+            }
+            modelSelect.value = voice.model;
+          }
           const tierSelect = row.querySelector('.voice-tier');
           if (tierSelect) tierSelect.value = voice.tier || 'balanced';
           // Mount the TimeoutSelect from its placeholder
@@ -1190,12 +1240,16 @@ class VoiceCentricConfigTab {
       if (orchRow) {
         const providerSelect = orchRow.querySelector('.voice-provider');
         if (providerSelect) {
-          this._populateProviderDropdown(providerSelect);
-          providerSelect.value = vcConfig.orchestration.provider;
+          this._populateProviderDropdown(providerSelect, vcConfig.orchestration.provider);
           providerSelect.dataset.previousProvider = vcConfig.orchestration.provider;
           this._updateModelDropdown(providerSelect);
           const modelSelect = orchRow.querySelector('.voice-model');
-          if (modelSelect) modelSelect.value = vcConfig.orchestration.model;
+          if (modelSelect) {
+            if (![...modelSelect.options].some(o => o.value === vcConfig.orchestration.model)) {
+              modelSelect.add(new Option(vcConfig.orchestration.model, vcConfig.orchestration.model));
+            }
+            modelSelect.value = vcConfig.orchestration.model;
+          }
           const tierSelect = orchRow.querySelector('.voice-tier');
           if (tierSelect) tierSelect.value = vcConfig.orchestration.tier || 'balanced';
         }
@@ -1259,6 +1313,17 @@ class VoiceCentricConfigTab {
   }
 
   // --- Council selector ---
+  _renderTemplates() {
+    const selector = this.modal.querySelector('#vc-template-selector');
+    if (!selector) return;
+    const selected = selector.value;
+    selector.replaceChildren(new Option('Choose a four-model template…', ''));
+    for (const template of this.templates) {
+      selector.add(new Option(template.name, template.id));
+    }
+    selector.value = selected;
+  }
+
 
   _renderCouncilSelector() {
     const selector = this.modal.querySelector('#vc-council-selector');
@@ -1314,7 +1379,7 @@ class VoiceCentricConfigTab {
     const deleteBtn = panel.querySelector('#vc-council-delete-btn');
 
     if (saveBtn) {
-      saveBtn.disabled = !this._isDirty || !this.selectedCouncilId;
+      saveBtn.disabled = !this._isDirty || (!this.selectedCouncilId && !this._templateActive);
     }
     if (saveAsBtn) {
       const config = this._readConfigFromUI();
@@ -1390,7 +1455,7 @@ class VoiceCentricConfigTab {
         if (window.toast) window.toast.showError('Failed to save council');
       }
     } else {
-      this._saveCouncilAs();
+      await this._saveCouncilAs();
     }
   }
 
@@ -1459,6 +1524,7 @@ class VoiceCentricConfigTab {
     }
     const data = await response.json();
     this.selectedCouncilId = data.council.id;
+    this._templateActive = false;
     this._markClean();
     await this.loadCouncils();
     const selector = this.modal.querySelector('#vc-council-selector');

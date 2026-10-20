@@ -47,21 +47,28 @@ class Toast {
     const toast = document.createElement('div');
     toast.className = 'toast toast-success';
     
-    let content = `
+    toast.innerHTML = `
       <div class="toast-content">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" class="toast-icon">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" class="toast-icon" aria-hidden="true">
           <path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"></path>
         </svg>
-        <span class="toast-message">${message}</span>
-    `;
-    
+        <span class="toast-message"></span>
+      </div>`;
+    toast.querySelector('.toast-message').textContent = message;
     if (link) {
-      content += `<a href="${link}" target="_blank" class="toast-link">${linkText}</a>`;
+      try {
+        const url = new URL(link, window.location.href);
+        if (url.protocol === 'https:' || url.protocol === 'http:') {
+          const anchor = document.createElement('a');
+          anchor.className = 'toast-link';
+          anchor.href = url.href;
+          anchor.target = '_blank';
+          anchor.rel = 'noopener noreferrer';
+          anchor.textContent = linkText;
+          toast.querySelector('.toast-content').appendChild(anchor);
+        }
+      } catch { /* An invalid destination must not make the status unusable. */ }
     }
-    
-    content += `</div>`;
-    
-    toast.innerHTML = content;
     this.showToast(toast, duration);
   }
 
@@ -79,9 +86,10 @@ class Toast {
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" class="toast-icon">
           <path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Zm4.326-2.74a.75.75 0 0 1 1.06-.08L8 6.94l1.114-1.76a.75.75 0 1 1 1.272.8L9.114 7.5l1.272 1.46a.75.75 0 1 1-1.272.8L8 8.06 6.886 9.76a.75.75 0 1 1-1.272-.8L6.886 7.5 5.614 6.04a.75.75 0 0 1 .08-1.06Z"></path>
         </svg>
-        <span class="toast-message">${message}</span>
+        <span class="toast-message"></span>
       </div>
     `;
+    toast.querySelector('.toast-message').textContent = message;
 
     this.showToast(toast, duration);
   }
@@ -100,9 +108,10 @@ class Toast {
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" class="toast-icon">
           <path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path>
         </svg>
-        <span class="toast-message">${message}</span>
+        <span class="toast-message"></span>
       </div>
     `;
+    toast.querySelector('.toast-message').textContent = message;
 
     this.showToast(toast, duration);
   }
@@ -121,9 +130,10 @@ class Toast {
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" class="toast-icon">
           <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path>
         </svg>
-        <span class="toast-message">${message}</span>
+        <span class="toast-message"></span>
       </div>
     `;
+    toast.querySelector('.toast-message').textContent = message;
 
     this.showToast(toast, duration);
   }
@@ -134,6 +144,8 @@ class Toast {
    * @param {number} duration - Duration in ms
    */
   showToast(toast, duration) {
+    toast.setAttribute('role', toast.classList.contains('toast-error') || toast.classList.contains('toast-warning') ? 'alert' : 'status');
+    toast.setAttribute('aria-atomic', 'true');
     // Add to container
     this.toastContainer.appendChild(toast);
     this.activeToasts.push(toast);

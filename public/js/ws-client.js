@@ -52,6 +52,7 @@
           window.dispatchEvent(new CustomEvent('wsReconnected'));
         }
         this._hasConnected = true;
+        window.dispatchEvent(new CustomEvent('wsConnected'));
       };
 
       this._ws.onmessage = (event) => {
@@ -75,6 +76,7 @@
 
       this._ws.onclose = () => {
         this.connected = false;
+        window.dispatchEvent(new CustomEvent('wsDisconnected'));
         this._ws = null;
         if (!this._closed) {
           this._scheduleReconnect();

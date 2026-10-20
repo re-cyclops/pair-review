@@ -151,8 +151,6 @@ class PRManager {
     this._deferredDiffRenderPromises = new Map();
     // Analysis history manager - for switching between analysis runs
     this.analysisHistoryManager = null;
-    // Currently selected analysis run ID (null = latest)
-    this.selectedRunId = null;
     // Keyboard shortcuts manager
     this.keyboardShortcuts = null;
     // Hide whitespace toggle state — must be set before DiffOptionsDropdown
@@ -355,9 +353,11 @@ class PRManager {
         }
       },
       onCommentFormSubmit: (fileName, annotationId, data, body) => {
-        this._handleCommentFormSubmit(fileName, annotationId, data, body);
+        return this._handleCommentFormSubmit(fileName, annotationId, data, body);
       },
       onCommentFormCancel: (fileName, annotationId, data) => {
+        const form = this.pierreBridge.files.get(fileName)?.formElements?.get(annotationId);
+        window.reviewDrafts?.close(form?.querySelector('textarea'));
         this.pierreBridge.removeAnnotation(fileName, annotationId);
       },
       onSuggestionInsert: (textarea, button) => {
@@ -507,12 +507,15 @@ class PRManager {
   /**
    * Keep --diff-file-header-height in sync with the rendered sticky file
    * header so navigation (block:'start' + scroll-margin-top in pr.css) lands
-   * targets just below the header rather than hidden behind it. Headers are
-   * single-line and uniform, so measuring the first one is representative.
-   * Call after renderDiff appends the headers.
+   * targets just below the header rather than hidden behind it.
+   * Measure the target's own header when revealing an editor: responsive
+   * headers can wrap after the initial render.
    */
-  _measureFileHeaderHeight() {
-    const header = document.querySelector('.d2h-file-wrapper .d2h-file-header');
+  _measureFileHeaderHeight(target) {
+    const wrapper = target?.closest('.d2h-file-wrapper');
+    const header = wrapper
+      ? wrapper.querySelector('.d2h-file-header')
+      : document.querySelector('.d2h-file-wrapper .d2h-file-header');
     if (header && header.offsetHeight) {
       document.documentElement.style.setProperty(
         '--diff-file-header-height', header.offsetHeight + 'px'
@@ -1007,7 +1010,6 @@ class PRManager {
           mode: 'pr',
           shaAbbrevLength: this.currentPR.shaAbbrevLength || 7,
           onSelectionChange: (runId, _run) => {
-            this.selectedRunId = runId;
             this.loadAISuggestions(null, runId);
           }
         });
@@ -1068,7 +1070,6 @@ class PRManager {
    * disappeared after refresh".
    *
    * @param {Object} [options]
-   * @param {string} [options.analysisRunId] - Optional run id to pin AI suggestions to.
    * @param {boolean} [options.syncExternal=false] - When true, fire the
    *   external-comments sync POST before re-rendering. Used by `refreshPR`
    *   where the diff was just fetched fresh from GitHub and cached anchors
@@ -1076,10 +1077,10 @@ class PRManager {
    *   analysis rebuilds, post-analysis reload) pass the default and reuse
    *   the existing mirror.
    */
-  async _rerenderAllOverlays({ analysisRunId, syncExternal = false } = {}) {
+  async _rerenderAllOverlays({ syncExternal = false } = {}) {
     const includeDismissed = window.aiPanel?.showDismissedComments || false;
     await this.loadUserComments(includeDismissed);
-    await this.loadAISuggestions(null, analysisRunId);
+    await this.loadAISuggestions();
     // Skip external-comment re-rendering entirely when the feature is off.
     // The manager is never populated with rows in that case, so there's
     // nothing to re-anchor.
@@ -2712,7 +2713,7 @@ class PRManager {
    * @param {string} repo - Repository name
    * @param {number} number - PR number
    */
-  async loadAndDisplayFiles(owner, repo, number) {
+  async loadAndDisplayFiles(owner, repo, number, { preserveEditors = false } = {}) {
     try {
       const diffUrl = this.hideWhitespace
         ? `/api/pr/${owner}/${repo}/${number}/diff?w=1`
@@ -2721,8 +2722,10 @@ class PRManager {
 
       if (response.ok) {
         const data = await response.json();
+        if (preserveEditors && !this._canReplaceDiff()) throw new Error('Update paused to protect an open editor. Save or cancel it, then update again.');
         const files = data.changed_files || [];
         const fullDiff = data.diff || '';
+        this.displayedProgressContext = data.progress_context || null;
 
         // Build map of generated files for quick lookup
         this.generatedFiles.clear();
@@ -2759,26 +2762,26 @@ class PRManager {
           window.aiPanel.setFileOrder(this.canonicalFileOrder);
         }
 
-        // Load viewed state before rendering so files can start collapsed
-        // and so the sidebar viewed indicator renders on first paint
-        await this.loadViewedState();
 
         // Update sidebar with file list
         this.updateFileList(sortedFiles);
 
         // Render diff using the existing renderDiff method
         this.renderDiff({ changed_files: sortedFiles });
+        await this.loadViewedState();
 
         // Progressively fetch full file contents for hunk expansion
         this._upgradeFilesWithContents(sortedFiles);
 
       } else {
+        if (preserveEditors) throw new Error('Could not load the updated diff. The viewed revision was retained.');
         const diffContainer = document.getElementById('diff-container');
         if (diffContainer) {
           diffContainer.innerHTML = '<div class="no-diff">Failed to load changes</div>';
         }
       }
     } catch (error) {
+      if (preserveEditors) throw error;
       console.error('Error loading files:', error);
       const diffContainer = document.getElementById('diff-container');
       if (diffContainer) {
@@ -2809,7 +2812,7 @@ class PRManager {
     // comments) via the shared helper so the three renderers can't drift.
     // The diff DOM was just rebuilt, so external-comment rows are gone
     // until loadAndRender re-inserts them.
-    await this._rerenderAllOverlays({ analysisRunId: this.selectedRunId });
+    await this._rerenderAllOverlays();
 
     // Restore scroll position after the DOM settles
     requestAnimationFrame(() => {
@@ -4130,7 +4133,7 @@ class PRManager {
     try {
       const includeDismissed = window.aiPanel?.showDismissedComments || false;
       await this.loadUserComments(includeDismissed);
-      await this.loadAISuggestions(null, this.selectedRunId);
+      await this.loadAISuggestions();
     } catch (err) {
       console.error('Failed to re-anchor inline feedback after deferred diff render:', err);
     }
@@ -5313,59 +5316,24 @@ class PRManager {
     }
   }
 
-  /**
-   * Save viewed files state to storage
-   * Persists per PR for later retrieval
-   */
+  /** Persist content-bound marks through the shared PR/local review identity. */
   async saveViewedState() {
-    if (!this.currentPR) return;
-
-    const { owner, repo, number } = this.currentPR;
-    const viewedArray = Array.from(this.viewedFiles);
-
-    try {
-      await fetch(`/api/pr/${owner}/${repo}/${number}/files/viewed`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ files: viewedArray })
-      });
-    } catch (error) {
-      console.error('Failed to save viewed state:', error);
-      // Fallback to localStorage
-      const key = PRManager.getRepoStorageKey('pair-review-viewed', owner, repo) + `:${number}`;
-      localStorage.setItem(key, JSON.stringify(viewedArray));
-    }
+    if (!this.reviewProgress) return;
+    try { await this.reviewProgress.saveViewed([...this.viewedFiles]); }
+    catch (error) { console.warn('Viewed marks were not saved:', error.message); }
   }
 
-  /**
-   * Load viewed files state from storage
-   * Retrieves per-PR viewed state
-   */
+  /** Loading and opening never advance the explicitly reviewed baseline. */
   async loadViewedState() {
-    if (!this.currentPR) return;
-
-    const { owner, repo, number } = this.currentPR;
-
+    if (!this.currentPR?.id) return;
+    this.reviewProgress ||= new window.ReviewProgress(this);
     try {
-      const response = await fetch(`/api/pr/${owner}/${repo}/${number}/files/viewed`);
-      if (response.ok) {
-        const data = await response.json();
-        this.viewedFiles = new Set(data.files || []);
-        return;
-      }
-    } catch (error) {
-      console.error('Failed to load viewed state from API:', error);
+      await this.reviewProgress.load();
+      this.reviewProgress.syncCheckboxes();
     }
-
-    // Fallback to localStorage
-    const key = PRManager.getRepoStorageKey('pair-review-viewed', owner, repo) + `:${number}`;
-    const stored = localStorage.getItem(key);
-    if (stored) {
-      try {
-        this.viewedFiles = new Set(JSON.parse(stored));
-      } catch (e) {
-        this.viewedFiles = new Set();
-      }
+    catch (error) {
+      this.viewedFiles = new Set();
+      this.reviewProgress.showError(error);
     }
   }
 
@@ -6049,7 +6017,10 @@ class PRManager {
     // removing the form annotation.
     if (typeof data.customSubmit === 'function') {
       try {
-        await data.customSubmit(body.trim(), fileName, annotationId);
+        const textarea = this.pierreBridge.files.get(fileName)?.formElements?.get(annotationId)?.querySelector('textarea');
+        const draft = await window.reviewDrafts.saveTextarea(textarea);
+        await data.customSubmit(draft.body, fileName, annotationId, draft);
+        window.reviewDrafts.close(textarea);
       } catch (error) {
         console.error('Error running custom comment form submit:', error);
         alert(`Failed to save: ${error.message}`);
@@ -6058,29 +6029,11 @@ class PRManager {
     }
 
     try {
-      const commentData = {
-        file: data.fileName,
-        line_start: data.lineStart,
-        line_end: data.lineEnd,
-        body: body.trim(),
-        side: data.side || 'RIGHT',
-        diff_position: data.diffPosition,
-        // Anchor to the PR head commit so repositioning works if the PR is
-        // updated later. Parity with CommentManager.saveComment.
-        commit_sha: this.currentPR?.head_sha,
-      };
-
-      const response = await fetch(`/api/reviews/${this.currentPR.id}/comments`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Client-Id': this._clientId,
-        },
-        body: JSON.stringify(commentData),
-      });
-
-      if (response.ok) {
-        const result = await response.json().catch(() => ({}));
+      const textarea = this.pierreBridge.files.get(fileName)?.formElements?.get(annotationId)?.querySelector('textarea');
+      const comment = await window.reviewDrafts.saveTextarea(textarea);
+      const result = { commentId: comment.id };
+      if (comment) {
+        window.reviewDrafts.close(textarea);
         // Remove form annotation
         this.pierreBridge.removeAnnotation(fileName, annotationId);
         // Reload comments to show the new one
@@ -6103,6 +6056,7 @@ class PRManager {
       }
     } catch (error) {
       console.error('Error saving comment:', error);
+      window.reviewDrafts?.showRecovery();
     }
   }
 
@@ -6142,24 +6096,18 @@ class PRManager {
    * Edit user comment
    * NOTE: similar edit form in comment-manager.js _buildEditFormRow — keep in sync
    */
-  async editUserComment(commentId) {
+  async editUserComment(commentId, { focus = true } = {}) {
     try {
       const commentRow = document.querySelector(`[data-comment-id="${commentId}"]`);
       if (!commentRow) return;
 
       const commentDiv = commentRow.querySelector('.user-comment');
       const bodyDiv = commentDiv.querySelector('.user-comment-body');
-      let currentText = bodyDiv.dataset.originalMarkdown || '';
-
-      if (!currentText) {
-        const response = await fetch(`/api/reviews/${this.currentPR.id}/comments/${commentId}`);
-        if (response.ok) {
-          const data = await response.json();
-          currentText = data.body || bodyDiv.textContent.trim();
-        } else {
-          currentText = bodyDiv.textContent.trim();
-        }
-      }
+      const response = await fetch(`/api/reviews/${this.currentPR.id}/comments/${commentId}`);
+      if (!response.ok) throw new Error('Comment could not be loaded');
+      const comment = await response.json();
+      const currentText = comment.body;
+      if (!commentRow.isConnected) return;
 
       if (commentDiv.classList.contains('editing-mode')) return;
 
@@ -6181,14 +6129,14 @@ class PRManager {
             id="edit-comment-${commentId}"
             class="comment-edit-textarea"
             placeholder="Enter your comment..."
-            data-file="${fileName}"
+            data-file="${window.escapeHtmlAttribute(fileName)}"
             data-line="${lineStart}"
             data-line-end="${lineEnd}"
             data-side="${side || 'RIGHT'}"
           >${this.escapeHtml(currentText)}</textarea>
           <div class="comment-edit-actions">
             <button class="btn btn-sm btn-primary save-edit-btn">Save</button>
-            <button class="btn btn-sm btn-secondary cancel-edit-btn">Cancel</button>
+            <button class="btn btn-sm btn-secondary cancel-edit-btn">Close</button>
           </div>
         </div>
       `;
@@ -6201,10 +6149,11 @@ class PRManager {
       const suggestionBtn = editForm.querySelector('.suggestion-btn');
       const saveBtn = editForm.querySelector('.save-edit-btn');
       const cancelBtn = editForm.querySelector('.cancel-edit-btn');
+      window.reviewDrafts?.bind(textarea, { comment, mode: 'edit' });
 
       if (textarea) {
         this.autoResizeTextarea(textarea);
-        textarea.focus();
+        if (focus) textarea.focus();
         textarea.setSelectionRange(textarea.value.length, textarea.value.length);
         this.updateSuggestionButtonState(textarea, suggestionBtn);
 
@@ -6243,9 +6192,9 @@ class PRManager {
 
     try {
       const textarea = document.getElementById(`edit-comment-${commentId}`);
-      const editedText = textarea.value.trim();
+      const editedText = textarea.value;
 
-      if (!editedText) {
+      if (!editedText.trim()) {
         alert('Comment cannot be empty');
         textarea.focus();
         if (saveBtn) {
@@ -6255,13 +6204,8 @@ class PRManager {
         return;
       }
 
-      const response = await fetch(`/api/reviews/${this.currentPR.id}/comments/${commentId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ body: editedText })
-      });
-
-      if (!response.ok) throw new Error('Failed to update comment');
+      await window.reviewDrafts.saveTextarea(textarea);
+      window.reviewDrafts.close(textarea);
 
       const commentRow = document.querySelector(`[data-comment-id="${commentId}"]`);
       const commentDiv = commentRow.querySelector('.user-comment');
@@ -6288,7 +6232,7 @@ class PRManager {
 
     } catch (error) {
       console.error('Error saving comment:', error);
-      alert('Failed to save comment');
+      window.reviewDrafts?.showRecovery();
       // Re-enable save button on failure so the user can retry
       if (saveBtn) {
         saveBtn.dataset.saving = 'false';
@@ -6307,6 +6251,7 @@ class PRManager {
     const commentDiv = commentRow.querySelector('.user-comment');
     const bodyDiv = commentDiv.querySelector('.user-comment-body');
     const editForm = commentDiv.querySelector('.user-comment-edit-form');
+    window.reviewDrafts?.close(editForm?.querySelector('textarea'));
 
     bodyDiv.style.display = '';
     if (editForm) editForm.remove();
@@ -6531,6 +6476,7 @@ class PRManager {
    */
   async loadUserComments(includeDismissed = false) {
     if (!this.currentPR) return;
+    const generation = this._commentLoadGeneration = (this._commentLoadGeneration || 0) + 1;
 
     try {
       const queryParam = includeDismissed ? '?includeDismissed=true' : '';
@@ -6538,7 +6484,10 @@ class PRManager {
       if (!response.ok) return;
 
       const data = await response.json();
+      if (generation !== this._commentLoadGeneration) return;
+      window.reviewDrafts?.captureEditors();
       this.userComments = data.comments || [];
+      window.reviewDrafts?.ingest(this.userComments);
 
       // Separate file-level and line-level comments for diff view rendering
       // DESIGN DECISION: Dismissed comments are NEVER shown in the diff panel.
@@ -6584,6 +6533,7 @@ class PRManager {
           side: c.side || 'RIGHT',
         })));
       }
+      if (generation !== this._commentLoadGeneration) return;
 
       // Partition line-level comments by rendering engine
       const pierreComments = [];
@@ -6648,39 +6598,122 @@ class PRManager {
       if (this.commentMinimizer) {
         this.commentMinimizer.refreshIndicators();
       }
+      await window.reviewDrafts?.restoreEditors();
     } catch (error) {
       console.error('Error loading user comments:', error);
     }
   }
 
+  _localDiffIdentity(diff) {
+    if (typeof diff !== 'string') return null;
+    if (!diff) return '[]';
+    const files = this.parseUnifiedDiff(diff);
+    // The display parser can omit unsupported quoted paths or collapse duplicate
+    // paths. Never certify equality using only a successfully parsed subset.
+    if (!files.size || files.size !== (diff.match(/^diff --git /gm) || []).length) return null;
+    const identities = [];
+    for (const [file, patch] of files) {
+      // Full blob IDs certify actual before/after contents; never certify
+      // abbreviated/unknown blobs merely because visible changed lines match.
+      if (!/^index [a-f0-9]{40}(?:[a-f0-9]{24})?\.\.[a-f0-9]{40}(?:[a-f0-9]{24})?(?: \d+)?$/m.test(patch)) return null;
+      const metadata = [], changes = [];
+      let oldLine = 0, newLine = 0, inHunk = false;
+      for (const text of patch.split('\n')) {
+        const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(text);
+        if (hunk) { oldLine = Number(hunk[1]); newLine = Number(hunk[2]); inHunk = true; continue; }
+        if (!inHunk) { if (text) metadata.push(text); continue; }
+        if (text[0] === '+' || text[0] === '-') changes.push([oldLine, newLine, text]);
+        if (text[0] === '\\') changes.push([oldLine, newLine, text]);
+        if (text[0] === ' ' || text[0] === '-') oldLine++;
+        if (text[0] === ' ' || text[0] === '+') newLine++;
+      }
+      identities.push([file, metadata, changes]);
+    }
+    identities.sort((a, b) => a[0].localeCompare(b[0]));
+    return JSON.stringify(identities);
+  }
+
+  async _matchesViewedLocalDiff(savedDiff) {
+    if (typeof savedDiff !== 'string') return false;
+    const context = this.displayedProgressContext;
+    const viewedDiff = this._viewedLocalDiff;
+    if (context?.digest && globalThis.crypto?.subtle) {
+      const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(savedDiff));
+      if (this.displayedProgressContext !== context || this._viewedLocalDiff !== viewedDiff) return false;
+      const hex = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+      if (hex === context.digest) return true;
+    }
+    if (savedDiff === viewedDiff) return true;
+    const savedIdentity = this._localDiffIdentity(savedDiff);
+    return savedIdentity !== null && savedIdentity === this._localDiffIdentity(viewedDiff);
+  }
+
   /**
    * Load AI suggestions from API
    * @param {string} level - Optional level filter ('final', '1', '2', '3')
-   * @param {string} runId - Optional analysis run ID (defaults to latest)
+   * @param {string|null} runId - Selected history run by default; null explicitly requests latest
    */
-  async loadAISuggestions(level = null, runId = null) {
+  async loadAISuggestions(level = null, runId) {
     if (!this.currentPR) return;
+    const reviewId = this.currentPR.id;
+    const requestId = this._aiSuggestionsRequestId = (this._aiSuggestionsRequestId || 0) + 1;
+    const viewedContext = this.displayedProgressContext;
+    const viewedDiff = this._viewedLocalDiff;
+    const viewedHead = viewedContext?.head || this.currentPR.head_sha || this.currentPR.localHeadSha;
+    const scopeStart = window.localManager?.scopeStart;
+    const scopeEnd = window.localManager?.scopeEnd;
+    const isCurrent = () => this._aiSuggestionsRequestId === requestId
+      && this.currentPR?.id === reviewId
+      && this.displayedProgressContext === viewedContext
+      && this._viewedLocalDiff === viewedDiff
+      && (this.displayedProgressContext?.head || this.currentPR.head_sha || this.currentPR.localHeadSha) === viewedHead
+      && window.localManager?.scopeStart === scopeStart
+      && window.localManager?.scopeEnd === scopeEnd;
+    window.aiPanel?.setAnalysisState?.('fetching');
 
     try {
-      const { owner, repo, number } = this.currentPR;
-
       // Use provided level, or fall back to current selectedLevel
       const filterLevel = level || this.selectedLevel || 'final';
-      // Use provided runId, or fall back to selectedRunId (which may be null for latest)
-      const filterRunId = runId !== undefined ? runId : this.selectedRunId;
+      // The history selector owns the current run; explicit null requests latest.
+      const filterRunId = runId !== undefined ? runId : this.analysisHistoryManager?.getSelectedRunId() || null;
 
       // First, check if analysis has been run for this PR and get summary for the selected run
       let analysisHasRun = false;
       try {
-        const id = this.currentPR.id;
-        let checkUrl = `/api/reviews/${id}/suggestions/check`;
+        let checkUrl = `/api/reviews/${reviewId}/suggestions/check`;
         if (filterRunId) {
-          checkUrl += `?runId=${filterRunId}`;
+          checkUrl += `?runId=${encodeURIComponent(filterRunId)}`;
         }
         const checkResponse = await fetch(checkUrl);
+        if (!checkResponse.ok) throw new Error('Could not load AI review status');
         if (checkResponse.ok) {
           const checkData = await checkResponse.json();
+          if (!isCurrent()) return;
           analysisHasRun = checkData.analysisHasRun;
+          const run = this.analysisHistoryManager?.selectedRun;
+          const viewedSha = viewedHead;
+          let localDiffMatches = true;
+          if (window.PAIR_REVIEW_LOCAL_MODE && analysisHasRun) {
+            localDiffMatches = false;
+            if (run?.id) {
+              const savedResponse = await fetch(`/api/analyses/runs/${encodeURIComponent(run.id)}?includeDiff=true`);
+              if (savedResponse.ok) {
+                const saved = await savedResponse.json();
+                localDiffMatches = String(saved.run?.id) === String(run.id)
+                  && String(saved.run?.review_id) === String(reviewId)
+                  && (!saved.run.scope_start || saved.run.scope_start === window.localManager?.scopeStart)
+                  && (!saved.run.scope_end || saved.run.scope_end === window.localManager?.scopeEnd)
+                  && await this._matchesViewedLocalDiff(saved.run.diff);
+              }
+              if (!isCurrent()) return;
+            }
+          }
+          const historical = !!analysisHasRun && (!run?.head_sha || !viewedSha || run.head_sha !== viewedSha || !localDiffMatches);
+          window.aiPanel?.setRevisionContext?.({
+            historical,
+            message: historical ? `Historical AI review (${run?.head_sha?.slice(0, 7) || 'revision unknown'}); viewed revision ${viewedSha?.slice(0, 7) || 'unknown'}. Open a finding to inspect its saved code, not the current diff.`
+              : analysisHasRun ? `AI review of the viewed revision ${viewedSha?.slice(0, 7) || ''}. User drafts and GitHub comments are separate segments.` : ''
+          });
 
           // Store summary data in the AI panel for the AI Summary modal
           if (window.aiPanel?.setSummaryData) {
@@ -6692,31 +6725,32 @@ class PRManager {
         }
       } catch (checkError) {
         console.warn('Error checking analysis status:', checkError);
+        throw checkError;
       }
+      if (!isCurrent()) return;
 
       // Set the analysis state on the AI panel BEFORE loading suggestions
       // This ensures the correct empty state is shown
       if (window.aiPanel?.setAnalysisState) {
-        window.aiPanel.setAnalysisState(analysisHasRun ? 'complete' : 'unknown');
+        const status = this.analysisHistoryManager?.selectedRun?.status;
+        window.aiPanel.setAnalysisState(['failed', 'error', 'cancelled'].includes(status) ? 'failed'
+          : ['running', 'pending'].includes(status) ? 'loading' : analysisHasRun ? 'complete' : 'unknown');
       }
 
-      let url = `/api/reviews/${this.currentPR.id}/suggestions?levels=${filterLevel}`;
+      let url = `/api/reviews/${reviewId}/suggestions?levels=${encodeURIComponent(filterLevel)}`;
       if (filterRunId) {
-        url += `&runId=${filterRunId}`;
+        url += `&runId=${encodeURIComponent(filterRunId)}`;
       }
 
       const response = await fetch(url);
-      if (!response.ok) return;
+      if (!response.ok) throw new Error('Could not load AI findings');
 
       const data = await response.json();
-      if (data.suggestions && data.suggestions.length > 0) {
-        await this.displayAISuggestions(data.suggestions);
-      } else {
-        // Clear existing suggestions if none returned for this level
-        await this.displayAISuggestions([]);
-      }
+      if (!isCurrent()) return;
+      await this.displayAISuggestions(data.suggestions || []);
     } catch (error) {
       console.error('Error loading AI suggestions:', error);
+      if (isCurrent()) window.aiPanel?.setAnalysisState?.('failed');
     }
   }
 
@@ -6724,7 +6758,16 @@ class PRManager {
    * AI Suggestion methods - delegate to SuggestionManager
    */
   async displayAISuggestions(suggestions) {
-    await this.suggestionManager.displayAISuggestions(suggestions);
+    const reviewId = this.currentPR?.id;
+    const requestId = this._aiSuggestionsRequestId;
+    const generation = this._renderGen;
+    const context = this.displayedProgressContext;
+    const localDiff = this._viewedLocalDiff;
+    await this.suggestionManager.displayAISuggestions(window.aiPanel?.historicalFindings ? [] : suggestions);
+    if (this.currentPR?.id !== reviewId || this._aiSuggestionsRequestId !== requestId
+      || this._renderGen !== generation || this.displayedProgressContext !== context
+      || this._viewedLocalDiff !== localDiff) return;
+    if (window.aiPanel?.historicalFindings) window.aiPanel.addFindings(suggestions);
     // Refresh minimize-mode indicators (no-op when minimize mode is off)
     if (this.commentMinimizer) {
       this.commentMinimizer.refreshIndicators();
@@ -6954,12 +6997,12 @@ class PRManager {
       // and wire a custom submit that runs the adopt-edited flow.
       if (this.pierreBridge && this.pierreBridge.files.has(fileName)) {
         const formId = `edit-suggestion-${suggestionId}`;
-        const onAdoptEdited = async (editedText, _fileName, annotationId) => {
+        const onAdoptEdited = async (editedText, _fileName, annotationId, draft) => {
           const reviewId = this.currentPR?.id;
           const editResponse = await fetch(`/api/reviews/${reviewId}/suggestions/${suggestionId}/edit`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'adopt_edited', editedText })
+            body: JSON.stringify({ action: 'adopt_edited', editedText, draft })
           });
           if (!editResponse.ok) throw new Error('Failed to adopt suggestion with edits');
           const editResult = await editResponse.json();
@@ -6993,23 +7036,37 @@ class PRManager {
             side: side || 'RIGHT',
             showSuggestionBtn: true,
             initialValue: formattedBody || suggestionText,
+            parentId: suggestionId,
             customSubmit: onAdoptEdited,
           },
+        });
+        const form = this.pierreBridge.files.get(fileName).formElements.get(formId);
+        // Let the annotation mount and its pre-filled textarea resize first.
+        requestAnimationFrame(() => {
+          if (!form?.isConnected) return;
+          form.querySelector('textarea')?.focus({ preventScroll: true });
+          this._measureFileHeaderHeight(form);
+          const options = { behavior: 'instant', block: 'start' };
+          if (window.ScrollUtils?.scrollIntoViewStable) {
+            window.ScrollUtils.scrollIntoViewStable(form, options);
+          } else {
+            form?.scrollIntoView(options);
+          }
         });
         return;
       }
 
-      this.commentManager.displaySuggestionEditForm(
+      const form = this.commentManager.displaySuggestionEditForm(
         suggestion,
         suggestionRow,
-        async (editedText) => {
+        async (editedText, draft) => {
           // User clicked Save — now adopt via /edit endpoint
           try {
             const reviewId = this.currentPR?.id;
             const editResponse = await fetch(`/api/reviews/${reviewId}/suggestions/${suggestionId}/edit`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ action: 'adopt_edited', editedText })
+              body: JSON.stringify({ action: 'adopt_edited', editedText, draft })
             });
 
             if (!editResponse.ok) throw new Error('Failed to adopt suggestion with edits');
@@ -7037,6 +7094,13 @@ class PRManager {
           // User clicked Cancel — nothing to revert
         }
       );
+      this._measureFileHeaderHeight(form);
+      const options = { behavior: 'instant', block: 'start' };
+      if (window.ScrollUtils?.scrollIntoViewStable) {
+        window.ScrollUtils.scrollIntoViewStable(form, options);
+      } else {
+        form?.scrollIntoView(options);
+      }
     } catch (error) {
       console.error('Error editing suggestion:', error);
       alert(`Failed to edit suggestion: ${error.message}`);
@@ -7276,6 +7340,11 @@ class PRManager {
         const buttonElement = this.splitButton.render();
         placeholder.appendChild(buttonElement);
         this.updateCommentCount();
+        if (!this._draftCountListener) {
+          this._draftCountListener = event => { if (event.detail.reviewId === this.currentPR?.id) this.updateCommentCount(); };
+          window.addEventListener('reviewDraftChanged', this._draftCountListener);
+          window.addEventListener('reviewDraftSaved', this._draftCountListener);
+        }
 
         // Handle late config arrival — update share config when config fetch resolves
         window.addEventListener('chat-state-changed', () => {
@@ -7292,9 +7361,7 @@ class PRManager {
    * Open review modal
    */
   openReviewModal() {
-    if (!this.reviewModal) {
-      this.reviewModal = new ReviewModal();
-    }
+    if (!this.reviewModal) this.reviewModal = window.reviewModal;
     this.reviewModal.show();
   }
 
@@ -7332,9 +7399,9 @@ class PRManager {
     // Build the callback URL for the share endpoint
     let callbackUrl = `${window.location.origin}/api/pr/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/${pr.number}/share`;
 
-    // Include selected run ID if one is explicitly selected
-    if (this.selectedRunId) {
-      callbackUrl += `?runId=${encodeURIComponent(this.selectedRunId)}`;
+    const selectedRunId = this.analysisHistoryManager?.getSelectedRunId();
+    if (selectedRunId) {
+      callbackUrl += `?runId=${encodeURIComponent(selectedRunId)}`;
     }
 
     // Check that there is analysis data to share before opening the page
@@ -7371,87 +7438,29 @@ class PRManager {
     window.open(shareUrl.toString(), '_blank');
   }
 
-  /**
-   * Update comment count display
-   * Note: Dismissed comments are never in the diff DOM (design decision), so we simply count all visible elements.
-   */
+  /** Counts use the same server selection as the final preview, never diff DOM. */
   updateCommentCount() {
-    // Count both line-level comments (.user-comment-row) and file-level comments (.file-comment-card.user-comment)
-    const lineComments = document.querySelectorAll('.user-comment-row:not(.suggestion-edit-pending)').length;
-    const fileComments = document.querySelectorAll('.file-comment-card.user-comment').length;
-    const userComments = lineComments + fileComments;
-
-    if (this.splitButton) {
-      this.splitButton.updateCommentCount(userComments);
-    }
-
-    const reviewButton = document.getElementById('review-button');
-    if (reviewButton) {
-      const buttonText = reviewButton.querySelector('.review-button-text');
-      if (buttonText) {
-        buttonText.textContent = `${userComments} ${userComments === 1 ? 'comment' : 'comments'}`;
+    clearTimeout(this._commentCountTimer);
+    const generation = this._commentCountGeneration = (this._commentCountGeneration || 0) + 1;
+    const reviewId = this.currentPR?.id;
+    this.splitButton?.updateCommentCount(null, { state: window.reviewDrafts?.hasPending(reviewId) ? 'unsaved' : 'loading' });
+    if (!reviewId) return;
+    this._commentCountTimer = setTimeout(async () => {
+      if (window.reviewDrafts?.hasPending(reviewId)) return;
+      try {
+        const response = await fetch(`/api/reviews/${reviewId}/manifest?local=true`);
+        if (!response.ok) throw new Error('Saved selection unavailable');
+        const manifest = await response.json();
+        if (generation !== this._commentCountGeneration || reviewId !== this.currentPR?.id) return;
+        this.splitButton?.updateCommentCount(manifest.count, { totalDrafts: manifest.drafts.length });
+        const clearButton = document.getElementById('clear-comments-btn');
+        if (clearButton) clearButton.disabled = manifest.drafts.length === 0;
+      } catch {
+        if (generation === this._commentCountGeneration) this.splitButton?.updateCommentCount(null, { state: 'count unavailable' });
       }
-
-      if (userComments > 0) {
-        reviewButton.classList.add('has-comments');
-      } else {
-        reviewButton.classList.remove('has-comments');
-      }
-    }
-
-    const clearButton = document.getElementById('clear-comments-btn');
-    if (clearButton) {
-      clearButton.disabled = userComments === 0;
-    }
+    }, 100);
   }
 
-  /**
-   * Submit review to GitHub
-   */
-  async submitReview() {
-    const reviewEvent = document.getElementById('review-event').value;
-    const reviewBody = document.getElementById('review-body').value.trim();
-    const submitBtn = document.getElementById('submit-review-btn');
-
-    // Count BOTH line-level and file-level comments for validation
-    const lineComments = document.querySelectorAll('.user-comment-row:not(.suggestion-edit-pending)').length;
-    const fileComments = document.querySelectorAll('.file-comment-card.user-comment').length;
-    const totalComments = lineComments + fileComments;
-    if (reviewEvent === 'REQUEST_CHANGES' && !reviewBody && totalComments === 0) {
-      alert('Please add comments or a review summary when requesting changes.');
-      return;
-    }
-
-    const originalText = submitBtn.textContent;
-    submitBtn.textContent = 'Submitting...';
-    submitBtn.disabled = true;
-
-    try {
-      const response = await fetch(`/api/pr/${this.currentPR.owner}/${this.currentPR.repo}/${this.currentPR.number}/submit-review`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ event: reviewEvent, body: reviewBody })
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to submit review');
-      }
-
-      const result = await response.json();
-      alert(`Review submitted successfully! ${result.message}`);
-
-      document.getElementById('review-body').value = '';
-      document.getElementById('review-event').value = 'COMMENT';
-
-    } catch (error) {
-      console.error('Error submitting review:', error);
-      alert(`Failed to submit review: ${error.message}`);
-    } finally {
-      submitBtn.textContent = originalText;
-      submitBtn.disabled = false;
-    }
-  }
 
   /**
    * Escape HTML characters
@@ -7550,17 +7559,16 @@ class PRManager {
         return;
       }
 
-      // Use unified review comments API (works for both PR and local mode)
       const reviewId = pr.id;
-      let response;
-      response = await fetch(`/api/reviews/${reviewId}/comments`);
+      await window.reviewDrafts.flushAll(reviewId);
+      const response = await fetch(`/api/reviews/${reviewId}/manifest?local=true`);
 
       if (!response.ok) {
         throw new Error('Failed to load comments');
       }
 
-      const data = await response.json();
-      const comments = data.comments || [];
+      const manifest = await response.json();
+      const comments = manifest.comments;
 
       if (comments.length === 0) {
         if (window.toast) {
@@ -7570,13 +7578,13 @@ class PRManager {
       }
 
       // Format comments using PreviewModal's static method
-      if (!window.PreviewModal?.formatComments) {
+      if (!window.PreviewModal?.formatManifest) {
         if (window.toast) {
           window.toast.showError('PreviewModal not available');
         }
         return;
       }
-      const formattedText = window.PreviewModal.formatComments(comments);
+      const formattedText = window.PreviewModal.formatManifest(manifest);
 
       await navigator.clipboard.writeText(formattedText);
 
@@ -7825,6 +7833,10 @@ class PRManager {
     // Helper to toggle sidebar with batched updates to prevent flicker
     // Batches class change and CSS variable update in a single frame
     const toggleSidebar = (collapse) => {
+      if (!collapse && window.innerWidth <= 1200 && window.reviewWorkspace) {
+        window.reviewWorkspace.showPalette('Files');
+        return;
+      }
       const widthValue = collapse
         ? '0px'
         : `${window.PanelResizer?.getSavedWidth('sidebar')
@@ -7836,6 +7848,7 @@ class PRManager {
         document.documentElement.style.setProperty('--sidebar-width', widthValue);
         if (collapse) {
           sidebar.classList.add('collapsed');
+          if (sidebar.contains(document.activeElement)) collapsedBtn.focus();
         } else {
           sidebar.classList.remove('collapsed');
         }
@@ -7865,6 +7878,7 @@ class PRManager {
   async scrollToFile(filePath) {
     const fileWrapper = this.findFileElement(filePath);
     if (fileWrapper) {
+      this.reviewProgress?.visit(filePath);
       // Render the body so the scroll target has its real height (an empty
       // lazy body would land the scroll at the wrong offset for expanded
       // files). Skip it for collapsed files: their body is display:none
@@ -8027,7 +8041,10 @@ class PRManager {
     btn.disabled = true;
 
     // Revert to normal after 2 seconds
-    setTimeout(() => this.resetButton(), 2000);
+    const analysisId = this.currentAnalysisId;
+    setTimeout(() => {
+      if (this.currentAnalysisId === analysisId) this.resetButton();
+    }, 2000);
   }
 
   /**
@@ -8267,11 +8284,18 @@ class PRManager {
       // buildProviderModelScopes prepends any CLI/env override ahead of repo
       // settings so `--provider` seeds the modal as the default selection.
       const providersInfo = await this._getProvidersInfo();
-      const { provider: currentProvider, model: currentModel } = window.resolveProviderModelPair(
+      const resolvedPair = window.resolveProviderModelPair(
         window.buildProviderModelScopes(repoSettings, appConfig),
         providersInfo
       );
-
+      const savedPreferences = reviewSettings.analysis_preferences;
+      const savedProvider = providersInfo.find(provider => provider.id === savedPreferences?.provider);
+      const savedModel = savedProvider?.models.find(model => model.id === savedPreferences?.model);
+      const hasSavedPreference = Boolean(savedPreferences);
+      const hasValidSavedPreference = Boolean(savedProvider && savedModel
+        && (!savedProvider.availability || savedProvider.availability.available));
+      const currentProvider = hasValidSavedPreference ? savedPreferences.provider : resolvedPair.provider;
+      const currentModel = hasValidSavedPreference ? savedPreferences.model : resolvedPair.model;
       // Determine default tab (priority: localStorage > repo settings > 'single')
       const tabStorageKey = PRManager.getRepoStorageKey('pair-review-tab', owner, repo);
       const rememberedTab = localStorage.getItem(tabStorageKey);
@@ -8279,7 +8303,8 @@ class PRManager {
 
       // Restore custom instructions (priority: database > localStorage)
       const instructionsStorageKey = PRManager.getRepoStorageKey('pair-review-instructions', owner, repo);
-      const lastInstructions = reviewSettings.custom_instructions
+      const lastInstructions = savedPreferences?.customInstructions
+        ?? reviewSettings.custom_instructions
         ?? localStorage.getItem(instructionsStorageKey)
         ?? '';
 
@@ -8291,7 +8316,10 @@ class PRManager {
       // Show the config modal
       const config = await this.analysisConfigModal.show({
         currentModel,
+        providersInfo,
         currentProvider,
+        hasSavedPreference: hasSavedPreference && hasValidSavedPreference,
+        savedPreferenceInvalid: hasSavedPreference && !hasValidSavedPreference,
         defaultTab,
         repoInstructions: repoSettings?.default_instructions || '',
         lastInstructions: lastInstructions,
@@ -8310,6 +8338,22 @@ class PRManager {
       if (!config) {
         return;
       }
+      if (!config.isCouncil) {
+        const response = await fetch(`/api/pr/${owner}/${repo}/${number}/analysis-preferences`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider: config.provider,
+            model: config.model,
+            customInstructions: config.customInstructions || ''
+          })
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(result.error || 'Failed to save analysis preferences');
+        }
+      }
+
 
       // Persist custom instructions to localStorage for immediate recall on next dialog open
       const submittedInstructions = config.customInstructions || '';
@@ -8516,22 +8560,9 @@ class PRManager {
 
       if (result.isStale !== true) return result;
 
-      // Stale — decide: silent refresh or show badge
-      const hasData = await this._hasActiveSessionData();
-      if (hasData) {
-        this._showStaleBadge('stale');
-        if (window.chatPanel) {
-          const abbrevLen = this.currentPR?.shaAbbrevLength || 7;
-          const oldSha = result.localHeadSha ? result.localHeadSha.substring(0, abbrevLen) : 'unknown';
-          const newSha = result.remoteHeadSha ? result.remoteHeadSha.substring(0, abbrevLen) : 'unknown';
-          window.chatPanel.queueDiffStateNotification(
-            `PR HEAD has changed (${oldSha} → ${newSha}). The diff has not been refreshed yet.`
-          );
-        }
-      } else {
-        // No user work to protect — refresh silently
-        await this.refreshPR();
-      }
+      this._staleDetails = result;
+      if (await this._hasActiveSessionData()) this._showStaleBadge('stale');
+      else await this.refreshPR();
       return result;
     } catch {
       // Fail silently — staleness badge is best-effort
@@ -8565,6 +8596,7 @@ class PRManager {
    * Returns true if uncertain (fail-safe: don't auto-refresh).
    */
   async _hasActiveSessionData() {
+    if (!this._canReplaceDiff()) return true;
     const reviewId = this.currentPR?.id;
     // No review record → no session data possible
     if (!reviewId) return false;
@@ -8574,6 +8606,7 @@ class PRManager {
         fetch(`/api/reviews/${reviewId}/suggestions/check`).then(r => r.ok ? r.json() : null),
         fetch(`/api/reviews/${reviewId}/comments`).then(r => r.ok ? r.json() : null)
       ]);
+      if (!suggestionsRes || !commentsRes) return true;
 
       const hasAnalysis = suggestionsRes?.analysisHasRun === true;
       const hasUserComments = (commentsRes?.comments || []).some(
@@ -8595,6 +8628,10 @@ class PRManager {
   _showStaleBadge(type, title) {
     const badge = document.getElementById('stale-badge');
     if (!badge) return;
+    const header = document.querySelector('.app > .header');
+    if (header) header.after(badge);
+    badge.setAttribute('role', 'status');
+    if (type !== 'stale') badge.querySelector('button')?.remove();
 
     // Reset variant classes
     badge.classList.remove('pr-closed', 'pr-merged');
@@ -8611,6 +8648,32 @@ class PRManager {
     } else {
       if (textEl) textEl.textContent = 'STALE';
       badge.title = title || 'PR data is outdated';
+      const local = !!window.PAIR_REVIEW_LOCAL_MODE;
+      const details = this._staleDetails || {};
+      const viewed = details.localHeadSha || details.previousHeadSha || this.currentPR?.head_sha;
+      const latest = details.remoteHeadSha || details.currentHeadSha;
+      if (textEl) textEl.textContent = local
+        ? 'Working tree changed since this diff was captured.'
+        : `Viewing ${viewed?.slice(0, 7) || 'saved commits'}; latest commits ${latest?.slice(0, 7) || 'have changed'}.`;
+      let action = badge.querySelector('button');
+      if (!action) {
+        action = document.createElement('button');
+        action.type = 'button';
+        action.className = 'btn btn-sm';
+        badge.appendChild(action);
+      }
+      action.textContent = local ? 'Update from working tree' : 'Update to latest commits';
+      action.onclick = async () => {
+        action.disabled = true;
+        action.textContent = 'Updating…';
+        try {
+          if (local) await window.localManager.refreshDiff();
+          else await this.refreshPR();
+        } finally {
+          action.disabled = false;
+          action.textContent = local ? 'Update from working tree' : 'Update to latest commits';
+        }
+      };
     }
     badge.style.display = '';
   }
@@ -8623,6 +8686,19 @@ class PRManager {
     if (badge) badge.style.display = 'none';
   }
 
+  _canReplaceDiff() {
+    // Editors are not persisted comments: never destroy their DOM during refresh.
+    const editors = document.querySelectorAll('#diff-container textarea, #diff-container [contenteditable="true"]');
+    const shadowEditor = [...document.querySelectorAll('#diff-container *')].some(
+      node => node.shadowRoot?.querySelector('textarea, [contenteditable="true"]')
+    );
+    if (editors.length || shadowEditor || window.reviewDrafts?.hasPending(this.currentPR?.id)) {
+      window.toast?.showWarning('Save or cancel your open comment editor before updating. Saved drafts and analysis history are retained.');
+      return false;
+    }
+    return true;
+  }
+
   /**
    * Refresh the PR data
    */
@@ -8632,6 +8708,7 @@ class PRManager {
       return;
     }
 
+    if (!this._canReplaceDiff()) return;
     const { owner, repo, number } = this.currentPR;
     const refreshBtn = document.getElementById('refresh-pr');
 
@@ -8640,11 +8717,7 @@ class PRManager {
       refreshBtn.disabled = true;
     }
 
-    // Show loading state in diff container
-    const diffContainer = document.getElementById('diff-container');
-    if (diffContainer) {
-      diffContainer.innerHTML = '<div class="loading">Refreshing pull request...</div>';
-    }
+    // Keep the existing diff visible until the refresh succeeds.
 
     const oldHeadSha = this.currentPR?.head_sha;
 
@@ -8663,8 +8736,17 @@ class PRManager {
 
       // Update current PR data
       if (data.success && data.data) {
-        this.currentPR = data.data;
 
+
+        // Save scroll position and expanded state
+        const scrollPosition = window.scrollY;
+        const expandedFolders = new Set(this.expandedFolders);
+
+
+        // Reload the files/diff with fresh data
+        await this.loadAndDisplayFiles(owner, repo, number, { preserveEditors: true });
+        this.currentPR = data.data;
+        this.renderPRHeader(data.data);
         // Notify chat agent if HEAD SHA changed
         const newHeadSha = data.data?.head_sha;
         if (window.chatPanel && oldHeadSha && newHeadSha && oldHeadSha !== newHeadSha) {
@@ -8676,16 +8758,6 @@ class PRManager {
 
         // Sync worktree label to dropdown (may have changed after refresh)
         this._syncWorktreeDropdown(data.data);
-
-        // Save scroll position and expanded state
-        const scrollPosition = window.scrollY;
-        const expandedFolders = new Set(this.expandedFolders);
-
-        // Update PR header with fresh data (title, description may have changed)
-        this.renderPRHeader(data.data);
-
-        // Reload the files/diff with fresh data
-        await this.loadAndDisplayFiles(owner, repo, number);
 
         // Re-render the three independent overlay layers on the fresh DOM
         // (renderDiff clears the diff container). Going through the shared
@@ -8700,7 +8772,6 @@ class PRManager {
         // onSelectionChange on init), refresh must call unconditionally
         // since the manager won't re-fire its callback.
         await this._rerenderAllOverlays({
-          analysisRunId: this.selectedRunId,
           syncExternal: true,
         });
 
@@ -8719,7 +8790,8 @@ class PRManager {
       }
     } catch (error) {
       console.error('Error refreshing PR:', error);
-      this.showError(error.message);
+      window.toast?.showError(error.message);
+      this._showStaleBadge('stale', error.message);
     } finally {
       if (refreshBtn) {
         refreshBtn.classList.remove('refreshing');

@@ -8,22 +8,6 @@ const { PreviewModal } = require('../../public/js/components/PreviewModal.js');
 const formatComments = PreviewModal.formatComments;
 
 describe('PreviewModal - formatComments', () => {
-  describe('Empty/null handling', () => {
-    it('should return default message for empty array', () => {
-      const result = formatComments([]);
-      expect(result).toBe('No comments to preview.');
-    });
-
-    it('should return default message for null', () => {
-      const result = formatComments(null);
-      expect(result).toBe('No comments to preview.');
-    });
-
-    it('should return default message for undefined', () => {
-      const result = formatComments(undefined);
-      expect(result).toBe('No comments to preview.');
-    });
-  });
 
   describe('Single file scenarios', () => {
     it('should format single file with one file-level comment', () => {

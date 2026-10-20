@@ -29,6 +29,9 @@ importers:
       glob:
         specifier: ^13.0.6
         version: 13.0.6
+      markdown-it:
+        specifier: ^14.3.2
+        version: 14.3.2
       open:
         specifier: ^9.1.0
         version: 9.1.0
@@ -72,9 +75,6 @@ importers:
       jsdom:
         specifier: ^29.0.1
         version: 29.0.2(@noble/hashes@1.8.0)
-      markdown-it:
-        specifier: ^14.3.2
-        version: 14.3.2
       supertest:
         specifier: ^7.1.4
         version: 7.2.2

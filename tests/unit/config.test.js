@@ -122,6 +122,44 @@ describe('config.js', () => {
       warnSpy.mockRestore();
     });
 
+    it('inspects a global command cache without executing it', () => {
+      const config = { github_token_command: 'printf global-fixture-token' };
+      expect(getGitHubToken(config, undefined, { cachedOnly: true })).toBe('');
+      expect(execSyncSpy).not.toHaveBeenCalled();
+      expect(getGitHubToken(config)).toBe('global-fixture-token');
+      expect(getGitHubToken(config, undefined, { cachedOnly: true })).toBe('global-fixture-token');
+      expect(execSyncSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not fall through an unresolved repository command or prevent explicit native refresh', () => {
+      const config = { github_token: 'wrong-host-token', repos: {
+        'example/project': { api_host: 'https://host.example', token_command: 'printf alternate-fixture-token' }
+      } };
+      expect(resolveHostBinding('example/project', config, { cachedOnly: true }).token).toBe('');
+      expect(execSyncSpy).not.toHaveBeenCalled();
+      expect(resolveHostBinding('example/project', config).token).toBe('alternate-fixture-token');
+      const cached = resolveHostBinding('example/project', config, { cachedOnly: true });
+      expect(cached.token).toBe('alternate-fixture-token');
+      expect(execSyncSpy).toHaveBeenCalledTimes(1);
+      expect(cached.refresh()).toBe('alternate-fixture-token');
+      expect(execSyncSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([false, true])('does not log credential command text or failure output (repository: %s)', repository => {
+      const debugSpy = vi.spyOn(require('../../src/utils/logger'), 'debug').mockImplementation(() => {});
+      execSyncSpy.mockImplementation(() => { throw new Error('private-fixture-output'); });
+      const command = 'private-fixture-command';
+      try {
+        const token = repository ? resolveHostBinding('example/project', {
+          repos: { 'example/project': { token_command: command } }
+        }).token : getGitHubToken({ github_token_command: command });
+        expect(token).toBe('');
+        const logs = JSON.stringify([...debugSpy.mock.calls, ...warnSpy.mock.calls]);
+        expect(logs).not.toContain(command);
+        expect(logs).not.toContain('private-fixture-output');
+      } finally { debugSpy.mockRestore(); }
+    });
+
     it('should return trimmed token from command', () => {
       execSyncSpy.mockReturnValue('ghp_abc123\n');
       const config = { github_token_command: 'gh auth token' };
@@ -136,29 +174,6 @@ describe('config.js', () => {
       });
     });
 
-    it('should return empty string and log warning with error details when command fails', () => {
-      execSyncSpy.mockImplementation(() => { throw new Error('command not found'); });
-      const config = { github_token_command: 'bad-command' };
-
-      const result = getGitHubToken(config);
-
-      expect(result).toBe('');
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('github_token_command failed'));
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('command not found'));
-    });
-
-    it('should return empty string and log warning with error details on timeout', () => {
-      const err = new Error('ETIMEDOUT');
-      err.killed = true;
-      execSyncSpy.mockImplementation(() => { throw err; });
-      const config = { github_token_command: 'sleep 999' };
-
-      const result = getGitHubToken(config);
-
-      expect(result).toBe('');
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('github_token_command failed'));
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('ETIMEDOUT'));
-    });
 
     it('should return empty string and log warning when command returns whitespace only', () => {
       execSyncSpy.mockReturnValue('  \n  \n');

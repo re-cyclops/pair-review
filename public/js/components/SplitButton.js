@@ -11,19 +11,10 @@ class SplitButton {
     this.container = null;
     this.dropdown = null;
     this.isOpen = false;
-    this.commentCount = 0;
-    // In local mode, default to preview since submit is hidden
-    const isLocalMode = window.PAIR_REVIEW_LOCAL_MODE === true;
-    this.hideSubmit = isLocalMode || options.hideSubmit === true;
-
-    // Determine default action: local mode always uses preview,
-    // otherwise check localStorage for saved preference
-    if (isLocalMode) {
-      this.defaultAction = 'preview';
-    } else {
-      const savedAction = this.loadSavedAction();
-      this.defaultAction = savedAction || options.defaultAction || 'submit';
-    }
+    this.commentCount = null;
+    this.totalDrafts = null;
+    this.countState = 'loading';
+    this.defaultAction = this.loadSavedAction() || options.defaultAction || 'submit';
     this.onSubmit = options.onSubmit || (() => {});
     this.onPreview = options.onPreview || (() => {});
     this.onClear = options.onClear || (() => {});
@@ -113,21 +104,17 @@ class SplitButton {
     const isSubmitDefault = this.defaultAction === 'submit';
     const isPreviewDefault = this.defaultAction === 'preview';
 
-    // Build menu items - conditionally include Submit Review
-    let menuItems = '';
-
-    if (!this.hideSubmit) {
-      menuItems += `
+    // The primary action opens final authoring; it never publishes directly.
+    let menuItems = `
       <button class="split-button-menu-item" data-action="submit" role="menuitem">
         <span class="menu-item-check">${isSubmitDefault ? '&#10003;' : ''}</span>
-        <span class="menu-item-text">Submit Review</span>
+        <span class="menu-item-text">Submit review</span>
       </button>`;
-    }
 
     menuItems += `
       <button class="split-button-menu-item" data-action="preview" role="menuitem">
         <span class="menu-item-check">${isPreviewDefault ? '&#10003;' : ''}</span>
-        <span class="menu-item-text">Preview</span>
+        <span class="menu-item-text">Export selected comments</span>
       </button>`;
 
     if (this.shareUrl) {
@@ -150,7 +137,7 @@ class SplitButton {
 
     menuItems += `
       <div class="split-button-menu-separator"></div>
-      <button class="split-button-menu-item split-button-menu-item-danger" data-action="clear" role="menuitem" ${this.commentCount === 0 ? 'disabled' : ''}>
+      <button class="split-button-menu-item split-button-menu-item-danger" data-action="clear" role="menuitem" ${!this.totalDrafts ? 'disabled' : ''}>
         <span class="menu-item-check"></span>
         <span class="menu-item-text">Clear All</span>
       </button>
@@ -285,20 +272,12 @@ class SplitButton {
   setDefaultAction(action) {
     if (action !== 'submit' && action !== 'preview') return;
 
-    // In local mode (hideSubmit), don't allow setting submit as default
-    if (this.hideSubmit && action === 'submit') {
-      action = 'preview';
-    }
-
     this.defaultAction = action;
     this.updateDropdownMenu();
     this.updateButtonText();
     this.onSetDefault(action);
 
-    // Persist to localStorage (only in PR mode where submit is available)
-    if (!this.hideSubmit) {
-      this.saveAction(action);
-    }
+    this.saveAction(action);
   }
 
   /**
@@ -334,7 +313,8 @@ class SplitButton {
    * @returns {string} Button text
    */
   getButtonText() {
-    const actionText = this.defaultAction === 'submit' ? 'Submit Review' : 'Preview';
+    const actionText = this.defaultAction === 'submit' ? 'Submit review' : 'Export selected comments';
+    if (this.countState) return `${actionText} · ${this.countState}`;
     if (this.commentCount > 0) {
       return `${actionText} (${this.commentCount})`;
     }
@@ -355,8 +335,10 @@ class SplitButton {
    * Update the comment count display
    * @param {number} count - Number of comments
    */
-  updateCommentCount(count) {
+  updateCommentCount(count, { state = '', totalDrafts = count } = {}) {
     this.commentCount = count;
+    this.totalDrafts = totalDrafts;
+    this.countState = state;
     this.updateButtonText();
 
     // Update button styling based on count

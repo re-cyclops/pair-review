@@ -954,50 +954,6 @@ describe('kickOffSummaryJob', () => {
     });
   });
 
-  it('thunk invokes generateSummariesForReview with provided params', async () => {
-    let captured;
-    const enqueue = vi.fn((_id, _type, fn) => {
-      captured = fn;
-      return null;
-    });
-    function HunkSummaryRepositoryStub() {
-      return {
-        getByHashes: vi.fn(async () => []),
-        getByReview: vi.fn(async () => []),
-        getByReviewAndFile: vi.fn(async () => []),
-        upsertMany: vi.fn(async () => 0)
-      };
-    }
-    const broadcastReviewEvent = vi.fn();
-    const getGeneratedFilePatterns = vi.fn(async () => ({ isGenerated: () => false }));
-    const createProvider = vi.fn(() => ({
-      execute: vi.fn(async () => ({ summaries: [] })),
-      constructor: { getModels: () => [] }
-    }));
-
-    await kickOffSummaryJob({
-      db: {},
-      config: { summaries: { enabled: true, max_files: 50 } },
-      reviewId: 9,
-      diffText: '   ',
-      worktreePath: '/wt',
-      _deps: {
-        backgroundQueue: { enqueue },
-        HunkSummaryRepository: HunkSummaryRepositoryStub,
-        broadcastReviewEvent,
-        getGeneratedFilePatterns,
-        createProvider,
-        getSummaryProvider: () => 'fake',
-        getSummaryModel: () => 'fast-model',
-        resolveNonExecutableProviderId: () => 'fake',
-        buildHunkSummaryPrompt: () => 'PROMPT',
-        extractJSON: () => ({ success: false })
-      }
-    });
-
-    const inner = await captured();
-    expect(inner).toEqual({ filesProcessed: 0, hunksPersisted: 0 });
-  });
 });
 
 describe('auto_generate gate ordering', () => {

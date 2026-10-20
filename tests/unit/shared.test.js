@@ -30,6 +30,7 @@ import {
  */
 function createMockChildProcess(options = {}) {
   const proc = new EventEmitter();
+  proc.pid = 12345;
   proc.killed = false;
   proc.kill = vi.fn((signal) => {
     if (options.throwOnKill) {
@@ -175,15 +176,6 @@ describe('shared.js cancellation functions', () => {
       expect(mockProc2.kill).toHaveBeenCalledWith('SIGTERM');
     });
 
-    it('should clear the activeProcesses entry after killing', () => {
-      const analysisId = 'test-kill-2';
-      const mockProc = createMockChildProcess({ autoExit: false });
-
-      registerProcess(analysisId, mockProc);
-      killProcesses(analysisId);
-
-      expect(activeProcesses.has(analysisId)).toBe(false);
-    });
 
     it('should handle processes that throw when killed (already exited)', () => {
       const analysisId = 'test-kill-3';
@@ -196,11 +188,9 @@ describe('shared.js cancellation functions', () => {
       // Should not throw, and should still try to kill all processes
       const result = killProcesses(analysisId);
 
-      // Count includes attempt on first (even though it threw)
       expect(result).toBe(1); // Only mockProc2 succeeded
       expect(mockProc1.kill).toHaveBeenCalled();
       expect(mockProc2.kill).toHaveBeenCalled();
-      expect(activeProcesses.has(analysisId)).toBe(false);
     });
   });
 

@@ -229,27 +229,23 @@ test.describe('Comment Editing', () => {
     await expect(commentBody).toContainText('Edited comment text', { timeout: 5000 });
   });
 
-  test('should cancel edit and restore original text', async ({ page }) => {
-    // Click edit button
-    await page.locator('.btn-edit-comment').first().click();
-
-    // Wait for edit mode
-    const editTextarea = page.locator('.comment-edit-textarea, .user-comment-edit-form textarea').first();
-    await expect(editTextarea).toBeVisible({ timeout: 5000 });
-
-    // Type different text
-    await editTextarea.fill('This should be discarded');
-
-    // Cancel the edit
-    const cancelEditBtn = page.locator('.cancel-edit-btn');
-    await cancelEditBtn.click();
-
-    // Edit mode should close
-    await expect(editTextarea).not.toBeVisible({ timeout: 5000 });
-
-    // Comment should still show original text
-    const commentBody = page.locator('.user-comment-body');
-    await expect(commentBody.first()).toContainText('Original comment text');
+  test('retains a pending inline edit after closing and reloading', async ({ page }) => {
+    const row = page.locator('.user-comment-row').first();
+    const commentId = await row.getAttribute('data-comment-id');
+    await row.locator('.btn-edit-comment').click();
+    const textarea = page.locator(`#edit-comment-${commentId}`);
+    await expect(textarea).toBeEditable();
+    const text = 'Keep `request.state` unchanged while the next request is pending';
+    await textarea.fill(text);
+    const saved = page.waitForResponse(response =>
+      response.url().endsWith(`/comments/${commentId}`) && response.request().method() === 'PUT' && response.ok());
+    await row.getByRole('button', { name: 'Close', exact: true }).click();
+    await saved;
+    await page.reload();
+    await waitForDiffToRender(page);
+    const restored = page.locator(`[data-comment-id="${commentId}"]`);
+    await restored.locator('.btn-edit-comment').click();
+    await expect(page.locator(`#edit-comment-${commentId}`)).toHaveValue(text);
   });
 
   test('should correctly edit comments containing double quotes', async ({ page }) => {

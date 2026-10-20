@@ -10,138 +10,29 @@ import { test, expect } from './fixtures.js';
 import { waitForDiffToRender, hoverDiffLine } from './helpers.js';
 
 test.describe('Comment Creation', () => {
-  test('should show comment form when add comment button is clicked', async ({ page }) => {
+
+  test('retains a new comment when closing the editor before autosave', async ({ page }) => {
     await page.goto('/pr/test-owner/test-repo/1');
     await waitForDiffToRender(page);
-
-    // Hover over a line number to show the add comment button
-    await hoverDiffLine(page, 0);
-
-    // Click the add comment button
-    const addCommentBtn = page.locator('.pierre-comment-btn').first();
-    await addCommentBtn.click();
-
-    // The comment form should appear (.user-comment-form is the actual class)
-    const commentForm = page.locator('.user-comment-form, .comment-form-row');
-    await expect(commentForm.first()).toBeVisible({ timeout: 5000 });
-  });
-
-  test('should have textarea for comment input', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await waitForDiffToRender(page);
-
-    // Hover and click add comment
     await hoverDiffLine(page, 0);
     await page.locator('.pierre-comment-btn').first().click();
 
-    // Should have a textarea for comment input
-    const textarea = page.locator('.user-comment-form textarea, .comment-textarea');
-    await expect(textarea.first()).toBeVisible({ timeout: 5000 });
-  });
-
-  test('should have submit and cancel buttons in comment form', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await waitForDiffToRender(page);
-
-    // Hover and click add comment
-    await hoverDiffLine(page, 0);
-    await page.locator('.pierre-comment-btn').first().click();
-
-    // Wait for form to appear
-    await page.waitForSelector('.user-comment-form', { timeout: 5000 });
-
-    // Should have submit button (uses btn-primary or Add Comment text)
-    const submitBtn = page.locator('.comment-form-actions button.btn-primary, button:has-text("Add Comment")');
-    await expect(submitBtn.first()).toBeVisible();
-
-    // Should have cancel button
-    const cancelBtn = page.locator('.comment-form-actions button:has-text("Cancel"), .btn-cancel');
-    await expect(cancelBtn.first()).toBeVisible();
-  });
-
-  test('should close comment form on cancel', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await waitForDiffToRender(page);
-
-    // Hover and click add comment
-    await hoverDiffLine(page, 0);
-    await page.locator('.pierre-comment-btn').first().click();
-
-    // Wait for form
     const form = page.locator('.user-comment-form');
-    await expect(form.first()).toBeVisible({ timeout: 5000 });
+    const body = 'Keep this new draft after closing the editor';
+    await form.locator('textarea').fill(body);
+    const saved = page.waitForResponse(response =>
+      response.url().endsWith('/api/reviews/1/comments') &&
+      response.request().method() === 'POST' && response.ok());
+    await form.getByRole('button', { name: 'Close', exact: true }).click();
+    expect((await (await saved).json()).comment.body).toBe(body);
+    await expect(form).not.toBeVisible();
 
-    // Click cancel button
-    const cancelBtn = page.locator('.comment-form-actions button:has-text("Cancel")');
-    await cancelBtn.first().click();
-
-    // Form should close
-    await expect(form.first()).not.toBeVisible({ timeout: 3000 });
+    await page.reload();
+    await waitForDiffToRender(page);
+    await expect(page.locator('.user-comment-body')).toContainText(body);
   });
 });
 
-test.describe('Review Modal', () => {
-  test('should show review button in toolbar', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await waitForDiffToRender(page);
-
-    // Should have a submit review button (SplitButton with Review text)
-    const reviewBtn = page.locator('button:has-text("Review"), .split-button-main:has-text("Submit"), #submit-review-btn');
-    const count = await reviewBtn.count();
-    expect(count).toBeGreaterThan(0);
-  });
-
-  test('should open review modal when clicking review button', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await waitForDiffToRender(page);
-
-    // Click the submit review button
-    const reviewBtn = page.locator('button:has-text("Review"), .split-button-main, #submit-review-btn').first();
-    await reviewBtn.click();
-
-    // Modal should appear (review modal specifically, not progress modal)
-    const modal = page.locator('.review-modal-overlay, .review-modal-container');
-    await expect(modal.first()).toBeVisible({ timeout: 5000 });
-  });
-
-  test('should have review event options (Approve, Comment, Request Changes)', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await waitForDiffToRender(page);
-
-    // Open review modal
-    await page.locator('button:has-text("Review"), .split-button-main, #submit-review-btn').first().click();
-
-    // Wait for review modal specifically
-    await page.waitForSelector('.review-modal-overlay, .review-modal-container', { timeout: 5000 });
-
-    // Should have review type options (radio buttons with APPROVE, COMMENT, REQUEST_CHANGES values)
-    const approveRadio = page.locator('input[value="APPROVE"]');
-    const commentRadio = page.locator('input[value="COMMENT"]');
-    const requestChangesRadio = page.locator('input[value="REQUEST_CHANGES"]');
-
-    // All three review event options should be visible
-    await expect(approveRadio).toBeVisible();
-    await expect(commentRadio).toBeVisible();
-    await expect(requestChangesRadio).toBeVisible();
-  });
-
-  test('should close review modal on cancel', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await waitForDiffToRender(page);
-
-    // Open review modal
-    await page.locator('.split-button-main').click();
-
-    const modal = page.locator('.review-modal-overlay');
-    await expect(modal).toBeVisible({ timeout: 5000 });
-
-    // Click cancel
-    await page.locator('#cancel-review-btn').click();
-
-    // Wait for modal to be hidden (handles animations)
-    await modal.waitFor({ state: 'hidden', timeout: 5000 });
-  });
-});
 
 test.describe('API Integration', () => {
   test('should fetch PR data from API on page load', async ({ page }) => {

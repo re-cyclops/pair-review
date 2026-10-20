@@ -450,8 +450,9 @@ function kickOffSummaryJob({
   // kickoffs always proceed.
   if (trigger !== 'manual' && !deps.getSummaryAutoGenerate(config)) return null;
 
-  return queue.enqueue(reviewId, newJobType, (signal) =>
-    generateSummariesForReview({
+  return queue.enqueue(reviewId, newJobType, (signal) => {
+    require('../review-removal').assertReviewAvailable(db, reviewId);
+    return generateSummariesForReview({
       db,
       config,
       reviewId,
@@ -462,8 +463,8 @@ function kickOffSummaryJob({
       // so a user cancel reaches the per-file provider.execute call.
       abortSignal: signal,
       _deps
-    })
-  );
+    });
+  });
 }
 
 module.exports = { generateSummariesForReview, kickOffSummaryJob, countAddedLines };

@@ -179,13 +179,17 @@ async function storePRData(db, prInfo, prData, diff, changedFiles, worktreePath,
     // transaction and to update only review_data without overwriting custom_instructions
     // or summary fields that may have been set by previous analysis runs.
     const existingReview = await queryOne(db, `
-      SELECT id FROM reviews WHERE pr_number = ? AND repository = ? COLLATE NOCASE
+      SELECT id, review_data FROM reviews WHERE pr_number = ? AND repository = ? COLLATE NOCASE
     `, [prInfo.number, repository]);
 
     let isNewReview;
     let reviewId;
 
     if (existingReview) {
+      const parsedReviewData = existingReview.review_data ? JSON.parse(existingReview.review_data) : null;
+      const preservedReviewData = parsedReviewData && typeof parsedReviewData === 'object' && !Array.isArray(parsedReviewData)
+        ? parsedReviewData
+        : {};
       // Update existing review (preserves ID)
       await run(db, `
         UPDATE reviews
@@ -193,6 +197,7 @@ async function storePRData(db, prInfo, prData, diff, changedFiles, worktreePath,
         WHERE id = ?
       `, [
         JSON.stringify({
+          ...preservedReviewData,
           worktree_path: worktreePath,
           created_at: new Date().toISOString()
         }),

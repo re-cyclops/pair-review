@@ -1,225 +1,63 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
-/**
- * E2E Tests: Review Submission — UI States, Draft, Assisted-by
- *
- * Tests the review submission flow including:
- * - UI states during submission (loading, disabled buttons, form reset)
- * - Draft review submission behavior
- * - Assisted-by footer toggle functionality
- */
+import { publicationTest as test, expect } from './fixtures.js';
+import { openReviewAuthoring } from './helpers.js';
 
-import { test, expect } from './fixtures.js';
-import { waitForDiffToRender } from './helpers.js';
+const url = '/pr/test-owner/test-repo/1';
 
-// Helper to open the review modal
-async function openReviewModal(page) {
-  await waitForDiffToRender(page);
-  const reviewBtn = page.locator('.split-button-main').first();
-  await reviewBtn.click();
-  await page.waitForSelector('.review-modal-overlay', { timeout: 5000 });
-}
-
-test.describe('Review Submission UI States', () => {
-  test('should show loading state during submission', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Enter review
-    await page.locator('#review-body-modal').fill('Test review');
-
-    // Click submit and check for loading state
-    const submitBtn = page.locator('#submit-review-btn-modal');
-    await submitBtn.click();
-
-    // Button should show loading state (may be brief, so check it exists at some point)
-    // The button text changes to "Submitting review..." during submission
-    // This might be too fast to catch consistently, so we just verify success
-    const toast = page.locator('.toast-success');
-    await expect(toast).toBeVisible({ timeout: 10000 });
-  });
-
-  test('should disable cancel button during submission', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    await page.locator('#review-body-modal').fill('Test review');
-    await page.locator('#submit-review-btn-modal').click();
-
-    // Wait for submission to complete (success toast)
-    const toast = page.locator('.toast-success');
-    await expect(toast).toBeVisible({ timeout: 10000 });
-  });
-
-  test('should reset form state when modal is reopened after submission', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Submit with APPROVE
-    await page.locator('input[value="APPROVE"]').click();
-    await page.locator('#review-body-modal').fill('Test review');
-    await page.locator('#submit-review-btn-modal').click();
-
-    // Wait for success and modal to close
-    await page.waitForSelector('.toast-success', { timeout: 10000 });
-    await page.waitForSelector('.review-modal-overlay', { state: 'hidden', timeout: 10000 });
-
-    // Reopen modal
-    await openReviewModal(page);
-
-    // Should be reset to COMMENT default
-    await expect(page.locator('input[value="COMMENT"]')).toBeChecked();
-    await expect(page.locator('#review-body-modal')).toHaveValue('');
-  });
+test('preserves pending body text, caret and modal ownership through the command palette', async ({ page, testServer }) => {
+  await page.goto(url);
+  await openReviewAuthoring(page);
+  const body = 'The interrupted request must retain its guard\n\n    keepTechnicalIndentation();\n';
+  const editor = page.locator('#review-body-modal');
+  await editor.fill(body);
+  await editor.evaluate(element => element.setSelectionRange(4, 13));
+  await page.keyboard.press('ControlOrMeta+K');
+  await expect(page.locator('#workspace-commands')).toBeVisible();
+  await page.keyboard.press('ControlOrMeta+Enter');
+  expect(testServer.reviewHost.state.calls).toEqual([]);
+  await page.keyboard.press('Escape');
+  await expect(editor).toBeFocused();
+  await expect(editor).toHaveValue(body);
+  expect(await editor.evaluate(element => [element.selectionStart, element.selectionEnd])).toEqual([4, 13]);
+  await page.keyboard.press('ControlOrMeta+K');
+  await page.locator('#workspace-commands').getByRole('combobox').fill('final preview');
+  await page.keyboard.press('Enter');
+  await expect(editor).toBeVisible();
+  await expect(editor).toHaveValue(body);
+  await page.getByRole('button', { name: 'Skip — keep drafts local', exact: true }).click();
+  await page.getByRole('link', { name: 'Review inbox', exact: true }).click();
+  await page.goto(url);
+  await openReviewAuthoring(page);
+  await expect(editor).toHaveValue(body);
+  expect(testServer.db.prepare('SELECT draft_body FROM reviews WHERE id = 1').get().draft_body).toBe(body);
+  expect(testServer.reviewHost.state.calls).toEqual([]);
 });
 
-test.describe('Draft Review Submission', () => {
-  test('should disable textarea when DRAFT is selected', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    const textarea = page.locator('#review-body-modal');
-
-    // Textarea should be enabled by default (COMMENT selected)
-    await expect(textarea).toBeEnabled();
-
-    // Select DRAFT
-    await page.locator('input[value="DRAFT"]').click();
-
-    // Textarea should now be disabled
-    await expect(textarea).toBeDisabled();
-
-    // Should have tooltip explaining why
-    await expect(textarea).toHaveAttribute('title', 'Review summary is not included with draft reviews');
-
-    // Selecting a different option should re-enable it
-    await page.locator('input[value="APPROVE"]').click();
-    await expect(textarea).toBeEnabled();
-    await expect(textarea).toHaveAttribute('title', '');
-  });
-
-  test('should be able to submit draft review', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Select DRAFT
-    await page.locator('input[value="DRAFT"]').click();
-
-    // Textarea is disabled for drafts - cannot enter body text
-    await expect(page.locator('#review-body-modal')).toBeDisabled();
-
-    // Submit
-    await page.locator('#submit-review-btn-modal').click();
-
-    // Wait for success toast (draft has different message)
-    const toast = page.locator('.toast-success');
-    await expect(toast).toBeVisible({ timeout: 10000 });
-    await expect(toast).toContainText(/draft|submitted/i);
-  });
-});
-
-test.describe('Assisted-by Footer Toggle', () => {
-  test('should show assisted-by toggle in modal', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    const toggle = page.locator('#assisted-by-toggle');
-    await expect(toggle).toBeVisible();
-
-    // Checkbox is hidden (slide toggle renders via .toggle-switch), but should exist in DOM
-    const checkbox = page.locator('#assisted-by-checkbox');
-    await expect(checkbox).toBeAttached();
-  });
-
-  test('should have toggle checked by default', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Toggle defaults to ON
-    const checkbox = page.locator('#assisted-by-checkbox');
-    await expect(checkbox).toBeChecked();
-
-    // But footer is NOT shown in textarea (only appended on submit)
-    const textarea = page.locator('#review-body-modal');
-    await expect(textarea).toHaveValue('');
-  });
-
-  test('should persist toggle OFF state', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Turn off
-    await page.locator('#assisted-by-toggle').click();
-
-    // Close and reopen
-    await page.locator('#cancel-review-btn').click();
-    await page.waitForSelector('.review-modal-overlay', { state: 'hidden', timeout: 5000 });
-    await openReviewModal(page);
-
-    // Should remember OFF
-    const checkbox = page.locator('#assisted-by-checkbox');
-    await expect(checkbox).not.toBeChecked();
-  });
-
-  test('should include footer in submitted review body when toggle is ON', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Toggle is ON by default
-    const textarea = page.locator('#review-body-modal');
-    await textarea.fill('Great work!');
-
-    // Intercept the submit API call
-    const submitPromise = page.waitForRequest(request =>
-      request.url().includes('/submit-review') && request.method() === 'POST'
-    );
-
-    await page.locator('#submit-review-btn-modal').click();
-
-    const request = await submitPromise;
-    const body = JSON.parse(request.postData());
-    expect(body.body).toContain('Great work!');
-    expect(body.body).toContain('Review assisted by [pair-review]');
-  });
-
-  test('should NOT include footer when toggle is OFF', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Turn off toggle
-    await page.locator('#assisted-by-toggle').click();
-
-    const textarea = page.locator('#review-body-modal');
-    await textarea.fill('No footer please');
-
-    // Intercept the submit API call
-    const submitPromise = page.waitForRequest(request =>
-      request.url().includes('/submit-review') && request.method() === 'POST'
-    );
-
-    await page.locator('#submit-review-btn-modal').click();
-
-    const request = await submitPromise;
-    const body = JSON.parse(request.postData());
-    expect(body.body).toContain('No footer please');
-    expect(body.body).not.toContain('Review assisted by [pair-review]');
-  });
-
-  test('should disable toggle when Draft is selected', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await openReviewModal(page);
-
-    // Toggle should be enabled by default
-    const toggle = page.locator('#assisted-by-toggle');
-    await expect(toggle).not.toHaveClass(/disabled/);
-
-    // Select DRAFT
-    await page.locator('input[value="DRAFT"]').click();
-
-    // Toggle should be disabled
-    await expect(toggle).toHaveClass(/disabled/);
-
-    // Switch back to COMMENT
-    await page.locator('input[value="COMMENT"]').click();
-    await expect(toggle).not.toHaveClass(/disabled/);
-  });
+test('retains both summary versions after a failed save and a second-tab edit', async ({ page, context, testServer }) => {
+  await page.goto(url);
+  await openReviewAuthoring(page);
+  const peer = await context.newPage();
+  try {
+    await peer.goto(page.url());
+    await openReviewAuthoring(peer);
+    await page.route('**/api/reviews/1/draft', route => route.request().method() === 'PUT' ? route.abort('failed') : route.continue());
+    const mine = 'An offline observation\n\n    preserveMine();\n';
+    const theirs = 'The other tab has newer evidence\n\n    preserveTheirs();\n';
+    await page.locator('#review-body-modal').fill(mine);
+    await expect(page.getByText(/^Save failed:/)).toBeVisible();
+    await peer.locator('#review-body-modal').fill(theirs);
+    await expect.poll(() => testServer.db.prepare('SELECT draft_body FROM reviews WHERE id = 1').get().draft_body).toBe(theirs);
+    await page.unroute('**/api/reviews/1/draft');
+    await page.getByRole('button', { name: 'Prepare exact final preview', exact: true }).click();
+    await expect(page.getByText('Conflict: both versions retained', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Resolve draft', exact: true }).click();
+    await expect(page.getByRole('textbox', { name: 'Your recoverable text' })).toHaveValue(mine);
+    await expect(page.locator('#workspace-draft-recovery pre')).toHaveText(theirs);
+    expect(testServer.db.prepare('SELECT draft_body FROM reviews WHERE id = 1').get().draft_body).toBe(theirs);
+    await page.getByRole('button', { name: 'Use the server version; discard my local edits', exact: true }).click();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#review-body-modal')).toHaveValue(theirs);
+    expect(await page.evaluate(() => Object.keys(sessionStorage).filter(key => key.startsWith('pair-review:draft:')))).toEqual([]);
+    expect(testServer.reviewHost.state.calls).toEqual([]);
+  } finally { await peer.close(); }
 });

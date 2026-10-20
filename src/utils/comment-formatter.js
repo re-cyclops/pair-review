@@ -119,19 +119,32 @@ function formatAdoptedComment(fields, formatConfig) {
   }
   const capitalizedCategory = capitalizeCategory(category);
 
+  // When using the plain preset and the model placed a verbose technical
+  // explanation in `description` while putting the concise public comment in
+  // `suggestion` (e.g. prose + optional ```suggestion fence), prefer the
+  // humanized `suggestion` payload rather than concatenating both.
+  let effectiveDescription = description;
+  let effectiveSuggestion = suggestionText || '';
+  if (config.template === PRESETS.plain && effectiveSuggestion && !effectiveSuggestion.trimStart().startsWith('```')
+      && (effectiveDescription.length + effectiveSuggestion.length) > 500
+      && effectiveDescription.length > effectiveSuggestion.length) {
+    effectiveDescription = effectiveSuggestion;
+    effectiveSuggestion = '';
+  }
+
   // Process conditional sections first, then replace individual placeholders
   const capitalizedSeverity = severity ? capitalizeCategory(severity) : '';
 
   const uppercaseSeverity = severity ? severity.toUpperCase() : '';
 
   const fieldValues = {
-    suggestion: suggestionText || '',
+    suggestion: effectiveSuggestion,
     title: title || '',
     severity: capitalizedSeverity,
     SEVERITY: uppercaseSeverity,
     emoji,
     category: capitalizedCategory,
-    description
+    description: effectiveDescription
   };
 
   let result = processConditionalSections(config.template, fieldValues);
@@ -142,13 +155,34 @@ function formatAdoptedComment(fields, formatConfig) {
   result = result.replace(/\{severity\}/g, capitalizedSeverity);
   result = result.replace(/\{SEVERITY\}/g, uppercaseSeverity);
   result = result.replace(/\{title\}/g, title || '');
-  result = result.replace(/\{description\}/g, description);
-  result = result.replace(/\{suggestion\}/g, suggestionText || '');
+  result = result.replace(/\{description\}/g, effectiveDescription);
+  result = result.replace(/\{suggestion\}/g, effectiveSuggestion);
 
   // Ensure code fences start on their own line
   result = result.replace(/([^\n])(```)/g, '$1\n$2');
+  result = result.trimEnd();
 
-  return result.trimEnd();
+  if (config.template === PRESETS.plain && result.length > 500) {
+    const maxProseChars = 550;
+    const maxTotalChars = 1000;
+    const fenceIndex = result.indexOf('\n```');
+    let prosePart = fenceIndex >= 0 ? result.slice(0, fenceIndex).trimEnd() : result;
+    const codePart = fenceIndex >= 0 ? result.slice(fenceIndex) : '';
+    prosePart = prosePart
+      .replace(/\s*[\u2014\u2013]\s*/g, ', ')
+      .replace(/^\*\*(?:Bug|Issue|Suggestion|Nit|Note)\*\*:\s*/i, '');
+    if (prosePart.length > maxProseChars) {
+      const slice = prosePart.slice(0, maxProseChars);
+      const sentenceBreak = Math.max(slice.lastIndexOf('. '), slice.lastIndexOf('? '), slice.lastIndexOf('; '));
+      prosePart = (sentenceBreak > 120 ? slice.slice(0, sentenceBreak + (slice[sentenceBreak] === '?' ? 1 : 0)) : slice.replace(/\s+\S*$/, '')).trimEnd();
+    }
+    prosePart = prosePart.replace(/\.$/, '');
+    result = codePart && (prosePart.length + codePart.length) <= maxTotalChars
+      ? `${prosePart}${codePart}`
+      : prosePart;
+  }
+
+  return result;
 }
 
 module.exports = { PRESETS, resolveFormat, formatAdoptedComment, capitalizeCategory, processConditionalSections };
