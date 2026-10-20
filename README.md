@@ -1014,6 +1014,20 @@ link to inspect the outcome. Unrelated pending reviews are neither submitted
 nor deleted. The app checks an owned pending review's contents after its final
 identity check and before submission.
 
+Quick submission locks conflicting actions during preflight and publication.
+Once the host acknowledges success, the dialog closes without waiting for
+background comment refreshes. Failed preflight restores the action and brings
+the error into view.
+
+If publication succeeds but local draft cleanup fails, the submitted receipt
+remains authoritative. The dialog shows the warning and focuses **Finish local
+cleanup (no host write)**; repeat approval stays disabled until cleanup succeeds.
+Recovery does not require host credentials and preserves newer or excluded drafts.
+
+Each GitHub HTTP request has a 60-second deadline, including its response body.
+A timeout during a write remains an uncertain outcome—not permission to send
+another approval. Inspect or reconcile its receipt instead of blindly retrying.
+
 Host reads and submission are not atomic. Do not edit that pending review from
 another host client while publishing: an edit after the final content read can
 still race with submission. The final preview displays this limitation.

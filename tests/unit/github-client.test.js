@@ -4,6 +4,137 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 const { GitHubClient, GitHubApiError } = require('../../src/github/client');
 
 describe('GitHubClient', () => {
+  describe('request deadline', () => {
+    it.each([
+      ['rest', 'headers'], ['graphql', 'headers'],
+      ['rest', 'body'], ['graphql', 'body']
+    ])('aborts an unresponsive %s response %s without retrying', async (kind, stage) => {
+      vi.useFakeTimers();
+      // Node's native AbortSignal.timeout uses internal timers, so drive its
+      // clock explicitly while retaining real signals and Octokit's fetch path.
+      const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(new DOMException('Request timed out', 'TimeoutError')), ms);
+        return controller.signal;
+      });
+      let dispatched;
+      const started = new Promise(resolve => { dispatched = resolve; });
+      const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation((_url, options) => {
+        const pending = () => {
+          dispatched();
+          return new Promise((_resolve, reject) => {
+            options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+          });
+        };
+        return stage === 'headers' ? pending() : Promise.resolve({
+          status: 200, url: 'https://api.github.com/test',
+          headers: new Headers({ 'content-type': 'application/json' }),
+          json: pending
+        });
+      });
+      try {
+        const client = new GitHubClient('test-token');
+        const request = kind === 'rest'
+          ? client.octokit.rest.pulls.submitReview({ owner: 'owner', repo: 'repo', pull_number: 1, review_id: 2, event: 'APPROVE' })
+          : client.octokit.graphql('mutation { test }');
+        const result = request.then(() => ({ settled: true }), error => ({ settled: true, error }));
+        let settled = false;
+        result.then(() => { settled = true; });
+        await started;
+        await vi.advanceTimersByTimeAsync(59999);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect((await result).error.message).toContain('Request timed out');
+        expect(fetch).toHaveBeenCalledTimes(1);
+      } finally {
+        fetch.mockRestore();
+        timeout.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it('gives a read-only auth retry a fresh deadline after slow token refresh', async () => {
+      vi.useFakeTimers();
+      const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(new DOMException('Request timed out', 'TimeoutError')), ms);
+        return controller.signal;
+      });
+      let refreshStarted;
+      const refreshing = new Promise(resolve => { refreshStarted = resolve; });
+      let releaseRefresh;
+      const freshToken = new Promise(resolve => { releaseRefresh = resolve; });
+      let retryStarted;
+      const retrying = new Promise(resolve => { retryStarted = resolve; });
+      const fetch = vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(new Response('{"message":"Bad credentials"}', {
+          status: 401, headers: { 'content-type': 'application/json' }
+        }))
+        .mockImplementationOnce((_url, options) => {
+          retryStarted();
+          return new Promise((_resolve, reject) => {
+            if (options.signal.aborted) reject(options.signal.reason);
+            else options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+          });
+        });
+      try {
+        const caller = new AbortController();
+        const client = new GitHubClient({
+          token: 'old-token',
+          refresh: () => { refreshStarted(); return freshToken; }
+        });
+        const result = client.octokit.request('GET /user', { request: { signal: caller.signal } })
+          .then(() => null, error => error);
+        let settled = false;
+        result.then(() => { settled = true; });
+        await refreshing;
+        await vi.advanceTimersByTimeAsync(60001);
+        releaseRefresh('new-token');
+        await retrying;
+        await vi.advanceTimersByTimeAsync(59999);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect((await result).message).toContain('Request timed out');
+        expect(caller.signal.aborted).toBe(false);
+        expect(fetch).toHaveBeenCalledTimes(2);
+      } finally {
+        fetch.mockRestore();
+        timeout.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(['headers', 'body'])('preserves caller cancellation while waiting for response %s', async (stage) => {
+      const caller = new AbortController();
+      let boundaryStarted;
+      const started = new Promise(resolve => { boundaryStarted = resolve; });
+      const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation((_url, options) => {
+        const pending = () => {
+          boundaryStarted();
+          return new Promise((_resolve, reject) => {
+            options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+          });
+        };
+        return stage === 'headers' ? pending() : Promise.resolve({
+          status: 200, url: 'https://api.github.com/user',
+          headers: new Headers({ 'content-type': 'application/json' }),
+          json: pending
+        });
+      });
+      try {
+        const client = new GitHubClient('test-token');
+        const result = client.octokit.request('GET /user', { request: { signal: caller.signal } })
+          .then(() => null, error => error);
+        await started;
+        caller.abort(new DOMException('Caller cancelled', 'AbortError'));
+        expect((await result).message).toBe('Caller cancelled');
+        expect(fetch).toHaveBeenCalledTimes(1);
+      } finally {
+        fetch.mockRestore();
+      }
+    });
+  });
+
   describe('getPendingReviewForUser', () => {
     it('should return the pending review authored by the viewer', async () => {
       const client = new GitHubClient('test-token');

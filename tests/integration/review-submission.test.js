@@ -203,6 +203,101 @@ describe('Manifest-bound native review publication', () => {
     expect(db.prepare('SELECT status FROM comments WHERE id = ?').get(id).status).toBe('submitted');
   });
 
+  it.each(['reconcile', 'replay'])('keeps acknowledged approval durable when cleanup fails and %s only finishes local cleanup', async recovery => {
+    const id = await draft('Approved exact finding');
+    db.prepare("UPDATE reviews SET draft_event = 'APPROVE' WHERE id = 1").run();
+    const manifest = await preview();
+    db.exec(`CREATE TRIGGER fail_submission_cleanup BEFORE UPDATE OF status ON comments
+      WHEN NEW.status = 'submitted'
+      BEGIN SELECT RAISE(ABORT, 'fixture cleanup failure'); END;`);
+
+    const result = await publish(manifest);
+    expect(result.status, JSON.stringify(result.data)).toBe(200);
+    expect(result.data.receipt).toMatchObject({
+      state: 'submitted', phase: 'settled',
+      error: 'Review submitted successfully, but local draft cleanup failed: fixture cleanup failure'
+    });
+    expect(db.prepare('SELECT state, phase FROM submission_attempts WHERE id = ?').get(result.data.receipt.id))
+      .toEqual({ state: 'submitted', phase: 'settled' });
+    expect(db.prepare('SELECT status FROM reviews WHERE id = 1').get().status).toBe('submitted');
+    expect(db.prepare('SELECT state, event FROM github_reviews WHERE review_id = 1').get())
+      .toEqual({ state: 'submitted', event: 'APPROVE' });
+    expect(db.prepare('SELECT status, body FROM comments WHERE id = ?').get(id))
+      .toEqual({ status: 'active', body: 'Approved exact finding' });
+    expect([...host.state.reviews.values()][0].state).toBe('APPROVED');
+    db.prepare("UPDATE reviews SET draft_body = 'A new review body' WHERE id = 1").run();
+    const fresh = await preview();
+    expect(fresh.digest).not.toBe(manifest.digest);
+    expect(fresh.attempt).toMatchObject({ id: result.data.receipt.id, state: 'submitted' });
+    expect(fresh.blockers).toContain('The review was submitted successfully, but its local draft cleanup is incomplete. Finish local cleanup from its receipt before publishing another review.');
+    const blocked = await publish(fresh);
+    expect(blocked.status).toBe(409);
+    expect(blocked.data.manifest.attempt.id).toBe(result.data.receipt.id);
+    expect(host.state.calls.filter(call => call.operation === 'submit')).toHaveLength(1);
+    const local = await request('/manifest?local=true');
+    expect(local.data.attempt).toMatchObject({ id: result.data.receipt.id, state: 'submitted' });
+
+    // A settled receipt no longer needs even read access to the remote host.
+    const writes = host.state.calls.length;
+    db.exec('DROP TRIGGER fail_submission_cleanup');
+    await host.close();
+    host.close = async () => {};
+    const recovered = recovery === 'reconcile'
+      ? await request(`/submissions/${result.data.receipt.id}/reconcile`, 'POST', {})
+      : await publish(manifest);
+    expect(recovered.status, JSON.stringify(recovered.data)).toBe(200);
+    expect(recovered.data.receipt).toMatchObject({ id: result.data.receipt.id, state: 'submitted', error: null });
+    expect(db.prepare('SELECT status FROM comments WHERE id = ?').get(id).status).toBe('submitted');
+    expect(host.state.calls.length).toBe(writes);
+  });
+
+  it('finishes submitted local cleanup without credentials while retaining the receipt ownership guard', async () => {
+    const id = await draft('Already approved finding');
+    db.prepare("UPDATE reviews SET draft_event = 'APPROVE' WHERE id = 1").run();
+    db.exec(`CREATE TRIGGER fail_submission_cleanup BEFORE UPDATE OF status ON comments
+      WHEN NEW.status = 'submitted'
+      BEGIN SELECT RAISE(ABORT, 'fixture cleanup failure'); END;`);
+    const result = await publish(await preview());
+    expect(result.data.receipt).toMatchObject({ state: 'submitted', error: expect.any(String) });
+    db.exec('DROP TRIGGER fail_submission_cleanup');
+    delete app.get('config').repos['owner/repo'].token;
+    db.prepare("INSERT INTO reviews (id, pr_number, repository) VALUES (2, 2, 'owner/repo')").run();
+
+    const foreign = await fetch(`${base.replace('/reviews/1', '/reviews/2')}/submissions/${result.data.receipt.id}/reconcile`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+    });
+    expect(foreign.status).toBe(404);
+    expect(await foreign.json()).toEqual({ error: 'Submission receipt not found' });
+    expect(db.prepare('SELECT status FROM comments WHERE id = ?').get(id).status).toBe('active');
+
+    const writes = host.state.calls.length;
+    const recovered = await request(`/submissions/${result.data.receipt.id}/reconcile`, 'POST', {});
+    expect(recovered.status, JSON.stringify(recovered.data)).toBe(200);
+    expect(recovered.data.receipt).toMatchObject({ id: result.data.receipt.id, state: 'submitted', error: null });
+    expect(db.prepare('SELECT status FROM comments WHERE id = ?').get(id).status).toBe('submitted');
+    expect(host.state.calls.length).toBe(writes);
+  });
+
+  it('preserves a newer human draft while reconciling an approval acknowledged at the previous head', async () => {
+    const id = await draft('Approved original finding');
+    db.prepare("UPDATE reviews SET draft_event = 'APPROVE' WHERE id = 1").run();
+    host.state.loseSubmit = true;
+    const result = await publish(await preview());
+    expect(result.data.receipt.state).toBe('outcome_unknown');
+    const original = db.prepare('SELECT * FROM comments WHERE id = ?').get(id);
+    host.state.head = 'c'.repeat(40);
+    await repo.updateComment(id, {
+      body: 'New human finding for the next revision',
+      expected_revision: original.revision, draft_key: original.draft_key
+    });
+    const writes = host.state.calls.length;
+    const reconciled = await request(`/submissions/${result.data.receipt.id}/reconcile`, 'POST', {});
+    expect(reconciled.data.receipt.state).toBe('submitted');
+    expect(db.prepare('SELECT status, body FROM comments WHERE id = ?').get(id))
+      .toEqual({ status: 'active', body: 'New human finding for the next revision' });
+    expect(host.state.calls.length).toBe(writes);
+  });
+
   it('does not touch an unrelated pending review, even when its text resembles a local draft', async () => {
     await draft('Identical legitimate text');
     const foreign = host.createReview('Unseen remote summary', host.state.head);

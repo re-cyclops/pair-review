@@ -112,3 +112,126 @@ test('reconciles a lost final response without replaying the host write', async 
   expect(testServer.reviewHost.state.calls).toEqual(writes);
   expect([...testServer.reviewHost.state.reviews.values()][0]).toMatchObject({ body, state: 'COMMENTED' });
 });
+
+test('acknowledges quick approval before a held comments refresh completes', async ({ page, testServer }) => {
+  await page.goto(url);
+  await openReviewAuthoring(page);
+  await page.locator('#review-decision').selectOption('APPROVE');
+  let release;
+  let entered;
+  const gate = new Promise(resolve => { release = resolve; });
+  const refreshStarted = new Promise(resolve => { entered = resolve; });
+  const holdRefresh = async route => {
+    entered();
+    await gate;
+    await route.continue();
+  };
+  await page.route('**/api/reviews/1/comments', holdRefresh);
+  try {
+    await page.getByRole('button', { name: 'Submit approval', exact: true }).click();
+    await refreshStarted;
+    await expect(page.locator('#review-modal')).not.toBeVisible();
+    await expect(page.getByText('Submitted approval to', { exact: false })).toBeVisible();
+    expect(testServer.db.prepare('SELECT state, phase FROM submission_attempts').all())
+      .toEqual([{ state: 'submitted', phase: 'settled' }]);
+    expect(testServer.reviewHost.state.calls.map(call => call.operation)).toEqual(['create', 'submit']);
+    expect([...testServer.reviewHost.state.reviews.values()]).toHaveLength(1);
+  } finally {
+    release();
+    await page.unrouteAll({ behavior: 'wait' });
+  }
+});
+
+test('locks quick preflight and restores the approval action after preflight failure', async ({ page, testServer }) => {
+  await page.goto(url);
+  await openReviewAuthoring(page);
+  await page.locator('#review-decision').selectOption('APPROVE');
+  let release;
+  let entered;
+  const gate = new Promise(resolve => { release = resolve; });
+  const preflightStarted = new Promise(resolve => { entered = resolve; });
+  const failPreflight = async route => {
+    entered();
+    await gate;
+    await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Preflight temporarily unavailable' }) });
+  };
+  await page.route('**/api/reviews/1/manifest?*', failPreflight);
+  try {
+    await page.getByRole('button', { name: 'Submit approval', exact: true }).click();
+    await preflightStarted;
+    await expect(page.locator('.workspace-submit-primary')).toBeDisabled();
+    await expect(page.locator('.workspace-submit-primary')).toHaveAttribute('data-loading', 'true');
+    await expect(page.getByRole('button', { name: 'Prepare exact final preview', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Reload saved drafts', exact: true })).toBeDisabled();
+    await expect(page.locator('#review-decision')).toBeDisabled();
+    expect(testServer.reviewHost.state.calls).toEqual([]);
+    release();
+    await expect(page.locator('.workspace-review-error')).toContainText('Preflight temporarily unavailable');
+    await expect(page.locator('.workspace-review-error')).toBeFocused();
+    await expect(page.locator('.workspace-review-error')).toBeInViewport({ ratio: 1 });
+    const retry = page.getByRole('button', { name: 'Submit approval', exact: true });
+    await expect(retry).toBeEnabled();
+    await expect(retry).not.toHaveAttribute('data-loading', 'true');
+    expect(testServer.reviewHost.state.calls).toEqual([]);
+    expect(testServer.db.prepare('SELECT state FROM submission_attempts').all()).toEqual([]);
+    await page.unrouteAll({ behavior: 'wait' });
+    await retry.click();
+    await expect(page.locator('#review-modal')).not.toBeVisible();
+    await expect(page.getByText('Submitted approval to', { exact: false })).toBeVisible();
+    await expect(page.locator('.workspace-submit-primary')).not.toHaveAttribute('data-loading', 'true');
+    expect(testServer.db.prepare('SELECT state, phase FROM submission_attempts').all())
+      .toEqual([{ state: 'submitted', phase: 'settled' }]);
+    expect(testServer.reviewHost.state.calls.map(call => call.operation)).toEqual(['create', 'submit']);
+  } finally {
+    release();
+    await page.unrouteAll({ behavior: 'wait' });
+  }
+});
+
+test('keeps remote approval visible while finishing failed local cleanup without another host write', async ({ page, testServer }, testInfo) => {
+  await page.goto(url);
+  const created = await page.request.post('/api/reviews/1/comments', { data: {
+    file: 'src/utils.js', body: 'Approved file invariant', included: true, commit_sha: testServer.reviewHost.state.head
+  } });
+  expect(created.ok()).toBe(true);
+  const { commentId } = await created.json();
+  await openReviewAuthoring(page);
+  await page.locator('#review-decision').selectOption('APPROVE');
+  testServer.db.exec(`CREATE TRIGGER fail_submission_cleanup BEFORE UPDATE OF status ON comments
+    WHEN NEW.status = 'submitted'
+    BEGIN SELECT RAISE(ABORT, 'fixture cleanup failure'); END;`);
+  try {
+    await page.getByRole('button', { name: 'Submit approval', exact: true }).click();
+    await expect(page.getByText('Submitted approval to', { exact: false })).toBeVisible();
+    await expect(page.locator('#review-modal')).toBeVisible();
+    await expect(page.locator('.workspace-review-receipts')).toContainText('fixture cleanup failure');
+    const cleanup = page.getByRole('button', { name: 'Finish local cleanup (no host write)', exact: true });
+    await expect(cleanup).toBeEnabled();
+    await expect(cleanup).toBeFocused();
+    await expect(cleanup).toBeInViewport({ ratio: 1 });
+    await expect(page.locator('.workspace-review-receipts').getByText(/fixture cleanup failure/)).toBeInViewport({ ratio: 1 });
+    await expect(page.locator('.workspace-submit-primary')).toBeDisabled();
+    const warningScreenshot = testInfo.outputPath('approval-cleanup-warning.png');
+    await page.screenshot({ path: warningScreenshot });
+    await testInfo.attach('approval-cleanup-warning', { path: warningScreenshot, contentType: 'image/png' });
+    await expect(page.locator('.workspace-submit-primary')).not.toHaveAttribute('data-loading', 'true');
+    expect(testServer.db.prepare('SELECT state, phase FROM submission_attempts').all())
+      .toEqual([{ state: 'submitted', phase: 'settled' }]);
+    const writes = structuredClone(testServer.reviewHost.state.calls);
+    expect(writes.filter(call => call.operation === 'create')).toHaveLength(1);
+    expect(writes.filter(call => call.operation === 'submit')).toHaveLength(1);
+    expect([...testServer.reviewHost.state.reviews.values()][0].comments.map(comment => comment.body))
+      .toEqual(['Approved file invariant']);
+    testServer.db.exec('DROP TRIGGER fail_submission_cleanup');
+    await cleanup.click();
+    await expect(cleanup).toHaveCount(0);
+    await expect(page.locator('.workspace-review-receipts')).not.toContainText('fixture cleanup failure');
+    await expect(page.getByRole('textbox', { name: `Draft ${commentId} exact Markdown`, exact: true })).toHaveCount(0);
+    await expect(page.locator('.workspace-submit-primary')).not.toHaveAttribute('data-loading', 'true');
+    expect(testServer.db.prepare('SELECT status FROM comments WHERE id = ?').get(commentId)).toEqual({ status: 'submitted' });
+    expect(testServer.reviewHost.state.calls).toEqual(writes);
+    expect([...testServer.reviewHost.state.reviews.values()][0].state).toBe('APPROVED');
+  } finally {
+    testServer.db.exec('DROP TRIGGER IF EXISTS fail_submission_cleanup');
+  }
+});

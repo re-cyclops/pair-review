@@ -157,9 +157,13 @@ router.post('/api/reviews/:reviewId/submissions/:attemptId/reconcile', validateR
     const db = req.app.get('db');
     const existing = submission.receipt(db, req.params.attemptId);
     if (!existing || existing.reviewId !== req.reviewId) return res.status(404).json({ error: 'Submission receipt not found' });
-    const context = await submissionContext(req, existing.manifest.target);
-    if (!context.client) return res.status(401).json({ error: 'Authentication is unavailable; the receipt is preserved' });
-    const result = await submission.reconcileSubmission({ db, client: context.client, attemptId: existing.id });
+    let client;
+    if (existing.state !== 'submitted') {
+      const context = await submissionContext(req, existing.manifest.target);
+      if (!context.client) return res.status(401).json({ error: 'Authentication is unavailable; the receipt is preserved' });
+      client = context.client;
+    }
+    const result = await submission.reconcileSubmission({ db, client, attemptId: existing.id });
     res.json({ receipt: result });
     broadcastReviewEvent(req.reviewId, { type: 'review:comments_changed' });
   } catch (error) { submissionError(res, error); }

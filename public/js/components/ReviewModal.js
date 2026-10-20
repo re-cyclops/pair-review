@@ -5,6 +5,9 @@ class ReviewModal {
     this.generation = 0;
     this.version = 0;
     this.isSubmitting = false;
+    this.isQuickSubmitting = false;
+    this.isPreparing = false;
+    this.cleanupPending = false;
     this.manifest = null;
     window.addEventListener('reviewDraftChanged', event => {
       if (event.detail.reviewId === this.reviewId) this.invalidate('Draft changed. Prepare a new final preview.');
@@ -56,7 +59,8 @@ class ReviewModal {
       if (loadingLabel) button.textContent = typeof loadingLabel === 'function' ? loadingLabel() : loadingLabel;
       try { await action(); } catch (error) { this.showError(error); }
       finally {
-        button.disabled = false;
+        button.disabled = this.isSubmitting || this.isQuickSubmitting || this.isPreparing ||
+          (button === this.quickSubmitButton && this.cleanupPending);
         delete button.dataset.loading;
         button.removeAttribute('aria-busy');
         if (loadingLabel && button.isConnected) button.textContent = previousText;
@@ -74,9 +78,10 @@ class ReviewModal {
   }
 
   async show() {
-    if (this.isSubmitting) { window.reviewWorkspace.open(this.modal); return; }
+    if (this.isSubmitting || this.isQuickSubmitting || this.isPreparing) { window.reviewWorkspace.open(this.modal); return; }
     if (this.isVisible) return;
     this.reviewId = window.prManager.currentPR.id;
+    this.capabilities = null;
     if (!this.modal) {
       this.modal = window.reviewWorkspace.makeDialog('review-modal', 'Review authoring and final preview');
       this.modal.classList.add('workspace-review');
@@ -96,13 +101,15 @@ class ReviewModal {
     await this.load();
   }
 
-  async load() {
+  async load({ capabilities, submitted } = {}) {
     const generation = ++this.generation;
+    const version = this.version;
     try {
       const [summary, comments, manifest, receipts] = await Promise.all([
         this.request('draft'), this.request('comments'), this.request('manifest?local=true'), this.request('submissions')
       ]);
       if (generation !== this.generation || !this.modal.open) return;
+      if (submitted && (version !== this.version || window.reviewDrafts.hasPending(this.reviewId))) return;
       this.savedSummary = summary;
       this.localManifest = manifest;
       this.comments = new Map(comments.comments.map(comment => [comment.id, comment]));
@@ -110,14 +117,22 @@ class ReviewModal {
       await this.renderAuthoring(manifest);
       if (generation !== this.generation || !this.modal.open) return;
       this.renderReceipts(receipts.receipts);
-      this.note.textContent = 'Saved locally. No host write occurs until you confirm an exact, fresh preview.';
+      this.note.textContent = submitted
+        ? submitted.error || 'Remote submission recorded. Your exact submitted text remains in the receipt.'
+        : 'Saved locally. No host write occurs until you confirm an exact, fresh preview.';
+      if (submitted) this.note.dataset.state = submitted.error ? 'warning' : 'success';
       try {
-        const capabilities = await this.request('manifest');
+        capabilities ||= await this.request('manifest');
         if (generation === this.generation && this.modal.open) this.applyCapabilities(capabilities);
       } catch (error) {
         if (generation === this.generation) this.capabilityStatus.textContent = `Host identity unavailable: ${error.message}. Local authoring remains available.`;
       }
-    } catch (error) { if (generation === this.generation) this.showError(error); }
+    } catch (error) {
+      if (generation === this.generation) {
+        if (submitted) error = new Error(`Review already submitted; local view could not refresh. Reload saved drafts, not the approval. ${error.message}`);
+        this.showError(error);
+      }
+    }
   }
 
   async renderAuthoring(manifest) {
@@ -127,7 +142,7 @@ class ReviewModal {
     this.receiptsSection?.remove();
     const node = ReviewModal.node;
     this.authoring = node('fieldset', null, { class: 'workspace-review-authoring' });
-    this.authoring.disabled = this.isSubmitting;
+    this.authoring.disabled = this.isSubmitting || this.isQuickSubmitting;
     this.authoring.append(node('legend', 'Submit review'));
     const decisions = node('label', 'Decision ', { for: 'review-decision', class: 'workspace-sr-only' });
     this.decision = node('select', null, { id: 'review-decision', name: 'review-decision' });
@@ -177,8 +192,17 @@ class ReviewModal {
         btn.disabled = Boolean(opt?.disabled);
       }
       if (this.quickSubmitButton) {
-        const labelMap = { APPROVE: 'Submit approval', COMMENT: 'Submit comment review', REQUEST_CHANGES: 'Submit change request' };
-        this.quickSubmitButton.textContent = labelMap[current] || 'Submit review';
+        const action = { APPROVE: 'approval', COMMENT: 'comment review', REQUEST_CHANGES: 'change request' }[current] || 'review';
+        const preparing = this.isQuickSubmitting || this.isPreparing;
+        this.quickSubmitButton.disabled = this.isSubmitting || preparing || this.cleanupPending;
+        this.quickSubmitButton.textContent = this.cleanupPending ? 'Review submitted' : this.isSubmitting ? 'Publishing review\u2026' : preparing ? `Preparing ${action}\u2026` : `Submit ${action}`;
+        if (this.isSubmitting || preparing) {
+          this.quickSubmitButton.dataset.loading = 'true';
+          this.quickSubmitButton.setAttribute('aria-busy', 'true');
+        } else {
+          delete this.quickSubmitButton.dataset.loading;
+          this.quickSubmitButton.removeAttribute('aria-busy');
+        }
         this.quickSubmitButton.dataset.decision = current;
       }
     };
@@ -270,9 +294,9 @@ class ReviewModal {
     this.refreshButton.classList.add('workspace-btn-secondary');
     const skipButton = this.button('Skip — keep drafts local', () => this.modal.close()); // taste-skill-ignore
     skipButton.classList.add('workspace-btn-secondary');
-    this.quickSubmitButton.disabled = this.isSubmitting;
-    this.prepareButton.disabled = this.isSubmitting;
-    this.refreshButton.disabled = this.isSubmitting;
+    this.quickSubmitButton.disabled = this.isSubmitting || this.isQuickSubmitting;
+    this.prepareButton.disabled = this.isSubmitting || this.isQuickSubmitting;
+    this.refreshButton.disabled = this.isSubmitting || this.isQuickSubmitting;
     this.actions.append(this.quickSubmitButton, this.prepareButton, this.refreshButton, skipButton);
     this.finalSection = node('section', null, { class: 'workspace-review-final', 'aria-label': 'Final submission preview' });
     this.finalSection.hidden = true;
@@ -288,6 +312,7 @@ class ReviewModal {
   }
 
   applyCapabilities(manifest) {
+    this.capabilities = manifest;
     for (const option of this.decision.options) {
       const event = option.value === 'APPROVE_WITH_COMMENT' ? 'APPROVE' : option.value;
       option.disabled = event !== 'COMMENT' && (!manifest.target || !manifest.allowedEvents.includes(event));
@@ -315,10 +340,28 @@ class ReviewModal {
 
   showError(error) {
     this.error.textContent = error.message;
-    if (error.receipt) this.renderReceipts([error.receipt]);
+    if (error.receipt) {
+      this.renderReceipts([error.receipt]);
+      this.revealReceipt();
+    } else if (this.modal?.open) {
+      this.error.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+      this.error.tabIndex = -1;
+      this.error.focus({ preventScroll: true });
+    }
+  }
+
+  revealReceipt() {
+    this.receiptsSection.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+    this.receiptsSection.querySelector('button')?.focus({ preventScroll: true });
   }
 
   async prepare() {
+    if (this.isPreparing || this.isSubmitting) return;
+    this.isPreparing = true;
+    this.quickSubmitButton.disabled = true;
+    this.prepareButton.disabled = true;
+    this.refreshButton.disabled = true;
+    this.syncDecisionCards?.();
     this.error.textContent = '';
     this.invalidate();
     this.authoring.disabled = true;
@@ -336,7 +379,12 @@ class ReviewModal {
       this.manifest = manifest;
       this.renderFinal(manifest);
     } finally {
-      this.authoring.disabled = false;
+      this.isPreparing = false;
+      this.authoring.disabled = this.isSubmitting || this.isQuickSubmitting;
+      this.quickSubmitButton.disabled = this.isSubmitting || this.isQuickSubmitting;
+      this.prepareButton.disabled = this.isSubmitting || this.isQuickSubmitting;
+      this.refreshButton.disabled = this.isSubmitting || this.isQuickSubmitting;
+      this.syncDecisionCards?.();
       if (this.note?.dataset.state === 'loading') delete this.note.dataset.state;
     }
   }
@@ -388,48 +436,60 @@ class ReviewModal {
   }
 
   async quickSubmit() {
-    this.lastReceiptState = null;
-    if (this.quickSubmitButton) {
-      this.quickSubmitButton.dataset.loading = 'true';
-      const current = this.decision?.value === 'APPROVE_WITH_COMMENT' ? 'APPROVE' : this.decision?.value;
-      const progressMap = { APPROVE: 'Submitting approval\u2026', COMMENT: 'Submitting comment review\u2026', REQUEST_CHANGES: 'Submitting change request\u2026' };
-      this.quickSubmitButton.textContent = progressMap[current] || 'Submitting review\u2026';
-    }
-    await this.prepare();
-    if (this.manifest?.target && this.manifest.drafts?.some(d => d.included && d.errors?.length)) {
-      let reanchored = false;
-      for (const draft of this.manifest.drafts) {
-        if (!draft.included || !draft.errors?.length) continue;
-        if (draft.errors.some(err => err.includes('not in the current PR diff'))) continue;
-        const view = this.cards.get(draft.key);
-        if (!view?.textarea?.draftEntry) continue;
-        await window.reviewDrafts.flush(view.textarea.draftEntry);
-        const current = view.textarea.draftEntry.base;
-        const asFile = Boolean(draft.wire.isFileLevel || draft.errors.some(err => err.includes('outside the current diff')));
-        await this.request(`comments/${current.id}/anchor`, {
-          method: 'PUT',
-          body: JSON.stringify({ draft_key: current.draft_key, expected_revision: current.revision, head: this.manifest.target.head, as_file: asFile })
-        });
-        reanchored = true;
+    if (this.isSubmitting || this.isQuickSubmitting || this.isPreparing || this.cleanupPending) return;
+    this.isQuickSubmitting = true;
+    this.lastReceipt = null;
+    this.quickSubmitButton.disabled = true;
+    this.quickSubmitButton.dataset.loading = 'true';
+    this.quickSubmitButton.setAttribute('aria-busy', 'true');
+    this.prepareButton.disabled = true;
+    this.refreshButton.disabled = true;
+    const current = this.decision?.value === 'APPROVE_WITH_COMMENT' ? 'APPROVE' : this.decision?.value;
+    const progressMap = { APPROVE: 'Preparing approval\u2026', COMMENT: 'Preparing comment review\u2026', REQUEST_CHANGES: 'Preparing change request\u2026' };
+    this.quickSubmitButton.textContent = progressMap[current] || 'Preparing review\u2026';
+    try {
+      await this.prepare();
+      const manifest = this.manifest;
+      if (manifest?.target && manifest.drafts?.some(d => d.included && d.errors?.length)) {
+        let reanchored = false;
+        for (const draft of manifest.drafts) {
+          if (!draft.included || !draft.errors?.length) continue;
+          if (draft.errors.some(err => err.includes('not in the current PR diff'))) continue;
+          const view = this.cards.get(draft.key);
+          if (!view?.textarea?.draftEntry) continue;
+          await window.reviewDrafts.flush(view.textarea.draftEntry);
+          const current = view.textarea.draftEntry.base;
+          const asFile = Boolean(draft.wire.isFileLevel || draft.errors.some(err => err.includes('outside the current diff')));
+          await this.request(`comments/${current.id}/anchor`, {
+            method: 'PUT',
+            body: JSON.stringify({ draft_key: current.draft_key, expected_revision: current.revision, head: manifest.target.head, as_file: asFile })
+          });
+          reanchored = true;
+        }
+        if (reanchored) {
+          await window.prManager?.loadUserComments?.();
+          await this.load({ capabilities: manifest });
+          await this.prepare();
+        }
       }
-      if (reanchored) {
-        await window.prManager?.loadUserComments?.();
-        await this.load();
-        await this.prepare();
+      if (!this.manifest || this.manifest.blockers?.length) return;
+      if (this.confirm) {
+        this.confirm.checked = true;
+        this.confirm.dispatchEvent(new Event('change'));
       }
-    }
-    if (!this.manifest || this.manifest.blockers?.length) {
+      await this.publish();
+      if (['submitted', 'draft_saved'].includes(this.lastReceipt?.state) && !this.lastReceipt.error && this.modal?.open) {
+        this.modal.close();
+      }
+    } finally {
+      this.isQuickSubmitting = false;
+      this.authoring.disabled = this.isSubmitting;
+      this.prepareButton.disabled = this.isSubmitting;
+      this.refreshButton.disabled = this.isSubmitting;
+      this.quickSubmitButton.disabled = this.isSubmitting;
+      delete this.quickSubmitButton.dataset.loading;
+      this.quickSubmitButton.removeAttribute('aria-busy');
       this.syncDecisionCards?.();
-      return;
-    }
-    if (this.confirm) {
-      this.confirm.checked = true;
-      this.confirm.dispatchEvent(new Event('change'));
-    }
-    await this.publish();
-    this.syncDecisionCards?.();
-    if (['submitted', 'draft_saved'].includes(this.lastReceiptState) && this.modal?.open) {
-      this.modal.close();
     }
   }
 
@@ -512,6 +572,7 @@ class ReviewModal {
     if (this.quickSubmitButton) {
       this.quickSubmitButton.disabled = true;
       this.quickSubmitButton.dataset.loading = 'true';
+      this.quickSubmitButton.textContent = 'Publishing review\u2026';
     }
     this.publishButton.disabled = true;
     this.publishButton.dataset.loading = 'true';
@@ -520,20 +581,22 @@ class ReviewModal {
     this.note.dataset.state = 'loading';
     this.note.textContent = 'Publishing the confirmed manifest to GitHub\u2026';
     this.error.textContent = '';
+    let receipt;
     try {
       const result = await this.request('submit', { method: 'POST', body: JSON.stringify({ digest: manifest.digest, mode: manifest.mode }) });
-      this.lastReceiptState = result.receipt?.state || null;
-      await window.prManager.loadUserComments();
-      if (result.receipt.state === 'submitted') await this.load();
-      else this.renderReceipts([result.receipt]);
-      this.note.dataset.state = 'success';
-      this.note.textContent = result.receipt.state === 'submitted' ? 'Remote submission recorded. Your exact submitted text remains in the receipt.' : 'Remote draft saved. It has not been submitted as a completed review.';
+      receipt = result.receipt;
+      this.lastReceipt = receipt;
+      this.renderReceipts([receipt]);
+      this.note.dataset.state = receipt.error ? 'warning' : 'success';
+      this.note.textContent = receipt.error || (receipt.state === 'submitted' ? 'Remote submission recorded. Your exact submitted text remains in the receipt.' : 'Remote draft saved. It has not been submitted as a completed review.');
       const eventLabels = { APPROVE: 'approval', COMMENT: 'comment review', REQUEST_CHANGES: 'change request' };
       const eventLabel = eventLabels[manifest.event] || 'review';
       if (result.receipt.state === 'submitted') {
         window.toast?.success(`Submitted ${eventLabel} to ${manifest.target?.host || 'GitHub'}.`);
-        const splitText = document.getElementById('split-button-text');
-        if (splitText) splitText.textContent = manifest.event === 'APPROVE' ? 'Approved' : manifest.event === 'REQUEST_CHANGES' ? 'Changes requested' : 'Review submitted';
+        if (receipt.error) {
+          window.toast?.warning(receipt.error);
+          this.revealReceipt();
+        }
       } else if (result.receipt.state === 'draft_saved') {
         window.toast?.success(`Saved pending draft review on ${manifest.target?.host || 'GitHub'}.`);
       }
@@ -544,21 +607,42 @@ class ReviewModal {
       this.note.textContent = error.receipt ? 'Publication is incomplete. Inspect or reconcile the durable receipt before any new write.' : 'No automatic retry. Reload receipts to distinguish a rejected request from a lost response.';
     } finally {
       this.isSubmitting = false;
-      this.authoring.disabled = false;
+      this.authoring.disabled = this.isQuickSubmitting;
       if (this.quickSubmitButton) {
-        this.quickSubmitButton.disabled = false;
-        delete this.quickSubmitButton.dataset.loading;
+        this.quickSubmitButton.disabled = this.isQuickSubmitting;
+        if (!this.isQuickSubmitting) {
+          delete this.quickSubmitButton.dataset.loading;
+          this.syncDecisionCards?.();
+        }
       }
       if (this.publishButton) delete this.publishButton.dataset.loading;
-      this.prepareButton.disabled = false;
-      this.refreshButton.disabled = false;
+      this.prepareButton.disabled = this.isQuickSubmitting;
+      this.refreshButton.disabled = this.isQuickSubmitting;
       this.invalidate();
       window.prManager.updateCommentCount();
+    }
+    if (receipt?.state === 'submitted' && !receipt.error) {
+      void this.refreshAfterPublication(manifest, receipt);
+    }
+  }
+
+  async refreshAfterPublication(manifest, receipt) {
+    const generation = this.generation;
+    const version = this.version;
+    try {
+      await window.prManager.loadUserComments();
+      if (generation === this.generation && version === this.version && this.modal.open) {
+        await this.load({ capabilities: manifest, submitted: receipt });
+      }
+    } catch (error) {
+      window.toast?.warning(`Review already submitted; local view could not refresh. Reload saved drafts, not the approval. ${error.message}`);
     }
   }
 
   renderReceipts(receipts = []) {
     if (!this.receiptsSection) return;
+    this.cleanupPending = receipts.some(receipt => receipt.state === 'submitted' && Boolean(receipt.error));
+    this.syncDecisionCards?.();
     const node = ReviewModal.node;
     if (!receipts.length) {
       this.receiptsSection.replaceChildren();
@@ -568,9 +652,10 @@ class ReviewModal {
     this.receiptsSection.hidden = false;
     this.receiptsSection.replaceChildren(node('h3', 'Durable publication receipts'));
     for (const receipt of receipts) {
-      window.reviewDrafts?.settleSubmission(receipt);
+      if (!receipt.error) window.reviewDrafts?.settleSubmission(receipt);
+      const cleanupPending = receipt.state === 'submitted' && Boolean(receipt.error);
       const details = node('details');
-      details.open = !['submitted', 'superseded'].includes(receipt.state);
+      details.open = cleanupPending || !['submitted', 'superseded'].includes(receipt.state);
       details.append(node('summary', `${receipt.state.replaceAll('_', ' ')} · ${receipt.updatedAt}`),
         node('p', `Attempt ${receipt.id} · ${receipt.observation} · phase ${receipt.phase}`, { class: 'workspace-review-provenance' }));
       if (receipt.error) details.append(node('p', receipt.error));
@@ -583,14 +668,14 @@ class ReviewModal {
       const payload = node('details');
       payload.append(node('summary', 'Inspect recorded authorization and exact payloads'), node('pre', JSON.stringify(receipt.manifest, null, 2)));
       details.append(payload);
-      if (!['submitted', 'superseded'].includes(receipt.state)) details.append(this.button('Reconcile receipt (read-only)', async () => {
+      if (cleanupPending || !['submitted', 'superseded'].includes(receipt.state)) details.append(this.button(cleanupPending ? 'Finish local cleanup (no host write)' : 'Reconcile receipt (read-only)', async () => {
         const result = await this.request(`submissions/${receipt.id}/reconcile`, { method: 'POST' });
         this.invalidate('Receipt reconciled. Prepare a fresh preview before another write.');
         this.renderReceipts([result.receipt]);
-        await window.prManager.loadUserComments();
         if (result.receipt.state === 'submitted') {
-          await this.load();
-          this.note.textContent = 'Remote submission reconciled without additional writes.';
+          this.note.textContent = result.receipt.error || 'Remote submission reconciled without additional writes.';
+          this.note.dataset.state = result.receipt.error ? 'warning' : 'success';
+          if (!result.receipt.error) void this.refreshAfterPublication(this.capabilities, result.receipt);
         }
       }));
       this.receiptsSection.append(details);

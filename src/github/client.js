@@ -164,10 +164,21 @@ class GitHubClient {
         ...options.headers,
         authorization: withAuthorizationPrefix(this.token)
       };
+      // Octokit's fetch boundary has no deadline by default. Bound every
+      // dispatch (REST and GraphQL), without retrying uncertain host writes.
+      options.request = {
+        ...options.request,
+        signal: options.request?.signal
+          ? AbortSignal.any([options.request.signal, AbortSignal.timeout(60000)])
+          : AbortSignal.timeout(60000)
+      };
     });
 
     // (2) Refresh-on-401, with concurrency-safe coalescing.
     octokit.hook.wrap('request', async (request, options) => {
+      // The inner before hook replaces this with a composed deadline signal.
+      // A permitted auth retry needs a fresh deadline, not that old signal.
+      const callerSignal = options.request?.signal;
       try {
         return await request(options);
       } catch (error) {
@@ -230,7 +241,7 @@ class GitHubClient {
         return await this.octokit.request({
           ...options,
           headers: staleHeaders,
-          request: { ...staleRequest, _pairReviewRetried: true }
+          request: { ...staleRequest, signal: callerSignal, _pairReviewRetried: true }
         });
       }
     });

@@ -20,6 +20,11 @@ beforeEach(async () => {
   window.aiPanel = { getSummary: () => 'AI finding\n\n    keepIndentation();\n' };
   document.body.replaceChildren(drafts.button);
   modal.reviewId = 1;
+  modal.isSubmitting = false;
+  modal.isQuickSubmitting = false;
+  modal.isPreparing = false;
+  modal.cleanupPending = false;
+  modal.lastReceipt = null;
   modal.modal = document.createElement('dialog');
   modal.modal.open = true;
   modal.content = document.createElement('div');
@@ -103,5 +108,90 @@ describe('Review authorization and durable authoring', () => {
     await modal.publish();
     expect(fetch).not.toHaveBeenCalled();
     expect(modal.bodyInput.value).toBe('Existing review body\n');
+  });
+
+  it('restores the selected action after a failed quick preflight', async () => {
+    const actionLabel = modal.quickSubmitButton.textContent;
+    fetch.mockResolvedValue({ ok: false, status: 503, json: async () => ({ error: 'Host unavailable' }) });
+    await expect(modal.quickSubmit()).rejects.toThrow('Host unavailable');
+    expect(modal.quickSubmitButton.textContent).toBe(actionLabel);
+    expect(modal.quickSubmitButton.disabled).toBe(false);
+    expect(modal.quickSubmitButton.dataset.loading).toBeUndefined();
+    expect(modal.authoring.disabled).toBe(false);
+  });
+
+  it.each(['quick approval', 'explicit preview'])('locks conflicting actions during %s and ignores a second invocation', async mode => {
+    const actionLabel = modal.quickSubmitButton.textContent;
+    let release;
+    const response = new Promise(resolve => { release = resolve; });
+    fetch.mockReturnValue(response);
+    const first = mode === 'quick approval' ? modal.quickSubmit() : modal.prepare();
+    let second;
+    try {
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+      expect(modal.prepareButton.disabled).toBe(true);
+      expect(modal.refreshButton.disabled).toBe(true);
+      expect(modal.authoring.disabled).toBe(true);
+      second = modal.quickSubmit();
+    } finally {
+      release({ ok: true, json: async () => ({ ...manifest, blockers: ['Publication blocked by host'] }) });
+      await Promise.allSettled([first, second]);
+    }
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(modal.quickSubmitButton.disabled).toBe(false);
+    expect(modal.quickSubmitButton.textContent).toBe(actionLabel);
+    expect(modal.finalSection.textContent).toContain('Publication blocked by host');
+  });
+
+  it('acknowledges a submitted review and retires its draft before a delayed comment refresh finishes', async () => {
+    let release, started;
+    const refresh = new Promise(resolve => { release = resolve; });
+    const refreshStarted = new Promise(resolve => { started = resolve; });
+    window.prManager.loadUserComments = () => { started(); return refresh; };
+    window.prManager.updateCommentCount = () => {};
+    const receipt = {
+      id: 'attempt-1', reviewId: 1, state: 'submitted', phase: 'settled', error: null,
+      updatedAt: manifest.fetchedAt, items: [],
+      manifest: { ...manifest, comments: manifest.drafts }
+    };
+    fetch.mockImplementation(async (_url, options) => {
+      if (options.method !== 'POST') throw new Error('Unexpected post-submission preflight');
+      return { ok: true, json: async () => ({ receipt }) };
+    });
+    modal.manifest = manifest;
+    modal.renderFinal(manifest);
+    modal.confirm.checked = true;
+    const publication = modal.publish();
+    try {
+      await refreshStarted;
+      expect(modal.isSubmitting).toBe(false);
+      expect(modal.note.textContent).toContain('Remote submission recorded');
+      expect(modal.error.textContent).toBe('');
+      expect(drafts.entries.has('draft-10')).toBe(false);
+      expect(modal.quickSubmitButton.dataset.loading).toBeUndefined();
+    } finally {
+      modal.modal.open = false;
+      release();
+      await publication;
+    }
+  });
+
+  it('keeps acknowledged cleanup failures from authorizing another approval until local cleanup settles', async () => {
+    const receipt = {
+      id: 'attempt-1', reviewId: 1, state: 'submitted', phase: 'settled',
+      error: 'Review submitted successfully, but local draft cleanup failed: storage unavailable',
+      updatedAt: manifest.fetchedAt, items: [],
+      manifest: { ...manifest, comments: manifest.drafts }
+    };
+    modal.renderReceipts([receipt]);
+    expect(modal.quickSubmitButton.disabled).toBe(true);
+    expect(drafts.entries.has('draft-10')).toBe(true);
+    await modal.quickSubmit();
+    expect(fetch).not.toHaveBeenCalled();
+
+    modal.renderReceipts([{ ...receipt, error: null }]);
+    expect(modal.quickSubmitButton.disabled).toBe(false);
+    expect(drafts.entries.has('draft-10')).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
   });
 });

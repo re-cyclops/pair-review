@@ -88,6 +88,12 @@ function openAttempt(db, targetKey, reviewId) {
   return row ? readAttempt(db, row.id) : null;
 }
 
+function cleanupAttempt(db, reviewId) {
+  const row = db.prepare(`SELECT id FROM submission_attempts WHERE review_id = ?
+    AND state = 'submitted' AND error IS NOT NULL ORDER BY created_at LIMIT 1`).get(reviewId);
+  return row ? readAttempt(db, row.id) : null;
+}
+
 function readDrafts(db, reviewId, selection) {
   if (selection?.kind === 'analysis') {
     const rows = db.prepare(`SELECT c.*, a.head_sha AS analysis_head FROM comments c JOIN analysis_runs a ON a.id = c.ai_run_id
@@ -195,6 +201,8 @@ async function buildSubmissionManifest({ db, reviewId, client, target, config = 
   // Read after host I/O so edits arriving during enrichment are represented.
   review = db.prepare('SELECT * FROM reviews WHERE id = ?').get(reviewId);
   if (!review) throw fail('Review was removed while the preview loaded', 409);
+  const cleanup = cleanupAttempt(db, reviewId);
+  if (cleanup) blockers.push('The review was submitted successfully, but its local draft cleanup is incomplete. Finish local cleanup from its receipt before publishing another review.');
   const drafts = readDrafts(db, reviewId, selection).map(row => draftData(row, selection));
   const comments = drafts.filter(comment => comment.included);
   if (selection?.kind === 'analysis' && comments.length !== new Set(selection.ids).size) blockers.push('The selected analysis results changed. Start a new preview.');
@@ -228,7 +236,7 @@ async function buildSubmissionManifest({ db, reviewId, client, target, config = 
     association: review.associated_pr ? JSON.parse(review.associated_pr) : null,
     selection, pendingReviewId: pending?.id || null, pendingBody: pending?.body ?? text, comments, count: comments.length, prose };
   return { ...manifest, digest: digest(manifest), drafts, pending, blockers, allowedEvents,
-    fetchedAt: now(), attempt: prior ? receipt(db, prior.id) : null };
+    fetchedAt: now(), attempt: cleanup ? receipt(db, cleanup.id) : prior ? receipt(db, prior.id) : null };
 }
 
 function targetIdentity(target) {
@@ -279,6 +287,26 @@ async function inspectRemote(client, attempt) {
   return remote;
 }
 
+// Acknowledged publication is durable independently of local draft cleanup.
+// Replaying its digest or reconciling it may finish cleanup, never write remotely.
+function finishSubmittedDrafts(db, attempt) {
+  try {
+    db.transaction(() => {
+      const timestamp = now();
+      const update = db.prepare("UPDATE comments SET status = 'submitted', updated_at = ? WHERE id = ? AND review_id = ? AND revision = ? AND body = ? AND deleted_at IS NULL");
+      for (const comment of attempt.manifest.comments) {
+        const raw = db.prepare('SELECT * FROM comments WHERE id = ? AND review_id = ?').get(comment.id, attempt.review_id);
+        if (raw && draftData(raw, attempt.manifest.selection).key === comment.key && draftData(raw, attempt.manifest.selection).body === comment.body) update.run(timestamp, comment.id, attempt.review_id, comment.revision, raw.body);
+      }
+      db.prepare("UPDATE submission_attempts SET error = NULL WHERE id = ? AND state = 'submitted'").run(attempt.id);
+    })();
+  } catch (error) {
+    db.prepare("UPDATE submission_attempts SET error = ?, updated_at = ? WHERE id = ? AND state = 'submitted'")
+      .run(`Review submitted successfully, but local draft cleanup failed: ${error.message}`, now(), attempt.id);
+  }
+  return receipt(db, attempt.id);
+}
+
 function finish(db, attempt, remote, mode) {
   db.transaction(() => {
     const timestamp = now();
@@ -297,14 +325,8 @@ function finish(db, attempt, remote, mode) {
       .run(submitted ? 'submitted' : 'pending', submitted ? attempt.manifest.event : null, data.body, data.submitted_at, data.github_url, recorded.id);
     else db.prepare('INSERT INTO github_reviews (review_id, github_review_id, github_node_id, state, event, body, submitted_at, github_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
       .run(attempt.review_id, attempt.remote_database_id, attempt.remote_id, submitted ? 'submitted' : 'pending', submitted ? attempt.manifest.event : null, data.body, data.submitted_at, data.github_url);
-    if (submitted) {
-      const update = db.prepare("UPDATE comments SET status = 'submitted', updated_at = ? WHERE id = ? AND review_id = ? AND revision = ? AND body = ? AND deleted_at IS NULL");
-      for (const comment of attempt.manifest.comments) {
-        const raw = db.prepare('SELECT * FROM comments WHERE id = ? AND review_id = ?').get(comment.id, attempt.review_id);
-        if (raw && draftData(raw, attempt.manifest.selection).key === comment.key && draftData(raw, attempt.manifest.selection).body === comment.body) update.run(timestamp, comment.id, attempt.review_id, comment.revision, raw.body);
-      }
-    }
   })();
+  if (mode === 'submit') return finishSubmittedDrafts(db, attempt);
   return receipt(db, attempt.id);
 }
 
@@ -312,6 +334,7 @@ async function reconcileSubmission({ db, client, attemptId }) {
   const attempt = readAttempt(db, attemptId);
   if (!attempt) throw fail('Submission attempt not found', 404);
   if (active.has(attemptId)) throw fail('This submission is still running. Wait for its recorded result.');
+  if (attempt.state === 'submitted') return finishSubmittedDrafts(db, attempt);
   if (terminal.has(attempt.state)) return receipt(db, attemptId);
   try {
     const user = await client.getAuthenticatedUser();
@@ -347,7 +370,10 @@ async function publishSubmission(options, confirmedDigest) {
   if (typeof confirmedDigest !== 'string' || !confirmedDigest) throw fail('Confirm an exact server preview before publication', 428);
   const completed = () => db.prepare("SELECT id FROM submission_attempts WHERE review_id = ? AND digest = ? AND state IN ('submitted', 'draft_saved') ORDER BY created_at DESC LIMIT 1").get(options.reviewId, confirmedDigest)?.id;
   const recorded = completed();
-  if (recorded) return receipt(db, recorded);
+  if (recorded) {
+    const attempt = readAttempt(db, recorded);
+    return attempt.state === 'submitted' ? finishSubmittedDrafts(db, attempt) : receipt(db, recorded);
+  }
   const manifest = await buildSubmissionManifest(options);
   if (manifest.digest !== confirmedDigest) throw fail('The target, account, head or drafts changed. Review and confirm the new manifest.', 409, { manifest });
   if (manifest.blockers.length) throw fail(manifest.blockers.join(' '), 409, { manifest });
@@ -370,6 +396,8 @@ async function publishSubmission(options, confirmedDigest) {
     const recorded = completed();
     if (recorded) return recorded;
     assertLocalCurrent(db, manifest);
+    const cleanup = cleanupAttempt(db, manifest.reviewId);
+    if (cleanup) throw fail('Finish local cleanup of the submitted review before publishing another review.', 409, { receipt: receipt(db, cleanup.id) });
     const current = openAttempt(db, targetKey, manifest.reviewId);
     if ((current?.id || null) !== (prior?.id || null)) throw fail('Another submission started while this preview was being checked.');
     if (prior) {
@@ -388,7 +416,10 @@ async function publishSubmission(options, confirmedDigest) {
     });
     return null;
   })();
-  if (replay) return receipt(db, replay);
+  if (replay) {
+    const attempt = readAttempt(db, replay);
+    return attempt.state === 'submitted' ? finishSubmittedDrafts(db, attempt) : receipt(db, replay);
+  }
   active.add(id);
   const target = manifest.target;
   const context = { owner: target.owner, repo: target.repo, prNumber: target.number, headSha: target.head };
