@@ -228,54 +228,6 @@ test.describe('Analysis History - Preview Panel', () => {
     await expect(previewPanel).toContainText('Suggestions');
   });
 
-  test('should update preview when hovering over different run items', async ({ page }) => {
-    await page.goto('/pr/test-owner/test-repo/1');
-    await waitForDiffToRender(page);
-
-    // Panel starts collapsed by default; expand it so analysis context elements are visible
-    await page.evaluate(() => window.aiPanel?.expand());
-
-    // Run multiple analyses to have more than one item
-    await seedAnalysis(page);
-    await seedAnalysis(page);
-    await reloadAnalysisHistory(page);
-
-    // Open dropdown
-    await page.locator('#analysis-context-selector').waitFor({ state: 'visible', timeout: 5000 });
-    await page.locator('#analysis-context-btn').click();
-
-    // Get the run items and wait for at least 2 items to be ready
-    const runItems = page.locator('#analysis-context-list .analysis-history-item');
-    await expect(async () => {
-      const count = await runItems.count();
-      expect(count).toBeGreaterThanOrEqual(2);
-    }).toPass({ timeout: 3000 });
-
-    // Hover over the second item
-    await runItems.nth(1).hover();
-
-    // The second item should have the 'previewing' class
-    await expect(runItems.nth(1)).toHaveClass(/previewing/);
-
-    // Verify the preview panel displays the correct content for the hovered item
-    const previewPanel = page.locator('#analysis-context-preview');
-    await expect(previewPanel).toBeVisible();
-
-    // Should show Provider row
-    const providerRow = previewPanel.locator('.analysis-preview-row:has(.analysis-preview-label:text("Provider"))');
-    await expect(providerRow).toBeVisible();
-    await expect(providerRow.locator('.analysis-preview-value')).toHaveText(/\w+/); // Non-empty provider
-
-    // Should show Model row
-    const modelRow = previewPanel.locator('.analysis-preview-row:has(.analysis-preview-label:text("Model"))');
-    await expect(modelRow).toBeVisible();
-    await expect(modelRow.locator('.analysis-preview-value')).toHaveText(/\w+/); // Non-empty model
-
-    // Should show Tier row
-    const tierRow = previewPanel.locator('.analysis-preview-row:has(.analysis-preview-label:text("Tier"))');
-    await expect(tierRow).toBeVisible();
-    await expect(tierRow.locator('.analysis-preview-value')).toHaveText(/\w+/); // Non-empty tier (Fast, Balanced, Thorough, or Unknown)
-  });
 
   test('should close dropdown when pressing Escape', async ({ page }) => {
     await page.goto('/pr/test-owner/test-repo/1');

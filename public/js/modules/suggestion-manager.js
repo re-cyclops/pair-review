@@ -213,12 +213,18 @@ class SuggestionManager {
   async displayAISuggestions(suggestions) {
     const render = {
       reviewId: this.prManager.currentPR?.id,
-      requestId: this.prManager._aiSuggestionsRequestId
+      requestId: this.prManager._aiSuggestionsRequestId,
+      generation: this.prManager._renderGen,
+      context: this.prManager.displayedProgressContext,
+      localDiff: this.prManager._viewedLocalDiff
     };
     this._activeSuggestionRender = render;
     const isCurrent = () => this._activeSuggestionRender === render
       && this.prManager.currentPR?.id === render.reviewId
-      && this.prManager._aiSuggestionsRequestId === render.requestId;
+      && this.prManager._aiSuggestionsRequestId === render.requestId
+      && this.prManager._renderGen === render.generation
+      && this.prManager.displayedProgressContext === render.context
+      && this.prManager._viewedLocalDiff === render.localDiff;
 
     try {
       this._closeReasoningPopover();

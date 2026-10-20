@@ -507,12 +507,15 @@ class PRManager {
   /**
    * Keep --diff-file-header-height in sync with the rendered sticky file
    * header so navigation (block:'start' + scroll-margin-top in pr.css) lands
-   * targets just below the header rather than hidden behind it. Headers are
-   * single-line and uniform, so measuring the first one is representative.
-   * Call after renderDiff appends the headers.
+   * targets just below the header rather than hidden behind it.
+   * Measure the target's own header when revealing an editor: responsive
+   * headers can wrap after the initial render.
    */
-  _measureFileHeaderHeight() {
-    const header = document.querySelector('.d2h-file-wrapper .d2h-file-header');
+  _measureFileHeaderHeight(target) {
+    const wrapper = target?.closest('.d2h-file-wrapper');
+    const header = wrapper
+      ? wrapper.querySelector('.d2h-file-header')
+      : document.querySelector('.d2h-file-wrapper .d2h-file-header');
     if (header && header.offsetHeight) {
       document.documentElement.style.setProperty(
         '--diff-file-header-height', header.offsetHeight + 'px'
@@ -2710,7 +2713,7 @@ class PRManager {
    * @param {string} repo - Repository name
    * @param {number} number - PR number
    */
-  async loadAndDisplayFiles(owner, repo, number) {
+  async loadAndDisplayFiles(owner, repo, number, { preserveEditors = false } = {}) {
     try {
       const diffUrl = this.hideWhitespace
         ? `/api/pr/${owner}/${repo}/${number}/diff?w=1`
@@ -2719,6 +2722,7 @@ class PRManager {
 
       if (response.ok) {
         const data = await response.json();
+        if (preserveEditors && !this._canReplaceDiff()) throw new Error('Update paused to protect an open editor. Save or cancel it, then update again.');
         const files = data.changed_files || [];
         const fullDiff = data.diff || '';
         this.displayedProgressContext = data.progress_context || null;
@@ -2758,26 +2762,26 @@ class PRManager {
           window.aiPanel.setFileOrder(this.canonicalFileOrder);
         }
 
-        // Load viewed state before rendering so files can start collapsed
-        // and so the sidebar viewed indicator renders on first paint
-        await this.loadViewedState();
 
         // Update sidebar with file list
         this.updateFileList(sortedFiles);
 
         // Render diff using the existing renderDiff method
         this.renderDiff({ changed_files: sortedFiles });
+        await this.loadViewedState();
 
         // Progressively fetch full file contents for hunk expansion
         this._upgradeFilesWithContents(sortedFiles);
 
       } else {
+        if (preserveEditors) throw new Error('Could not load the updated diff. The viewed revision was retained.');
         const diffContainer = document.getElementById('diff-container');
         if (diffContainer) {
           diffContainer.innerHTML = '<div class="no-diff">Failed to load changes</div>';
         }
       }
     } catch (error) {
+      if (preserveEditors) throw error;
       console.error('Error loading files:', error);
       const diffContainer = document.getElementById('diff-container');
       if (diffContainer) {
@@ -5323,7 +5327,10 @@ class PRManager {
   async loadViewedState() {
     if (!this.currentPR?.id) return;
     this.reviewProgress ||= new window.ReviewProgress(this);
-    try { await this.reviewProgress.load(); }
+    try {
+      await this.reviewProgress.load();
+      this.reviewProgress.syncCheckboxes();
+    }
     catch (error) {
       this.viewedFiles = new Set();
       this.reviewProgress.showError(error);
@@ -6597,6 +6604,50 @@ class PRManager {
     }
   }
 
+  _localDiffIdentity(diff) {
+    if (typeof diff !== 'string') return null;
+    if (!diff) return '[]';
+    const files = this.parseUnifiedDiff(diff);
+    // The display parser can omit unsupported quoted paths or collapse duplicate
+    // paths. Never certify equality using only a successfully parsed subset.
+    if (!files.size || files.size !== (diff.match(/^diff --git /gm) || []).length) return null;
+    const identities = [];
+    for (const [file, patch] of files) {
+      // Full blob IDs certify actual before/after contents; never certify
+      // abbreviated/unknown blobs merely because visible changed lines match.
+      if (!/^index [a-f0-9]{40}(?:[a-f0-9]{24})?\.\.[a-f0-9]{40}(?:[a-f0-9]{24})?(?: \d+)?$/m.test(patch)) return null;
+      const metadata = [], changes = [];
+      let oldLine = 0, newLine = 0, inHunk = false;
+      for (const text of patch.split('\n')) {
+        const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(text);
+        if (hunk) { oldLine = Number(hunk[1]); newLine = Number(hunk[2]); inHunk = true; continue; }
+        if (!inHunk) { if (text) metadata.push(text); continue; }
+        if (text[0] === '+' || text[0] === '-') changes.push([oldLine, newLine, text]);
+        if (text[0] === '\\') changes.push([oldLine, newLine, text]);
+        if (text[0] === ' ' || text[0] === '-') oldLine++;
+        if (text[0] === ' ' || text[0] === '+') newLine++;
+      }
+      identities.push([file, metadata, changes]);
+    }
+    identities.sort((a, b) => a[0].localeCompare(b[0]));
+    return JSON.stringify(identities);
+  }
+
+  async _matchesViewedLocalDiff(savedDiff) {
+    if (typeof savedDiff !== 'string') return false;
+    const context = this.displayedProgressContext;
+    const viewedDiff = this._viewedLocalDiff;
+    if (context?.digest && globalThis.crypto?.subtle) {
+      const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(savedDiff));
+      if (this.displayedProgressContext !== context || this._viewedLocalDiff !== viewedDiff) return false;
+      const hex = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+      if (hex === context.digest) return true;
+    }
+    if (savedDiff === viewedDiff) return true;
+    const savedIdentity = this._localDiffIdentity(savedDiff);
+    return savedIdentity !== null && savedIdentity === this._localDiffIdentity(viewedDiff);
+  }
+
   /**
    * Load AI suggestions from API
    * @param {string} level - Optional level filter ('final', '1', '2', '3')
@@ -6606,7 +6657,19 @@ class PRManager {
     if (!this.currentPR) return;
     const reviewId = this.currentPR.id;
     const requestId = this._aiSuggestionsRequestId = (this._aiSuggestionsRequestId || 0) + 1;
-    const isCurrent = () => this._aiSuggestionsRequestId === requestId && this.currentPR?.id === reviewId;
+    const viewedContext = this.displayedProgressContext;
+    const viewedDiff = this._viewedLocalDiff;
+    const viewedHead = viewedContext?.head || this.currentPR.head_sha || this.currentPR.localHeadSha;
+    const scopeStart = window.localManager?.scopeStart;
+    const scopeEnd = window.localManager?.scopeEnd;
+    const isCurrent = () => this._aiSuggestionsRequestId === requestId
+      && this.currentPR?.id === reviewId
+      && this.displayedProgressContext === viewedContext
+      && this._viewedLocalDiff === viewedDiff
+      && (this.displayedProgressContext?.head || this.currentPR.head_sha || this.currentPR.localHeadSha) === viewedHead
+      && window.localManager?.scopeStart === scopeStart
+      && window.localManager?.scopeEnd === scopeEnd;
+    window.aiPanel?.setAnalysisState?.('fetching');
 
     try {
       // Use provided level, or fall back to current selectedLevel
@@ -6622,10 +6685,35 @@ class PRManager {
           checkUrl += `?runId=${encodeURIComponent(filterRunId)}`;
         }
         const checkResponse = await fetch(checkUrl);
+        if (!checkResponse.ok) throw new Error('Could not load AI review status');
         if (checkResponse.ok) {
           const checkData = await checkResponse.json();
           if (!isCurrent()) return;
           analysisHasRun = checkData.analysisHasRun;
+          const run = this.analysisHistoryManager?.selectedRun;
+          const viewedSha = viewedHead;
+          let localDiffMatches = true;
+          if (window.PAIR_REVIEW_LOCAL_MODE && analysisHasRun) {
+            localDiffMatches = false;
+            if (run?.id) {
+              const savedResponse = await fetch(`/api/analyses/runs/${encodeURIComponent(run.id)}?includeDiff=true`);
+              if (savedResponse.ok) {
+                const saved = await savedResponse.json();
+                localDiffMatches = String(saved.run?.id) === String(run.id)
+                  && String(saved.run?.review_id) === String(reviewId)
+                  && (!saved.run.scope_start || saved.run.scope_start === window.localManager?.scopeStart)
+                  && (!saved.run.scope_end || saved.run.scope_end === window.localManager?.scopeEnd)
+                  && await this._matchesViewedLocalDiff(saved.run.diff);
+              }
+              if (!isCurrent()) return;
+            }
+          }
+          const historical = !!analysisHasRun && (!run?.head_sha || !viewedSha || run.head_sha !== viewedSha || !localDiffMatches);
+          window.aiPanel?.setRevisionContext?.({
+            historical,
+            message: historical ? `Historical AI review (${run?.head_sha?.slice(0, 7) || 'revision unknown'}); viewed revision ${viewedSha?.slice(0, 7) || 'unknown'}. Open a finding to inspect its saved code, not the current diff.`
+              : analysisHasRun ? `AI review of the viewed revision ${viewedSha?.slice(0, 7) || ''}. User drafts and GitHub comments are separate segments.` : ''
+          });
 
           // Store summary data in the AI panel for the AI Summary modal
           if (window.aiPanel?.setSummaryData) {
@@ -6637,13 +6725,16 @@ class PRManager {
         }
       } catch (checkError) {
         console.warn('Error checking analysis status:', checkError);
+        throw checkError;
       }
       if (!isCurrent()) return;
 
       // Set the analysis state on the AI panel BEFORE loading suggestions
       // This ensures the correct empty state is shown
       if (window.aiPanel?.setAnalysisState) {
-        window.aiPanel.setAnalysisState(analysisHasRun ? 'complete' : 'unknown');
+        const status = this.analysisHistoryManager?.selectedRun?.status;
+        window.aiPanel.setAnalysisState(['failed', 'error', 'cancelled'].includes(status) ? 'failed'
+          : ['running', 'pending'].includes(status) ? 'loading' : analysisHasRun ? 'complete' : 'unknown');
       }
 
       let url = `/api/reviews/${reviewId}/suggestions?levels=${encodeURIComponent(filterLevel)}`;
@@ -6652,13 +6743,14 @@ class PRManager {
       }
 
       const response = await fetch(url);
-      if (!response.ok) return;
+      if (!response.ok) throw new Error('Could not load AI findings');
 
       const data = await response.json();
       if (!isCurrent()) return;
       await this.displayAISuggestions(data.suggestions || []);
     } catch (error) {
       console.error('Error loading AI suggestions:', error);
+      if (isCurrent()) window.aiPanel?.setAnalysisState?.('failed');
     }
   }
 
@@ -6666,7 +6758,16 @@ class PRManager {
    * AI Suggestion methods - delegate to SuggestionManager
    */
   async displayAISuggestions(suggestions) {
-    await this.suggestionManager.displayAISuggestions(suggestions);
+    const reviewId = this.currentPR?.id;
+    const requestId = this._aiSuggestionsRequestId;
+    const generation = this._renderGen;
+    const context = this.displayedProgressContext;
+    const localDiff = this._viewedLocalDiff;
+    await this.suggestionManager.displayAISuggestions(window.aiPanel?.historicalFindings ? [] : suggestions);
+    if (this.currentPR?.id !== reviewId || this._aiSuggestionsRequestId !== requestId
+      || this._renderGen !== generation || this.displayedProgressContext !== context
+      || this._viewedLocalDiff !== localDiff) return;
+    if (window.aiPanel?.historicalFindings) window.aiPanel.addFindings(suggestions);
     // Refresh minimize-mode indicators (no-op when minimize mode is off)
     if (this.commentMinimizer) {
       this.commentMinimizer.refreshIndicators();
@@ -6939,10 +7040,23 @@ class PRManager {
             customSubmit: onAdoptEdited,
           },
         });
+        const form = this.pierreBridge.files.get(fileName).formElements.get(formId);
+        // Let the annotation mount and its pre-filled textarea resize first.
+        requestAnimationFrame(() => {
+          if (!form?.isConnected) return;
+          form.querySelector('textarea')?.focus({ preventScroll: true });
+          this._measureFileHeaderHeight(form);
+          const options = { behavior: 'instant', block: 'start' };
+          if (window.ScrollUtils?.scrollIntoViewStable) {
+            window.ScrollUtils.scrollIntoViewStable(form, options);
+          } else {
+            form?.scrollIntoView(options);
+          }
+        });
         return;
       }
 
-      this.commentManager.displaySuggestionEditForm(
+      const form = this.commentManager.displaySuggestionEditForm(
         suggestion,
         suggestionRow,
         async (editedText, draft) => {
@@ -6980,6 +7094,13 @@ class PRManager {
           // User clicked Cancel — nothing to revert
         }
       );
+      this._measureFileHeaderHeight(form);
+      const options = { behavior: 'instant', block: 'start' };
+      if (window.ScrollUtils?.scrollIntoViewStable) {
+        window.ScrollUtils.scrollIntoViewStable(form, options);
+      } else {
+        form?.scrollIntoView(options);
+      }
     } catch (error) {
       console.error('Error editing suggestion:', error);
       alert(`Failed to edit suggestion: ${error.message}`);
@@ -8439,22 +8560,9 @@ class PRManager {
 
       if (result.isStale !== true) return result;
 
-      // Stale — decide: silent refresh or show badge
-      const hasData = await this._hasActiveSessionData();
-      if (hasData) {
-        this._showStaleBadge('stale');
-        if (window.chatPanel) {
-          const abbrevLen = this.currentPR?.shaAbbrevLength || 7;
-          const oldSha = result.localHeadSha ? result.localHeadSha.substring(0, abbrevLen) : 'unknown';
-          const newSha = result.remoteHeadSha ? result.remoteHeadSha.substring(0, abbrevLen) : 'unknown';
-          window.chatPanel.queueDiffStateNotification(
-            `PR HEAD has changed (${oldSha} → ${newSha}). The diff has not been refreshed yet.`
-          );
-        }
-      } else {
-        // No user work to protect — refresh silently
-        await this.refreshPR();
-      }
+      this._staleDetails = result;
+      if (await this._hasActiveSessionData()) this._showStaleBadge('stale');
+      else await this.refreshPR();
       return result;
     } catch {
       // Fail silently — staleness badge is best-effort
@@ -8488,6 +8596,7 @@ class PRManager {
    * Returns true if uncertain (fail-safe: don't auto-refresh).
    */
   async _hasActiveSessionData() {
+    if (!this._canReplaceDiff()) return true;
     const reviewId = this.currentPR?.id;
     // No review record → no session data possible
     if (!reviewId) return false;
@@ -8497,6 +8606,7 @@ class PRManager {
         fetch(`/api/reviews/${reviewId}/suggestions/check`).then(r => r.ok ? r.json() : null),
         fetch(`/api/reviews/${reviewId}/comments`).then(r => r.ok ? r.json() : null)
       ]);
+      if (!suggestionsRes || !commentsRes) return true;
 
       const hasAnalysis = suggestionsRes?.analysisHasRun === true;
       const hasUserComments = (commentsRes?.comments || []).some(
@@ -8518,6 +8628,10 @@ class PRManager {
   _showStaleBadge(type, title) {
     const badge = document.getElementById('stale-badge');
     if (!badge) return;
+    const header = document.querySelector('.app > .header');
+    if (header) header.after(badge);
+    badge.setAttribute('role', 'status');
+    if (type !== 'stale') badge.querySelector('button')?.remove();
 
     // Reset variant classes
     badge.classList.remove('pr-closed', 'pr-merged');
@@ -8534,6 +8648,32 @@ class PRManager {
     } else {
       if (textEl) textEl.textContent = 'STALE';
       badge.title = title || 'PR data is outdated';
+      const local = !!window.PAIR_REVIEW_LOCAL_MODE;
+      const details = this._staleDetails || {};
+      const viewed = details.localHeadSha || details.previousHeadSha || this.currentPR?.head_sha;
+      const latest = details.remoteHeadSha || details.currentHeadSha;
+      if (textEl) textEl.textContent = local
+        ? 'Working tree changed since this diff was captured.'
+        : `Viewing ${viewed?.slice(0, 7) || 'saved commits'}; latest commits ${latest?.slice(0, 7) || 'have changed'}.`;
+      let action = badge.querySelector('button');
+      if (!action) {
+        action = document.createElement('button');
+        action.type = 'button';
+        action.className = 'btn btn-sm';
+        badge.appendChild(action);
+      }
+      action.textContent = local ? 'Update from working tree' : 'Update to latest commits';
+      action.onclick = async () => {
+        action.disabled = true;
+        action.textContent = 'Updating…';
+        try {
+          if (local) await window.localManager.refreshDiff();
+          else await this.refreshPR();
+        } finally {
+          action.disabled = false;
+          action.textContent = local ? 'Update from working tree' : 'Update to latest commits';
+        }
+      };
     }
     badge.style.display = '';
   }
@@ -8546,6 +8686,19 @@ class PRManager {
     if (badge) badge.style.display = 'none';
   }
 
+  _canReplaceDiff() {
+    // Editors are not persisted comments: never destroy their DOM during refresh.
+    const editors = document.querySelectorAll('#diff-container textarea, #diff-container [contenteditable="true"]');
+    const shadowEditor = [...document.querySelectorAll('#diff-container *')].some(
+      node => node.shadowRoot?.querySelector('textarea, [contenteditable="true"]')
+    );
+    if (editors.length || shadowEditor || window.reviewDrafts?.hasPending(this.currentPR?.id)) {
+      window.toast?.showWarning('Save or cancel your open comment editor before updating. Saved drafts and analysis history are retained.');
+      return false;
+    }
+    return true;
+  }
+
   /**
    * Refresh the PR data
    */
@@ -8555,6 +8708,7 @@ class PRManager {
       return;
     }
 
+    if (!this._canReplaceDiff()) return;
     const { owner, repo, number } = this.currentPR;
     const refreshBtn = document.getElementById('refresh-pr');
 
@@ -8563,11 +8717,7 @@ class PRManager {
       refreshBtn.disabled = true;
     }
 
-    // Show loading state in diff container
-    const diffContainer = document.getElementById('diff-container');
-    if (diffContainer) {
-      diffContainer.innerHTML = '<div class="loading">Refreshing pull request...</div>';
-    }
+    // Keep the existing diff visible until the refresh succeeds.
 
     const oldHeadSha = this.currentPR?.head_sha;
 
@@ -8586,8 +8736,17 @@ class PRManager {
 
       // Update current PR data
       if (data.success && data.data) {
-        this.currentPR = data.data;
 
+
+        // Save scroll position and expanded state
+        const scrollPosition = window.scrollY;
+        const expandedFolders = new Set(this.expandedFolders);
+
+
+        // Reload the files/diff with fresh data
+        await this.loadAndDisplayFiles(owner, repo, number, { preserveEditors: true });
+        this.currentPR = data.data;
+        this.renderPRHeader(data.data);
         // Notify chat agent if HEAD SHA changed
         const newHeadSha = data.data?.head_sha;
         if (window.chatPanel && oldHeadSha && newHeadSha && oldHeadSha !== newHeadSha) {
@@ -8599,16 +8758,6 @@ class PRManager {
 
         // Sync worktree label to dropdown (may have changed after refresh)
         this._syncWorktreeDropdown(data.data);
-
-        // Save scroll position and expanded state
-        const scrollPosition = window.scrollY;
-        const expandedFolders = new Set(this.expandedFolders);
-
-        // Update PR header with fresh data (title, description may have changed)
-        this.renderPRHeader(data.data);
-
-        // Reload the files/diff with fresh data
-        await this.loadAndDisplayFiles(owner, repo, number);
 
         // Re-render the three independent overlay layers on the fresh DOM
         // (renderDiff clears the diff container). Going through the shared
@@ -8641,7 +8790,8 @@ class PRManager {
       }
     } catch (error) {
       console.error('Error refreshing PR:', error);
-      this.showError(error.message);
+      window.toast?.showError(error.message);
+      this._showStaleBadge('stale', error.message);
     } finally {
       if (refreshBtn) {
         refreshBtn.classList.remove('refreshing');

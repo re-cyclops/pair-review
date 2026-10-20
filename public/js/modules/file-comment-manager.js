@@ -749,6 +749,13 @@ class FileCommentManager {
 
     textarea.focus();
     textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    this.prManager._measureFileHeaderHeight(form);
+    const options = { behavior: 'instant', block: 'start' };
+    if (window.ScrollUtils?.scrollIntoViewStable) {
+      window.ScrollUtils.scrollIntoViewStable(form, options);
+    } else {
+      form.scrollIntoView(options);
+    }
 
     // Attach emoji picker for autocomplete
     if (window.emojiPicker) {

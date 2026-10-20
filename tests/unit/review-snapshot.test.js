@@ -8,6 +8,7 @@ const fixture = () => ({ token: `fixture-${++sequence}`, apiHost: null, octokit:
   rest: {
     users: { getAuthenticated: () => result({ login: 'reviewer' }) },
     teams: { listForAuthenticatedUser: () => result([{ id: 7, slug: 'maintainers' }]) },
+    issues: { listEventsForTimeline: () => result([]) },
     pulls: {
       get: () => result({ title: 'Fixture change', html_url: 'https://github.com/example/project/pull/42', state: 'open', user: { login: 'author' }, head: { sha: 'head' }, base: { sha: 'base', ref: 'main' }, mergeable: null }),
       listReviews: () => result([]), listRequestedReviewers: () => result({ users: [], teams: [] })
@@ -20,6 +21,77 @@ const fixture = () => ({ token: `fixture-${++sequence}`, apiHost: null, octokit:
 } });
 
 describe('read-only review snapshots', () => {
+  const request = (created_at, target = { requested_reviewer: { login: 'reviewer' } }, actor = { login: 'requester', name: 'Real Requester', type: 'User' }) =>
+    ({ event: 'review_requested', created_at, ...target, review_requester: actor });
+
+  it('uses the earliest direct request across removals, submissions and re-requests, independently of current state', async () => {
+    const client = fixture();
+    const timeline = vi.fn(() => result([
+      request('2026-01-01T00:00:00Z', { requested_reviewer: { login: 'someone-else' } }),
+      request('2026-01-02T00:00:00Z', { requested_team: { id: 7, slug: 'maintainers' } }),
+      request('2026-01-05T00:00:00Z'),
+      { event: 'review_request_removed', created_at: '2026-01-06T00:00:00Z', requested_reviewer: { login: 'reviewer' } },
+      request('2026-01-03T00:00:00Z', { requested_reviewer: { login: 'REVIEWER' } })
+    ]));
+    client.octokit.rest.issues.listEventsForTimeline = timeline;
+    client.octokit.rest.pulls.listReviews = () => result([{ id: 1, state: 'CHANGES_REQUESTED', user: { login: 'another' }, submitted_at: '2026-01-07T00:00:00Z', commit_id: 'head' }]);
+    const snapshot = await fetchReviewSnapshot(client, identity);
+    expect(snapshot.viewer.reviewRequest).toMatchObject({ availability: 'known', firstRequestedAt: '2026-01-03T00:00:00.000Z',
+      source: 'direct', team: null, requestedBy: { login: 'requester', name: 'Real Requester', type: 'User' } });
+    expect(timeline).toHaveBeenCalledWith({ owner: 'example', repo: 'project', issue_number: 42, per_page: 100, page: 1 });
+    expect(snapshot.viewer.requestedDirectly).toBe(false);
+    expect(snapshot.viewer.needsYou).toBe(false);
+    expect(snapshot.approvals.effective[0]).toMatchObject({ state: 'CHANGES_REQUESTED', reviewer: { login: 'another' } });
+    expect(snapshot.headSha).toBe('head');
+  });
+
+  it('falls back only to known team IDs and attributes the actual actor', async () => {
+    const client = fixture();
+    client.octokit.rest.issues.listEventsForTimeline = () => result([
+      request('invalid', { requested_reviewer: { login: 'other' } }),
+      request('2026-01-01T00:00:00Z', { requested_team: { id: 99, slug: 'maintainers' } }),
+      { ...request('2026-01-04T00:00:00Z', { requested_team: { id: 7, slug: 'maintainers', name: 'Maintainers' } }, null), actor: { login: 'actual-actor' } }
+    ]);
+    expect((await fetchReviewSnapshot(client, identity)).viewer.reviewRequest).toMatchObject({
+      availability: 'known', source: 'team', firstRequestedAt: '2026-01-04T00:00:00.000Z',
+      team: { id: 7, slug: 'maintainers', name: 'Maintainers' }, requestedBy: { login: 'actual-actor' }
+    });
+  });
+
+  it.each(['truncated', 'invalid', 'identity', 'membership', 'target', 'unavailable'])('leaves first timing unknown for %s evidence', async kind => {
+    const client = fixture();
+    let events = [request('2026-01-01T00:00:00Z')];
+    if (kind === 'invalid') events.push(request('not-a-date'));
+    if (kind === 'membership') {
+      events = [request('2026-01-01T00:00:00Z', { requested_team: { id: 7 } })];
+      client.octokit.rest.teams.listForAuthenticatedUser = async () => { throw new Error('Unsupported'); };
+    }
+    if (kind === 'identity') client.octokit.rest.users.getAuthenticated = async () => { throw new Error('Offline'); };
+    if (kind === 'target') events.push({ event: 'review_requested', created_at: '2025-01-01T00:00:00Z' });
+    client.octokit.rest.issues.listEventsForTimeline = vi.fn(async () => {
+      if (kind === 'unavailable') throw Object.assign(new Error('Denied'), { status: 403 });
+      return { data: events, headers: kind === 'truncated' ? { link: '<next>; rel="next"' } : {} };
+    });
+    const snapshot = await fetchReviewSnapshot(client, identity);
+    expect(snapshot.viewer.reviewRequest).toMatchObject({ availability: kind === 'unavailable' ? 'unavailable' : 'partial',
+      firstRequestedAt: null, source: null, team: null, requestedBy: null });
+    expect(snapshot.approvals.availability).toBe('known');
+    expect(snapshot.checks.availability).toBe('known');
+    if (kind === 'truncated') expect(client.octokit.rest.issues.listEventsForTimeline).toHaveBeenCalledTimes(10);
+  });
+
+  it('distinguishes complete no-request history from unknown and does not guess requester from author', async () => {
+    const none = await fetchReviewSnapshot(fixture(), identity);
+    expect(none.viewer.reviewRequest).toMatchObject({ availability: 'known', firstRequestedAt: null, source: null, requestedBy: null });
+    const client = fixture();
+    client.octokit.rest.issues.listEventsForTimeline = ({ page }) => Promise.resolve({
+      data: page === 1 ? [request('2026-01-04T00:00:00Z', undefined, null)] : [request('2026-01-02T00:00:00Z', undefined, null)],
+      headers: page === 1 ? { link: '<next>; rel="next"' } : {}
+    });
+    expect((await fetchReviewSnapshot(client, identity)).viewer.reviewRequest).toMatchObject({
+      availability: 'known', firstRequestedAt: '2026-01-02T00:00:00.000Z', requestedBy: null
+    });
+  });
   it('keeps reviewer opinions through later comments and replaces only that reviewer opinion', () => {
     const make = (id, login, state) => ({ id, user: { login }, state, submitted_at: `2026-01-0${id}`, commit_id: `sha-${id}` });
     expect(effectiveReviews([make(3, 'Pat', 'COMMENTED'), make(1, 'Pat', 'CHANGES_REQUESTED'), make(2, 'Kim', 'APPROVED')])

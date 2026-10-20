@@ -45,9 +45,40 @@ function checkboxRow() {
 beforeEach(() => {
   document.body.innerHTML = '';
   dialog = new ConfirmDialog();
+  // jsdom does not implement native dialog methods; browser smoke covers focus containment.
+  dialog.modal.showModal = function () { this.open = true; };
+  dialog.modal.close = function () { this.open = false; };
 });
 
 describe('ConfirmDialog', () => {
+  describe('keyboard safety', () => {
+    it('keeps Enter on Cancel from accepting a destructive action', async () => {
+      const onConfirm = vi.fn();
+      const promise = dialog.show({ message: 'Remove local drafts?', onConfirm });
+      const cancel = dialog.modal.querySelector('.modal-footer [data-action="cancel"]');
+      expect(document.activeElement).toBe(cancel);
+
+      const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+      cancel.dispatchEvent(enter);
+      expect(enter.defaultPrevented).toBe(false);
+      expect(onConfirm).not.toHaveBeenCalled();
+      // jsdom does not synthesize the browser's default button activation.
+      cancel.click();
+      await expect(promise).resolves.toBe('cancel');
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+
+    it('cancels through the native dialog event without confirming', async () => {
+      const onConfirm = vi.fn();
+      const promise = dialog.show({ message: 'Remove local drafts?', onConfirm });
+      dialog.modal.dispatchEvent(new Event('cancel', { cancelable: true }));
+
+      await expect(promise).resolves.toBe('cancel');
+      expect(dialog.modal.open).toBe(false);
+      expect(onConfirm).not.toHaveBeenCalled();
+    });
+  });
+
   describe('checkbox opt-in', () => {
     it('renders no checkbox when checkboxLabel is omitted', async () => {
       const promise = dialog.show({ title: 'T', message: 'M' });

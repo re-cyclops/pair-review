@@ -24,18 +24,19 @@ class TextInputDialog {
     }
 
     // Create modal container
-    const modalContainer = document.createElement('div');
+    const modalContainer = document.createElement('dialog');
     modalContainer.id = 'text-input-dialog';
-    modalContainer.className = 'modal-overlay';
+    modalContainer.className = 'modal-overlay text-input-dialog-overlay';
+    modalContainer.setAttribute('aria-labelledby', 'text-input-dialog-title');
     modalContainer.style.display = 'none';
 
     modalContainer.innerHTML = `
       <div class="modal-backdrop" data-action="cancel"></div>
-      <div class="modal-container confirm-dialog-container" style="width: 400px; height: auto;">
+      <form class="modal-container confirm-dialog-container text-input-dialog-container">
         <div class="modal-header">
           <h3 id="text-input-dialog-title">Input</h3>
-          <button class="modal-close-btn" data-action="cancel" title="Close">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <button type="button" class="modal-close-btn" data-action="cancel" title="Close" aria-label="Close input dialog">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
               <path d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 01-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"/>
             </svg>
           </button>
@@ -44,17 +45,17 @@ class TextInputDialog {
         <div class="modal-body">
           <div class="text-input-dialog-field">
             <label for="text-input-dialog-input" id="text-input-dialog-label"></label>
-            <input type="text" id="text-input-dialog-input" class="form-control" placeholder="" />
+            <input type="text" id="text-input-dialog-input" name="dialog-value" class="form-control" placeholder="" autocomplete="off" autofocus />
           </div>
         </div>
 
         <div class="modal-footer">
-          <button class="btn btn-secondary" data-action="cancel">Cancel</button>
-          <button class="btn btn-primary" id="text-input-dialog-btn" data-action="confirm">
+          <button type="button" class="btn btn-secondary" data-action="cancel">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="text-input-dialog-btn">
             Save
           </button>
         </div>
-      </div>
+      </form>
     `;
 
     document.body.appendChild(modalContainer);
@@ -68,31 +69,26 @@ class TextInputDialog {
     // Use event delegation for click events
     this.modal.addEventListener('click', (e) => {
       const action = e.target.closest('[data-action]')?.dataset.action;
-      if (action === 'confirm') {
-        this.handleConfirm();
-      } else if (action === 'cancel') {
+      if (action === 'cancel') {
+        e.preventDefault();
         this.handleCancel();
       }
     });
 
-    // Handle keyboard shortcuts
-    this.keyHandler = (e) => {
-      if (!this.isVisible) return;
-      // Don't intercept keys when another dialog is on top
-      if (window.confirmDialog?.isVisible) return;
-
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        this.handleCancel();
-      } else if (e.key === 'Enter') {
-        const input = this.modal.querySelector('#text-input-dialog-input');
-        if (input && input.value.trim()) {
-          e.preventDefault();
-          this.handleConfirm();
-        }
-      }
-    };
-    document.addEventListener('keydown', this.keyHandler);
+    // Native modal focus containment and button activation preserve Cancel's
+    // keyboard behavior. Only form submission accepts the input.
+    this.modal.querySelector('form').addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (this.isVisible && !event.isComposing) this.handleConfirm();
+    });
+    this.modal.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      this.handleCancel();
+    });
+    this.modal.addEventListener('close', () => {
+      // Ignore an older queued close event if the dialog has already reopened.
+      if (!this.modal.open && this.isVisible) this.hide();
+    });
 
     // Listen for input changes to enable/disable confirm button
     const input = this.modal.querySelector('#text-input-dialog-input');
@@ -154,6 +150,7 @@ class TextInputDialog {
       if (input) {
         input.value = options.value || '';
         input.placeholder = options.placeholder || '';
+        input.setAttribute('aria-label', options.label || options.title || 'Input');
       }
 
       // Set confirm button text and style
@@ -169,16 +166,14 @@ class TextInputDialog {
       // Update confirm button state based on initial value
       this._updateConfirmButton(options.value || '');
 
-      // Show modal
+      // showModal promotes this dialog above an already-open analysis dialog.
+      if (!this.modal.open) this.returnFocus = document.activeElement;
       this.modal.style.display = 'flex';
       this.isVisible = true;
-
-      // Focus and select all text in input
+      if (!this.modal.open) this.modal.showModal();
       if (input) {
-        requestAnimationFrame(() => {
-          input.focus();
-          input.select();
-        });
+        input.focus();
+        input.select();
       }
     });
   }
@@ -187,35 +182,36 @@ class TextInputDialog {
    * Handle confirm action
    */
   handleConfirm() {
+    if (!this.isVisible) return;
     const input = this.modal.querySelector('#text-input-dialog-input');
     const value = input ? input.value.trim() : '';
     if (!value) return;
 
-    if (this.resolvePromise) {
-      this.resolvePromise(value);
-    }
-    this.hide();
+    this.hide(value);
   }
 
   /**
    * Handle cancel action
    */
   handleCancel() {
-    if (this.resolvePromise) {
-      this.resolvePromise(null);
-    }
     this.hide();
   }
 
   /**
    * Hide the modal
    */
-  hide() {
+  hide(value = null) {
     if (!this.modal) return;
 
-    this.modal.style.display = 'none';
-    this.isVisible = false;
+    const resolve = this.resolvePromise;
     this.resolvePromise = null;
+    this.isVisible = false;
+    if (this.modal.open) this.modal.close();
+    this.modal.style.display = 'none';
+    if (this.returnFocus?.isConnected) this.returnFocus.focus({ preventScroll: true });
+    this.returnFocus = null;
+    // Direct hide()/close() calls must not leave a caller awaiting forever.
+    if (resolve) resolve(value);
   }
 }
 

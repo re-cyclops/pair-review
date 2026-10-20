@@ -662,6 +662,7 @@ class LocalManager {
    */
   async refreshDiff(opts = {}) {
     const manager = window.prManager;
+    if (!manager._canReplaceDiff()) return;
     const refreshBtn = document.getElementById('local-refresh-btn');
 
     if (!refreshBtn || refreshBtn.disabled) return;
@@ -709,6 +710,7 @@ class LocalManager {
 
     } catch (error) {
       console.error('Error refreshing diff:', error);
+      manager._showStaleBadge('stale', error.message);
       if (window.toast) {
         window.toast.showError('Failed to refresh diff: ' + error.message);
       } else if (window.showToast) {
@@ -788,11 +790,13 @@ class LocalManager {
 
     if (data.action === 'redirect') {
       // UNIQUE conflict — redirect to existing session
+      if (!window.prManager._canReplaceDiff()) throw new Error('Navigation paused to protect an open editor. Save or cancel it, then update again.');
       window.location.href = `/local/${data.sessionId}`;
       return false; // navigating away — caller must not fire _applyRefreshedDiff
     }
 
     if (data.action === 'new-session') {
+      if (!window.prManager._canReplaceDiff()) throw new Error('Navigation paused to protect an open editor. Save or cancel it, then update again.');
       window.location.href = `/local/${data.newSessionId}`;
       return false; // navigating away — caller must not fire _applyRefreshedDiff
     }
@@ -807,6 +811,24 @@ class LocalManager {
    * Shared by refreshDiff() for both normal refreshes and HEAD-change updates.
    */
   async _applyRefreshedDiff(manager, result) {
+
+    // Reset base branch override before reloading diff so the fetch uses the default base
+    const previousOverride = manager.currentBaseOverride;
+    manager.currentBaseOverride = null;
+    const baseSel = document.getElementById('base-branch-select');
+    const previousSelection = baseSel?.value;
+    if (baseSel && manager.currentPR?.base_branch) {
+      baseSel.value = manager.currentPR.base_branch;
+    }
+
+    // Reload the diff display
+    try {
+      await this.loadLocalDiff({ preserveEditors: true });
+    } catch (error) {
+      manager.currentBaseOverride = previousOverride;
+      if (baseSel) baseSel.value = previousSelection;
+      throw error;
+    }
     // Notify chat agent about diff refresh
     if (window.chatPanel) {
       if (result.headShaChanged) {
@@ -820,16 +842,6 @@ class LocalManager {
         'Local diff refreshed from working directory.'
       );
     }
-
-    // Reset base branch override before reloading diff so the fetch uses the default base
-    manager.currentBaseOverride = null;
-    const baseSel = document.getElementById('base-branch-select');
-    if (baseSel && manager.currentPR?.base_branch) {
-      baseSel.value = manager.currentPR.base_branch;
-    }
-
-    // Reload the diff display
-    await this.loadLocalDiff();
 
     // Re-render comments and AI suggestions on the fresh DOM
     // (renderDiff clears the diff container, so we must re-populate)
@@ -881,6 +893,7 @@ class LocalManager {
 
       // Stale — decide: silent refresh or show badge
       const manager = window.prManager;
+      manager._staleDetails = result;
       const hasData = await manager._hasActiveSessionData();
       if (hasData) {
         console.debug('[Local] working directory stale, session has data — showing badge');
@@ -1369,7 +1382,7 @@ class LocalManager {
   /**
    * Load and display local diff
    */
-  async loadLocalDiff() {
+  async loadLocalDiff({ preserveEditors = false } = {}) {
     const manager = window.prManager;
 
     try {
@@ -1385,7 +1398,9 @@ class LocalManager {
       }
 
       const data = await response.json();
+      if (preserveEditors && !manager._canReplaceDiff()) throw new Error('Update paused to protect an open editor. Save or cancel it, then update again.');
       const diffContent = data.diff || '';
+      manager._viewedLocalDiff = diffContent;
       manager.displayedProgressContext = data.progress_context || null;
       if (data.progress_context?.head && this.localData.localHeadSha !== data.progress_context.head) {
         this.localData.localHeadSha = data.progress_context.head;
@@ -1398,9 +1413,6 @@ class LocalManager {
       // diff so they remain stable across whitespace-filtered renders).
       const hunkHashesByFile = data.hunk_hashes_by_file || {};
 
-      // Load viewed state before rendering so files can start collapsed
-      // and so the sidebar viewed indicator renders on first paint
-      await manager.loadViewedState();
 
       if (!diffContent) {
         const diffContainer = document.getElementById('diff-container');
@@ -1430,6 +1442,7 @@ class LocalManager {
 
         // Update stats to show zeros
         this.updateDiffStats({ additions: 0, deletions: 0, fileCount: 0 });
+        await manager.loadViewedState();
 
         return;
       }
@@ -1519,11 +1532,13 @@ class LocalManager {
 
       // Render diff
       manager.renderDiff({ changed_files: sortedFiles });
+      await manager.loadViewedState();
 
       // Progressively fetch full file contents for hunk expansion
       manager._upgradeFilesWithContents(sortedFiles);
 
     } catch (error) {
+      if (preserveEditors) throw error;
       console.error('Error loading local diff:', error);
       const diffContainer = document.getElementById('diff-container');
       if (diffContainer) {

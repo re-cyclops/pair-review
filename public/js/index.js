@@ -233,20 +233,21 @@
     const btnEl = document.getElementById(ids.btn);
     const analyzeBtnEl = document.getElementById(ids.analyzeBtn);
     const loadingEl = document.getElementById(ids.loadingEl);
+    if (loadingEl) { loadingEl.setAttribute('role', 'status'); loadingEl.setAttribute('aria-live', 'polite'); loadingEl.setAttribute('aria-busy', String(loading)); }
     const loadingTextEl = document.getElementById(ids.loadingText);
     const errorEl = document.getElementById(ids.errorEl);
 
     if (loading) {
       if (inputEl) inputEl.disabled = true;
-      if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Starting...'; }
-      if (analyzeBtnEl) analyzeBtnEl.disabled = true;
+      if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Opening…'; btnEl.setAttribute('aria-busy', 'true'); }
+      if (analyzeBtnEl) { analyzeBtnEl.disabled = true; analyzeBtnEl.textContent = 'Preparing analysis…'; analyzeBtnEl.setAttribute('aria-busy', 'true'); }
       if (loadingEl) loadingEl.classList.add('visible');
       if (loadingTextEl && text) loadingTextEl.textContent = text;
       if (errorEl) errorEl.classList.remove('visible', 'info');
     } else {
       if (inputEl) inputEl.disabled = false;
-      if (btnEl) { btnEl.disabled = false; btnEl.textContent = ids.btnLabel; }
-      if (analyzeBtnEl) analyzeBtnEl.disabled = false;
+      if (btnEl) { btnEl.disabled = false; btnEl.textContent = ids.btnLabel; btnEl.removeAttribute('aria-busy'); }
+      if (analyzeBtnEl) { analyzeBtnEl.disabled = false; analyzeBtnEl.textContent = 'Analyze'; analyzeBtnEl.removeAttribute('aria-busy'); }
       if (loadingEl) loadingEl.classList.remove('visible');
     }
   }
@@ -352,12 +353,10 @@
 
     return '' +
       '<tr data-session-id="' + session.id + '">' +
-        '<td class="col-local-name" title="' + escapeHtmlAttribute(session.name || 'Untitled') + '"><a href="' + link + '">' + nameDisplay + '</a></td>' +
-        '<td class="col-local-sha" title="' + escapeHtmlAttribute(session.local_head_sha || '') + '">' + escapeHtml(sha) + '</td>' +
-        '<td class="col-local-path" title="' + escapeHtmlAttribute(pathDisplay) + '">' + escapeHtml(pathDisplay) + '</td>' +
-        '<td class="col-repo">' + escapeHtml(session.repository || '') + '</td>' +
-        '<td class="col-time">' + relativeTime + '</td>' +
-        '<td class="col-actions">' +
+        '<td data-label="Local version" class="col-identity"><div class="col-local-name"><a href="' + link + '">' + nameDisplay + '</a></div><span class="col-repo">' + escapeHtml(session.repository || '') + '</span><div class="col-local-path">' + escapeHtml(pathDisplay) + '</div><div class="col-local-sha" title="' + escapeHtmlAttribute(session.local_head_sha || '') + '">Head ' + escapeHtml(sha) + '</div><div class="col-time">Updated ' + relativeTime + '</div></td>' +
+        '<td data-label="AI review" class="col-ai"></td>' +
+        '<td data-label="Local state" class="col-state"></td>' +
+        '<td data-label="Actions" class="col-actions">' +
           settingsHtml +
           '<button' +
             ' type="button"' +
@@ -573,9 +572,6 @@
       ? '<a href="https://github.com/' + encodeURIComponent(pr.author) + '" target="_blank" rel="noopener">' + escapeHtml(pr.author) + '</a>'
       : '';
 
-    var authorTd = collection === 'my-prs'
-      ? ''
-      : '<td class="col-author">' + authorDisplay + '</td>';
 
     // `setup_host` is resolved by the collection API (setupHostParam): an alt
     // api_host string, the 'github' sentinel, or null to omit. Open, Analyze,
@@ -598,12 +594,11 @@
 
     return '' +
       '<tr class="collection-pr-row" data-pr-url="' + escapeHtmlAttribute(prUrl) + '" data-owner="' + escapeHtmlAttribute(pr.owner) + '" data-repo="' + escapeHtmlAttribute(pr.repo) + '" data-number="' + pr.number + '"' + hostAttr + '>' +
-        '<td class="col-repo">' + escapeHtml(repoFull) + '</td>' +
-        '<td class="col-pr"><span class="collection-pr-number">#' + pr.number + '</span></td>' +
-        '<td class="col-title" title="' + escapeHtmlAttribute(pr.title || '') + '">' + escapeHtml(pr.title || '') + '</td>' +
-        authorTd +
-        '<td class="col-time">' + relativeTime + '</td>' +
-        '<td class="col-actions">' + actionLinks + '</td>' +
+        '<td data-label="Pull request" class="col-identity"><div class="inbox-identity-meta"><span class="col-repo">' + escapeHtml(repoFull) + '</span> <span class="col-pr"><span class="collection-pr-number">#' + pr.number + '</span></span></div><div class="col-title">' + escapeHtml(pr.title || '') + '</div><div class="inbox-identity-meta"><span class="col-author">' + authorDisplay + '</span><span class="col-time">Updated ' + relativeTime + '</span></div></td>' +
+        '<td data-label="First requested" class="col-requested"></td>' +
+        '<td data-label="AI review" class="col-ai"></td>' +
+        '<td data-label="Review state" class="col-state"></td>' +
+        '<td data-label="Actions" class="col-actions">' + actionLinks + '</td>' +
       '</tr>';
   }
 
@@ -648,7 +643,6 @@
       return;
     }
 
-    var authorTh = collection === 'my-prs' ? '' : '<th>Author</th>';
 
     var tbodyId = collection + '-tbody';
 
@@ -656,12 +650,11 @@
       '<table class="recent-reviews-table">' +
         '<thead>' +
           '<tr>' +
-            '<th>Repository</th>' +
-            '<th>PR</th>' +
-            '<th>Title</th>' +
-            authorTh +
-            '<th>Updated</th>' +
-            '<th>Actions</th>' +
+            '<th scope="col" class="col-identity">Pull request</th>' +
+            '<th scope="col">First requested</th>' +
+            '<th scope="col">AI review</th>' +
+            '<th scope="col">Review state</th>' +
+            '<th scope="col">Actions</th>' +
           '</tr>' +
         '</thead>' +
         '<tbody id="' + tbodyId + '">' +
@@ -734,7 +727,7 @@
     if (requestId == null) requestId = state.activeRequest = (state.activeRequest || 0) + 1;
     else if (requestId !== state.activeRequest) return;
 
-    if (btn) btn.classList.add('refreshing');
+    if (btn) { btn.classList.add('refreshing'); btn.setAttribute('aria-busy', 'true'); btn.setAttribute('aria-label', 'Refreshing pull requests…'); }
 
     // Show loading state only if this is the first load (no existing data)
     if (state.prs.length === 0) {
@@ -781,7 +774,11 @@
       state.error = error.message;
       renderCollectionTable(container, state, collection);
     } finally {
-      if (btn && context === (window.reviewWorkspace?.contextVersion || 0) && requestId === state.activeRequest) btn.classList.remove('refreshing');
+      if (btn && context === (window.reviewWorkspace?.contextVersion || 0) && requestId === state.activeRequest) {
+        btn.classList.remove('refreshing');
+        btn.removeAttribute('aria-busy');
+        btn.setAttribute('aria-label', 'Refresh pull requests');
+      }
     }
   }
 
@@ -879,12 +876,10 @@
         '<table class="recent-reviews-table local-table">' +
           '<thead>' +
             '<tr>' +
-              '<th>Name</th>' +
-              '<th>Head</th>' +
-              '<th>Path</th>' +
-              '<th>Repo</th>' +
-              '<th>Last Updated</th>' +
-              '<th></th>' +
+              '<th scope="col" class="col-identity">Local version</th>' +
+              '<th scope="col">AI review</th>' +
+              '<th scope="col">Local state</th>' +
+              '<th scope="col">Actions</th>' +
             '</tr>' +
           '</thead>' +
           '<tbody id="local-reviews-tbody">' +
@@ -1003,7 +998,10 @@
 
     // Wire up buttons
     row.querySelector('.btn-confirm-yes').addEventListener('click', async function () {
+      if (this.disabled) return;
       this.disabled = true;
+      this.textContent = 'Removing…';
+      this.setAttribute('aria-busy', 'true');
       row.querySelector('.btn-confirm-no').disabled = true;
       try {
         const response = await fetch('/api/local/sessions/' + sessionId, {
@@ -1015,6 +1013,7 @@
         }
         // Remove the row from DOM
         row.remove();
+        window.reviewWorkspace?.loadReviews();
         // If no more rows, reload to show empty state
         const tbody = document.getElementById('local-reviews-tbody');
         if (tbody && tbody.children.length === 0) {
@@ -1051,6 +1050,7 @@
     event.preventDefault();
 
     const input = document.getElementById('local-path-input');
+    if (input.disabled) return;
     const pathValue = input.value.trim();
 
     // Clear previous errors/info messages
@@ -1076,6 +1076,7 @@
     // The /local?path= route serves setup.html which handles the full setup flow
     let href = '/local?path=' + encodeURIComponent(pathValue);
     if (analyze) href += '&analyze=true';
+    setFormLoading('local', true, analyze ? 'Preparing analysis…' : 'Opening local review…');
     window.location.href = href;
   }
 
@@ -1106,11 +1107,12 @@
   async function handleBrowseLocal() {
     const browseBtn = document.getElementById('browse-local-btn');
     const input = document.getElementById('local-path-input');
-    if (!browseBtn || !input) return;
+    if (!browseBtn || !input || browseBtn.disabled) return;
 
     // Disable button while dialog is open
     browseBtn.disabled = true;
-    browseBtn.textContent = 'Browsing...';
+    browseBtn.textContent = 'Browsing…';
+    browseBtn.setAttribute('aria-busy', 'true');
 
     try {
       const response = await fetch('/api/local/browse', {
@@ -1139,6 +1141,7 @@
     } finally {
       browseBtn.disabled = false;
       browseBtn.textContent = 'Browse';
+      browseBtn.removeAttribute('aria-busy');
     }
   }
 
@@ -1183,12 +1186,11 @@
 
     return '' +
       '<tr data-review-id="' + review.id + '" data-owner="' + escapeHtmlAttribute(owner) + '" data-repo="' + escapeHtmlAttribute(repo) + '" data-number="' + review.pr_number + '"' + prUrlAttr + hostAttr + reviewIdAttr + '>' +
-        '<td class="col-repo">' + escapeHtml(review.repository) + '</td>' +
-        '<td class="col-pr"><a href="' + link + '">#' + review.pr_number + '</a></td>' +
-        '<td class="col-title" title="' + escapeHtmlAttribute(review.pr_title) + '">' + escapeHtml(review.pr_title) + '</td>' +
-        '<td class="col-author">' + authorDisplay + '</td>' +
-        '<td class="col-time">' + relativeTime + '</td>' +
-        '<td class="col-actions">' +
+        '<td data-label="Pull request" class="col-identity"><div class="inbox-identity-meta"><span class="col-repo">' + escapeHtml(review.repository) + '</span> <span class="col-pr"><a href="' + link + '">#' + review.pr_number + '</a></span></div><div class="col-title">' + escapeHtml(review.pr_title) + '</div><div class="inbox-identity-meta"><span class="col-author">' + authorDisplay + '</span><span class="col-time">Last opened ' + relativeTime + '</span></div></td>' +
+        '<td data-label="First requested" class="col-requested"></td>' +
+        '<td data-label="AI review" class="col-ai"></td>' +
+        '<td data-label="Review state" class="col-state"></td>' +
+        '<td data-label="Actions" class="col-actions">' +
           actionLinks +
           '<a href="' + settingsLink + '" class="btn-repo-settings" title="Repository settings" aria-label="Repository settings">' +
             '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">' +
@@ -1242,7 +1244,10 @@
 
     // Wire up buttons
     row.querySelector('.btn-confirm-yes').addEventListener('click', async function () {
+      if (this.disabled) return;
       this.disabled = true;
+      this.textContent = 'Removing…';
+      this.setAttribute('aria-busy', 'true');
       row.querySelector('.btn-confirm-no').disabled = true;
       try {
         const response = await fetch('/api/worktrees/' + reviewId, {
@@ -1256,6 +1261,7 @@
 
         // Reload the recent reviews list
         await loadRecentReviews();
+        window.reviewWorkspace?.loadReviews();
 
       } catch (error) {
         console.error('Error deleting review:', error);
@@ -1288,6 +1294,7 @@
    * Fetch and display recent reviews (initial load).
    * Resets pagination state and renders the full table from scratch.
    */
+  window.refreshRecentReviews = () => loadRecentReviews();
   async function loadRecentReviews() {
 
     const container = document.getElementById('recent-reviews-container');
@@ -1329,12 +1336,11 @@
         '<table class="recent-reviews-table">' +
           '<thead>' +
             '<tr>' +
-              '<th>Repository</th>' +
-              '<th>PR</th>' +
-              '<th>Title</th>' +
-              '<th>Author</th>' +
-              '<th>Last Opened</th>' +
-              '<th>Actions</th>' +
+              '<th scope="col" class="col-identity">Pull request</th>' +
+              '<th scope="col">First requested</th>' +
+              '<th scope="col">AI review</th>' +
+              '<th scope="col">Review state</th>' +
+              '<th scope="col">Actions</th>' +
             '</tr>' +
           '</thead>' +
           '<tbody id="recent-reviews-tbody">' +
@@ -1504,6 +1510,7 @@
     event.preventDefault();
 
     const input = document.getElementById('pr-url-input');
+    if (input.disabled) return;
     const url = input.value.trim();
 
     // Clear previous errors
@@ -1518,7 +1525,7 @@
     }
 
     // Show loading state while parsing
-    setFormLoading('pr', true, 'Validating PR URL...');
+    setFormLoading('pr', true, 'Validating PR URL…');
 
     // Parse the URL using the backend API
     const parsed = await parsePRUrl(url);
@@ -1957,7 +1964,7 @@
 
     // Enable/disable action buttons
     for (var i = 0; i < this._actionBtns.length; i++) {
-      this._actionBtns[i].disabled = count === 0;
+      this._actionBtns[i].disabled = Boolean(this.busy) || count === 0;
     }
 
     // Exit confirming state if count drops to 0
@@ -2027,10 +2034,25 @@
     this._confirmNo.parentNode.replaceChild(newConfirmNo, this._confirmNo);
     this._confirmNo = newConfirmNo;
 
-    newConfirmYes.addEventListener('click', function () {
-      self._inlineEl.classList.remove('confirming');
-      self._confirming = false;
-      onConfirm();
+    newConfirmYes.addEventListener('click', async function () {
+      if (self.busy) return;
+      self.busy = true;
+      newConfirmYes.disabled = true;
+      newConfirmNo.disabled = true;
+      newConfirmYes.textContent = 'Removing…';
+      self._inlineEl.setAttribute('aria-busy', 'true');
+      try {
+        await onConfirm();
+      } finally {
+        self.busy = false;
+        newConfirmYes.disabled = false;
+        newConfirmNo.disabled = false;
+        newConfirmYes.textContent = 'Confirm';
+        self._inlineEl.removeAttribute('aria-busy');
+        self._inlineEl.classList.remove('confirming');
+        self._confirming = false;
+        self._updateInlineActions();
+      }
     });
 
     newConfirmNo.addEventListener('click', function () {
@@ -2061,6 +2083,7 @@
     tbodyId: 'local-reviews-tbody',
     rowIdAttr: 'sessionId',
     actions: [
+      { label: 'Analyze', className: 'btn-bulk-analyze', handler: handleBulkAnalyze },
       { label: 'Remove local history', className: 'btn-bulk-delete', handler: handleBulkDeleteLocal }
     ]
   });
@@ -2237,7 +2260,7 @@
   }
 
   function getCommonRepository(rows) {
-    if (rows.length === 0) return null;
+    if (rows.length === 0 || rows.some(row => row.local)) return null;
     var first = rows[0];
     var firstKey = (first.owner + '/' + first.repo).toLowerCase();
     for (var i = 1; i < rows.length; i++) {
@@ -2324,7 +2347,7 @@
       repoInstructions: commonRepo ? (repoSettings?.default_instructions || '') : '',
       lastInstructions: lastInstructions,
       defaultCouncilId: commonRepo ? (repoSettings?.default_council_id || null) : null,
-      hasPr: true,
+      hasPr: !rows.every(row => row.local),
       hasGithubToken: window.__pairReview?.hasGithubToken !== false
     });
 
@@ -2340,18 +2363,6 @@
     return config;
   }
 
-  async function storeBulkAnalysisConfig(config) {
-    var response = await fetch('/api/bulk-analysis-configs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ analysisConfig: config })
-    });
-    var data = await response.json().catch(function () { return {}; });
-    if (!response.ok || !data.id) {
-      throw new Error(data.error || 'Failed to save analysis settings');
-    }
-    return data.id;
-  }
 
   /**
    * Open multiple review URLs via the server-side /api/bulk-open endpoint.
@@ -2377,27 +2388,37 @@
   }
 
   async function handleBulkAnalyze(selectedIds, selectionInstance) {
-    var rows = getSelectedCollectionRows(selectedIds, selectionInstance.config.tbodyId);
-    if (rows.length === 0) return;
-
-    if (!window.AnalysisConfigModal) {
-      selectionInstance.exit();
-      bulkOpenUrls(buildReviewUrlsFromRows(rows, '?analyze=true'));
+    if (selectionInstance.busy) return;
+    var rows = selectionInstance === localSelection
+      ? [...selectedIds].map(id => ({ local: true, reviewId: id, url: '/local/' + encodeURIComponent(id) }))
+      : getSelectedCollectionRows(selectedIds, selectionInstance.config.tbodyId).map(row => ({
+        ...row, url: buildReviewUrlsFromRows([row])[0]
+      }));
+    if (!rows.length) return;
+    if (!window.AnalysisConfigModal || !window.BulkAnalysisLauncher) {
+      window.toast?.error('Analysis settings are unavailable. Reload this page before starting analysis.');
       return;
     }
-
+    var launcher = window.bulkAnalysisLauncher ||= new window.BulkAnalysisLauncher(window.reviewWorkspace);
+    if (launcher.preparing || launcher.configuring) {
+      window.toast?.error('A batch is still being prepared. Follow Bulk analysis progress before starting another.');
+      return;
+    }
+    var context = window.reviewWorkspace?.contextVersion || 0;
+    launcher.configuring = true;
+    selectionInstance.busy = true;
+    selectionInstance._updateInlineActions();
     try {
       var config = await showBulkAnalysisConfig(rows);
-      if (!config) return;
-
-      var configId = await storeBulkAnalysisConfig(config);
-      var query = '?analyze=true&analysisConfigId=' + encodeURIComponent(configId);
-      var urls = buildReviewUrlsFromRows(rows, query);
-      selectionInstance.exit();
-      bulkOpenUrls(urls);
+      if (!config || context !== (window.reviewWorkspace?.contextVersion || 0)) return;
+      await launcher.start(rows, config);
+      // Keep selection and failure results visible; never silently discard targets.
     } catch (error) {
-      console.error('Bulk analyze error:', error);
-      if (window.toast) window.toast.error('Failed to start bulk analysis: ' + error.message);
+      if (context === (window.reviewWorkspace?.contextVersion || 0)) window.toast?.error('Failed to start bulk analysis: ' + error.message);
+    } finally {
+      launcher.configuring = false;
+      selectionInstance.busy = false;
+      selectionInstance._updateInlineActions();
     }
   }
 
@@ -3098,7 +3119,7 @@
   // Project the shared per-run snapshot rather than clearing a review's spinner
   // whenever any one of its concurrent analyses ends.
   window.addEventListener('workspaceActivity', function (event) {
-    const ids = new Set(event.detail.available ? event.detail.runs.filter(run => run.observation === 'live' && ['running', 'cancellation_requested'].includes(run.status)).map(run => run.reviewId) : []);
+    const ids = new Set(event.detail.available ? event.detail.runs.filter(run => run.observation === 'live' && ['queued', 'starting', 'running', 'cancellation_requested'].includes(run.status)).map(run => run.reviewId) : []);
     for (const id of activeSpinnerReviewIds) if (!ids.has(id)) {
       const row = findRowByReviewId(id);
       if (row) removeSpinnerFromRow(row, id);

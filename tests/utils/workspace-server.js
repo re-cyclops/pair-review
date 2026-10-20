@@ -49,7 +49,7 @@ const state = { calls: [], viewer: 'reviewer', readError: null, partialAfter: nu
 const readCalls = [];
 let activeReads = 0;
 let maxConcurrentReads = 0;
-const key = args => `${args.owner}/${args.repo}#${args.pull_number || args.prNumber || args.number}`;
+const key = args => `${args.owner}/${args.repo}#${args.pull_number || args.issue_number || args.prNumber || args.number}`;
 const copy = value => JSON.parse(JSON.stringify(value));
 const response = data => ({ data: copy(data), headers: {} });
 let id = saved.nextId || 1000;
@@ -99,7 +99,11 @@ const octokit = {
       listReviewComments: read(args => [...state.reviews.values()].filter(review => review.key === key(args)).flatMap(review => review.comments)),
       listFiles: read(() => files.map(filename => ({ filename, status: 'modified', additions: changedLines.length, deletions: changedLines.length })))
     },
-    issues: { listComments: read(() => []) },
+    issues: { listComments: read(() => []), listEventsForTimeline: read(args => {
+      const pr = state.prs.get(key(args));
+      if (pr.timelineError) throw Object.assign(new Error('Synthetic timeline unavailable'), { status: pr.timelineError });
+      return pr.timeline || [];
+    }) },
     repos: {
       get: read(({ owner, repo }) => {
         const pr = [...state.prs.values()].find(value => value.repository === `${owner}/${repo}`);
@@ -282,7 +286,15 @@ async function main() {
         head: { ref: 'review-head', sha: headSha }, merge_commit_sha: null, mergeable: index === 2 ? null : true,
         html_url: `https://github.com/${repository}/pull/${number}`, created_at: now, updated_at: now, changed_files: files.length,
         additions: changedLines.length * files.length, deletions: changedLines.length * files.length,
-        requests: { users: index === 0 ? [{ login: 'reviewer' }] : [], teams: index === 2 ? [{ id: 7, slug: 'maintainers' }] : [] } };
+        requests: { users: index === 0 ? [{ login: 'reviewer' }] : [], teams: index === 2 ? [{ id: 7, slug: 'maintainers' }] : [] },
+        timeline: index === 0 ? [
+          { event: 'review_requested', created_at: new Date(fixtureNow - 86400000 * 3).toISOString(), requested_reviewer: { login: 'reviewer' }, review_requester: { login: 'maintainer', name: 'Morgan Maintainer', type: 'User' } },
+          { event: 'review_request_removed', created_at: new Date(fixtureNow - 86400000 * 2).toISOString(), requested_reviewer: { login: 'reviewer' } },
+          { event: 'review_requested', created_at: now, requested_reviewer: { login: 'reviewer' }, actor: { login: 'contributor' } }
+        ] : index === 2 ? [
+          { event: 'review_requested', created_at: new Date(fixtureNow - 86400000).toISOString(), requested_team: { id: 7, slug: 'maintainers', name: 'Maintainers' }, actor: { login: 'contributor' } }
+        ] : [],
+        timelineError: index === 3 ? 403 : null };
       state.prs.set(`${repository}#${number}`, pr);
       const opinions = index === 0 ? [['kim', 'APPROVED'], ['pat', 'APPROVED']]
         : index === 2 ? [['reviewer', 'APPROVED'], ['maintainer', 'CHANGES_REQUESTED']]

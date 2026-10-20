@@ -10,7 +10,6 @@ class ConfirmDialog {
     this.onConfirm = null;
     this.onSecondary = null;
     this.onCancel = null;
-    this.escapeHandler = null;
     /**
      * Opt-in checkbox input (see `options.checkboxLabel`). Null whenever the
      * current dialog has no checkbox. Rebuilt on every show() and torn down on
@@ -34,18 +33,20 @@ class ConfirmDialog {
     }
 
     // Create modal container
-    const modalContainer = document.createElement('div');
+    const modalContainer = document.createElement('dialog');
     modalContainer.id = 'confirm-dialog';
     modalContainer.className = 'modal-overlay confirm-dialog-overlay';
+    modalContainer.setAttribute('aria-labelledby', 'confirm-dialog-title');
+    modalContainer.setAttribute('aria-describedby', 'confirm-dialog-message');
     modalContainer.style.display = 'none';
 
     modalContainer.innerHTML = `
       <div class="modal-backdrop" data-action="cancel"></div>
-      <div class="modal-container confirm-dialog-container" style="width: 400px; height: auto;">
+      <div class="modal-container confirm-dialog-container">
         <div class="modal-header">
           <h3 id="confirm-dialog-title">Confirm Action</h3>
-          <button class="modal-close-btn" data-action="cancel" title="Close">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <button type="button" class="modal-close-btn" data-action="cancel" aria-label="Close confirmation">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
               <path d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 01-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"/>
             </svg>
           </button>
@@ -56,11 +57,11 @@ class ConfirmDialog {
         </div>
 
         <div class="modal-footer">
-          <button class="btn btn-secondary" data-action="cancel">Cancel</button>
-          <button class="btn btn-secondary" id="confirm-dialog-secondary-btn" data-action="secondary" style="display: none;">
+          <button type="button" class="btn btn-secondary" data-action="cancel" autofocus>Cancel</button>
+          <button type="button" class="btn btn-secondary" id="confirm-dialog-secondary-btn" data-action="secondary" style="display: none;">
             Secondary
           </button>
-          <button class="btn btn-danger" id="confirm-dialog-btn" data-action="confirm">
+          <button type="button" class="btn btn-danger" id="confirm-dialog-btn" data-action="confirm">
             Confirm
           </button>
         </div>
@@ -87,28 +88,12 @@ class ConfirmDialog {
       }
     });
 
-    // Handle keyboard shortcuts with a stored reference for cleanup
-    this.keyHandler = (e) => {
-      if (!this.isVisible) return;
-
-      if (e.key === 'Escape') {
-        this.handleCancel();
-      } else if (e.key === 'Enter') {
-        // Only trigger if confirm button exists and is enabled, and not in a textarea
-        const confirmBtn = this.dialogElement?.querySelector('.confirm-btn') ||
-                           this.modal?.querySelector('#confirm-dialog-btn');
-        if (confirmBtn && !confirmBtn.disabled && window.getComputedStyle(confirmBtn).display !== 'none') {
-          // Don't intercept Enter in textareas or input fields
-          if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
-          e.preventDefault();
-          this.handleConfirm();
-        }
-      }
-    };
-    document.addEventListener('keydown', this.keyHandler);
-
-    // Keep escapeHandler reference for backward compatibility
-    this.escapeHandler = this.keyHandler;
+    // Native modal focus containment and button activation keep Enter on Cancel
+    // from accepting a destructive action.
+    this.modal.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      this.handleCancel();
+    });
   }
 
   /**
@@ -223,6 +208,8 @@ class ConfirmDialog {
       // Show modal
       this.modal.style.display = 'flex';
       this.isVisible = true;
+      this.modal.showModal();
+      cancelBtn?.focus();
     });
   }
 
@@ -303,6 +290,7 @@ class ConfirmDialog {
   hide() {
     if (!this.modal) return;
 
+    this.modal.close();
     this.modal.style.display = 'none';
     this.isVisible = false;
     this.onConfirm = null;

@@ -96,7 +96,7 @@ test('shows old and unknown finding revisions without rewriting the findings', a
   const unknown = Number(insert.run('Unrecorded revision finding', 'Imported finding text.', null).lastInsertRowid);
   await page.goto(url);
   await waitForDiffToRender(page);
-  await page.getByRole('button', { name: 'Toggle Review panel', exact: true }).click();
+  await page.locator('#ai-panel-toggle').click();
   const oldFinding = page.locator(`.finding-item[data-id="${old}"]`);
   const unknownFinding = page.locator(`.finding-item[data-id="${unknown}"]`);
   await expect(oldFinding.locator('.ai-revision-warning')).toBeVisible();
@@ -104,7 +104,8 @@ test('shows old and unknown finding revisions without rewriting the findings', a
   await expect(unknownFinding.locator('.ai-revision-warning')).toBeVisible();
   await expect(unknownFinding).toContainText('Revision unknown');
   await oldFinding.click();
-  await expect(page.locator(`#diff-container [data-suggestion-id="${old}"] .ai-suggestion-header .ai-revision-warning`)).toBeVisible();
+  await expect(page.getByText(/original diff was not saved/i)).toBeVisible();
+  await expect(page.locator('#diff-container .ai-suggestion')).toHaveCount(0);
   expect(testServer.db.prepare('SELECT body, commit_sha FROM comments WHERE id = ?').get(old))
     .toEqual({ body: 'Original finding text.', commit_sha: 'c'.repeat(40) });
   expect(testServer.reviewHost.state.calls).toEqual([]);
@@ -112,16 +113,17 @@ test('shows old and unknown finding revisions without rewriting the findings', a
 
 test('keeps refreshed findings on the selected run when an older response arrives late', async ({ page, testServer }) => {
   const seed = (id, day, body) => {
-    testServer.db.prepare(`INSERT INTO analysis_runs (id, review_id, status, provider, model, completed_at)
-      VALUES (?, 1, 'completed', 'omp', ?, ?)`).run(id, id, `2026-01-${day}T00:00:00.000Z`);
+    const head = testServer.reviewHost.state.head;
+    testServer.db.prepare(`INSERT INTO analysis_runs (id, review_id, status, provider, model, completed_at, head_sha)
+      VALUES (?, 1, 'completed', 'omp', ?, ?, ?)`).run(id, id, `2026-01-${day}T00:00:00.000Z`, head);
     testServer.db.prepare(`INSERT INTO comments
-      (review_id, source, ai_run_id, file, line_start, line_end, side, type, title, body, status)
-      VALUES (1, 'ai', ?, 'src/main.js', 21, 21, 'RIGHT', 'bug', ?, ?, 'active')`).run(id, id, body);
+      (review_id, source, ai_run_id, file, line_start, line_end, side, type, title, body, status, commit_sha)
+      VALUES (1, 'ai', ?, 'src/main.js', 21, 21, 'RIGHT', 'bug', ?, ?, 'active', ?)`).run(id, id, body, head);
   };
   seed('older-result', '01', 'Earlier finding text.');
   await page.goto(url);
   await waitForDiffToRender(page);
-  await page.getByRole('button', { name: 'Toggle Review panel', exact: true }).click();
+  await page.locator('#ai-panel-toggle').click();
   await expect(page.locator('#diff-container')).toContainText('Earlier finding text.');
   let release, requested;
   const held = new Promise(resolve => { release = resolve; });
@@ -140,7 +142,6 @@ test('keeps refreshed findings on the selected run when an older response arrive
     await arrived;
     seed('newer-result', '02', 'Current finding text.');
     await page.evaluate(() => window.prManager.analysisHistoryManager.refresh({ switchToNew: true }));
-    await expect(page.getByRole('button', { name: /newer-result/ })).toBeVisible();
     await page.getByRole('button', { name: 'Refresh PR', exact: true }).click();
     await expect(page.locator('#diff-container')).toContainText('Current finding text.');
     release();
@@ -175,4 +176,28 @@ test('keeps refreshed findings on the selected run when an older response arrive
   });
   await expect(page.locator('#diff-container')).toContainText('Current finding text.');
   await expect(page.locator('#diff-container')).not.toContainText('Earlier finding text.');
+  // Replacing the diff must invalidate a pending mount even before another AI
+  // request begins. Use the real renderer; hold only its scheduled body work.
+  await page.evaluate(async () => {
+    const manager = window.prManager;
+    const older = await (await fetch('/api/reviews/1/suggestions?runId=older-result')).json();
+    const original = manager.ensureFileBodyRendered;
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    manager.ensureFileBodyRendered = async function(file) {
+      manager.ensureFileBodyRendered = original;
+      await held;
+      return original.call(manager, file);
+    };
+    const pending = manager.displayAISuggestions(older.suggestions);
+    try {
+      manager.renderDiff({ changed_files: manager.diffFiles });
+    } finally {
+      release();
+      await pending;
+      manager.ensureFileBodyRendered = original;
+    }
+  });
+  await expect(page.locator('#diff-container .ai-suggestion')).toHaveCount(0);
+  await expect(page.locator('#findings-list')).toContainText('newer-result');
 });

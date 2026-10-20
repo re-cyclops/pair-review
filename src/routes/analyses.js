@@ -40,6 +40,7 @@ const { reviewScope } = require('../local-scope');
 const { validateCouncilConfig, normalizeCouncilConfig } = require('./councils');
 const { TIERS, TIER_ALIASES, VALID_TIERS, resolveTier } = require('../ai/prompts/config');
 const activity = require('../analysis-activity');
+const { actualModelsForRun } = require('../ai/model-evidence');
 
 
 const router = express.Router();
@@ -52,6 +53,9 @@ function enrichRun(run) {
   if (!run) return null;
   return {
     ...run,
+    requestedProvider: run.provider,
+    requestedModel: run.model,
+    actualModels: actualModelsForRun(run),
     levels_config: run.levels_config ? JSON.parse(run.levels_config) : null,
     level_outcomes: run.level_outcomes ? JSON.parse(run.level_outcomes) : null,
     tier: run.tier ?? (run.provider && run.model ? getTierForModel(run.provider, run.model) : null)
@@ -127,6 +131,7 @@ router.get('/api/analyses/runs/latest', async (req, res) => {
 
 /**
  * Get a specific analysis run by ID
+ * Query param: includeDiff=true includes the immutable diff captured for this run.
  */
 router.get('/api/analyses/runs/:runId', async (req, res) => {
   try {
@@ -134,7 +139,7 @@ router.get('/api/analyses/runs/:runId', async (req, res) => {
     const db = req.app.get('db');
 
     const analysisRunRepo = new AnalysisRunRepository(db);
-    const run = await analysisRunRepo.getById(runId);
+    const run = await analysisRunRepo.getById(runId, { includeDiff: req.query.includeDiff === 'true' });
 
     if (!run) {
       return res.status(404).json({ error: 'Analysis run not found' });

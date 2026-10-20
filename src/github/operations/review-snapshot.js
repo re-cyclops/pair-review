@@ -61,6 +61,45 @@ const readReviewHistory = (client, identity, login) => section(async () => {
   };
 });
 
+// Current requests are responsibility evidence, not a historical clock.
+const readReviewRequest = async (client, identity, viewer) => {
+  const empty = { firstRequestedAt: null, source: null, team: null, requestedBy: null };
+  const history = await section(async () => {
+    const result = await pages(client.octokit.rest.issues?.listEventsForTimeline, {
+      owner: identity.owner, repo: identity.repo, issue_number: identity.number
+    });
+    if (!result.complete) return { availability: 'partial', reason: 'incomplete-history' };
+    if (!viewer.login) return { availability: 'partial', reason: 'unknown-viewer' };
+    const events = result.items.filter(event => event.event === 'review_requested');
+    const login = viewer.login.toLowerCase();
+    const direct = events.filter(event => event.requested_reviewer?.login?.toLowerCase() === login);
+    // An unattributed user request might have been an earlier request to this viewer.
+    if (events.some(event => !event.requested_team && !event.requested_reviewer?.login)) {
+      return { availability: 'partial', reason: 'unknown-request-target' };
+    }
+    let candidates = direct;
+    let source = 'direct';
+    if (!direct.length) {
+      const teams = events.filter(event => event.requested_team);
+      if (teams.length && (viewer.teams?.availability !== 'known' || teams.some(event => event.requested_team.id == null))) {
+        return { availability: 'partial', reason: 'unknown-team-membership' };
+      }
+      candidates = teams.filter(event => viewer.teams?.ids?.includes(event.requested_team.id));
+      source = 'team';
+    }
+    if (!candidates.length) return {};
+    if (candidates.some(event => typeof event.created_at !== 'string' || !Number.isFinite(Date.parse(event.created_at)))) {
+      return { availability: 'partial', reason: 'invalid-request-date' };
+    }
+    const first = candidates.reduce((earliest, event) => Date.parse(event.created_at) < Date.parse(earliest.created_at) ? event : earliest);
+    const team = first.requested_team;
+    return { firstRequestedAt: new Date(first.created_at).toISOString(), source,
+      team: source === 'team' ? { id: team.id, slug: team.slug || null, name: team.name || null } : null,
+      requestedBy: person(first.review_requester) || person(first.actor) };
+  });
+  return { ...empty, ...history };
+};
+
 const readThreads = async (client, identity) => {
   // The GitHub review-thread connection is not assumed on compatible REST hosts.
   if (client.apiHost) return { availability: 'unavailable', reason: 'host-capability-unavailable', unresolved: null };
@@ -137,7 +176,7 @@ const collect = async (client, identity, accountKey) => {
       const { data } = await client.octokit.rest.users.getAuthenticated();
       const teams = await section(async () => {
         const result = await pages(client.octokit.rest.teams?.listForAuthenticatedUser, {});
-        return { availability: result.complete ? 'known' : 'partial', ids: result.items.map(team => team.id) };
+        return { availability: result.complete && result.items.every(team => team.id != null) ? 'known' : 'partial', ids: result.items.map(team => team.id) };
       });
       return { ...person(data), teams };
     }) };
@@ -146,6 +185,7 @@ const collect = async (client, identity, accountKey) => {
   }
   const viewerIdentity = await account.promise;
   const reviews = await readReviewHistory(client, identity, viewerIdentity.login);
+  const reviewRequest = await readReviewRequest(client, identity, viewerIdentity);
   const requests = await section(async () => {
     const users = [];
     const teams = [];
@@ -211,7 +251,7 @@ const collect = async (client, identity, accountKey) => {
     approvals: { ...reviews, observedCount: reviews.availability === 'known' ? reviews.approving.length : null,
       requiredCount: policy.availability === 'known' ? policy.requiredApprovalCount : null },
     viewer: { identity: viewerIdentity, self: own, requestedDirectly: direct, requestedTeams: requests.teams ?? null,
-      effectiveReview: viewerReview || null, pendingReview: reviews.pending ?? null, newRevision,
+      reviewRequest, effectiveReview: viewerReview || null, pendingReview: reviews.pending ?? null, newRevision,
       reason, requestedViaTeam: viaTeam, needsYou: closed || own ? false : direct || viaTeam || changeRequested || reviews.pending ? true : responsibilityKnown ? false : null, soleBlocker: null },
     requests, threads, checks, testMerge, policy: { ...policy, requiredChecks: required },
     merge: { conflict: pr.mergeable == null ? null : !pr.mergeable, providerDecision: threads.providerDecision ?? null,

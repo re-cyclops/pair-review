@@ -15,6 +15,7 @@
 
 const logger = require('../utils/logger');
 const { extractJSON } = require('../utils/json-extractor');
+const { mergeModels, modelsFromEvent, recordModels } = require('./model-evidence');
 
 // Keep raw stream capture bounded so large JSONL sessions cannot exhaust V8's
 // maximum string size. Assistant text is still extracted incrementally from all
@@ -261,6 +262,9 @@ function accumulatePiResponseLine(line, state, levelPrefix, cliName = 'Pi') {
   let parseResult;
   try {
     const event = JSON.parse(line);
+    const models = modelsFromEvent(event);
+    state.actualModels = mergeModels(state.actualModels, models);
+    recordModels(models);
     state.textContent += extractPiEventText(event, state.seenTexts);
     parseResult = { status: 'parsed', value: event };
   } catch {
@@ -354,26 +358,27 @@ function appendPiChunkToLineBuffer(state, chunk, levelPrefix, cliName = 'Pi') {
  * @param {string} [cliName='Pi'] - CLI name used in log and error messages
  * @returns {{success: boolean, data?: Object, error?: string, textContent?: string}}
  */
-function finalizePiResponseParsing({ textContent, rawOutput, rawOutputTruncated = false }, level, levelPrefix, cliName = 'Pi') {
+function finalizePiResponseParsing({ textContent, rawOutput, rawOutputTruncated = false, actualModels = [] }, level, levelPrefix, cliName = 'Pi') {
   if (textContent) {
     const extracted = extractJSON(textContent, level, levelPrefix);
     if (extracted.success) {
-      return extracted;
+      return { ...extracted, actualModels: mergeModels(actualModels) };
     }
 
     logger.warn(`${levelPrefix} Text content is not JSON, treating as raw text`);
-    return { success: false, error: 'Text content is not valid JSON', textContent };
+    return { success: false, error: 'Text content is not valid JSON', textContent, actualModels: mergeModels(actualModels) };
   }
 
   if (rawOutputTruncated) {
     logger.warn(`${levelPrefix} ${cliName} CLI raw-output fallback was truncated before assistant text could be recovered`);
     return {
       success: false,
+      actualModels: mergeModels(actualModels),
       error: `${cliName} CLI raw-output fallback was truncated before assistant text could be recovered`
     };
   }
 
-  return extractJSON(rawOutput, level, levelPrefix);
+  return { ...extractJSON(rawOutput, level, levelPrefix), actualModels: mergeModels(actualModels) };
 }
 
 /**

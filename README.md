@@ -589,6 +589,16 @@ nor changes an existing run. Supported in-app settings retain their immediate
 behavior. A configured `default` is not proof of which model served a request,
 and instruction/tool restrictions are not an OS sandbox.
 
+OMP and Pi reviews record serving provider/model identities from successful
+assistant execution events. The inbox, analysis history and run preview show
+those observed models, including fallback models and all observed council
+participants; previews label the requested configuration separately. The recent
+and analysis APIs expose `actualModels: [{provider, model}]` alongside
+`requestedProvider` and `requestedModel`. Evidence persists with the run, not
+today's default. Legacy runs and providers without execution metadata display
+**model not recorded**; an empty `actualModels` array means unknown, not that
+no model ran.
+
 ### Checks on selected outgoing prose
 
 Structural prose checks are opt-in, independent of the public comment formatter.
@@ -873,6 +883,46 @@ The CLI command used for a provider follows this precedence (highest to lowest):
 
 ## Features
 
+### Review inbox and revision clarity
+
+The inbox separates **Pull request**, **First requested**, **AI review**, and
+**Review state**. At narrow widths, the same information becomes labelled rows.
+Selection, filters, saved drafts, and bulk analysis remain available. Search and
+filter controls share a consistent baseline; matching/loaded counts sit beside
+the active tab's selection controls. **Refresh status** updates visible PR
+evidence, and **Sort by next action** explicitly reapplies priority ordering.
+
+**First requested** shows the earliest recorded request to your GitHub account,
+including its date, time, time zone, and requester when available. Removing and
+re-requesting your review does not reset it. If complete history has no direct
+request, a matching current team's request is shown explicitly as team history,
+not as proof of your historical team membership. Incomplete or unavailable
+history includes an explanation rather than the PR's creation time. If a running
+server predates request-history support, rows show **Server update needed** and
+one notice explains the recovery: finish active analyses, restart pair-review,
+then reload the page. Reloading alone updates frontend assets, not server code.
+
+**Review PR** is an action, not a claim that someone requested changes.
+Actual changes-requested decisions name their reviewers separately from requests
+for your review, your own decision, CI, and AI findings.
+
+The **AI review** column shows launch progress, results, and the observed model.
+Older runs without execution evidence remain **model not recorded**. On PR and
+Local review pages, the **AI findings** button shows the actionable finding count
+and opens the AI list; selecting a finding navigates to its code. No review,
+zero findings, a running review, and unavailable results have distinct states.
+On phones, findings use the main pane; choosing a current finding returns to its
+code, and closing the list restores the diff.
+Clicking **Edit** on an AI suggestion brings its editor into view below the sticky
+headers and focuses the text field, without animated scrolling.
+
+A stale snapshot explains the viewed and latest revisions and offers
+**Update to latest commits**. Updating retains saved drafts and analysis history;
+an open unsaved editor pauses replacement. Existing safe automatic refresh still
+applies when there is no session work to preserve. Old AI findings are labelled
+historical and open their saved code in a read-only view, never as annotations
+on unrelated current lines. Legacy runs without saved code explain that limit.
+
 ### Keyboard navigation and display
 
 Open the shared command palette with `Cmd+K` on macOS or `Ctrl+K` elsewhere.
@@ -889,6 +939,25 @@ Unchanged-line expansion controls support both `Enter` and `Space`.
 The shared workspace respects reduced motion and supports light/dark themes
 and browser zoom. Dialog contents scroll within the viewport; the underlying
 page does not need horizontal scrolling at 200% zoom.
+
+### Bulk analysis from the inbox
+
+Select PR or Local reviews, choose **Analyze**, and confirm a single model,
+saved council, council template, or advanced configuration. The inbox prepares
+missing PR checkouts and starts each analysis directly; opening browser tabs is
+not required, including when the server uses `PAIR_REVIEW_NO_OPEN=1`.
+
+The **Bulk analysis** summary and each selected row show preparation, server
+acceptance, live analysis stages, and terminal results. Expand **Target details
+and failures** for per-review errors or use **Open Activity** for run details.
+Keep the inbox open while preparation and submission are pending. Accepted runs
+continue on the server, and their activity is restored after reloading.
+
+Failures do not discard successful launches or trigger automatic retries.
+An unknown launch outcome requires inspecting Activity before retrying: the
+server may already have accepted the request. Already-active targets are not
+submitted again. Stale or unverifiable Local diffs must be opened first to
+refresh the diff or explicitly choose **Analyze Anyway**.
 
 ### Durable activity and read-only review evidence
 
@@ -967,6 +1036,14 @@ Bulk removal keeps blocked reviews selected, including those hidden by filters.
 The inbox retains a named result for each attempted review after the table
 refreshes; only successfully removed reviews leave the selection. Changing a
 filter does not discard those results. Cancelling selection clears them.
+
+**Clear approved** includes approved reviews with saved comments, review bodies
+or decisions. Its confirmation lists the affected PRs and draft counts; Cancel
+preserves them. After confirmation, the control shows progress and prevents
+duplicate requests. Cleanup runs in batches of at most 50, removes only successful
+items, and leaves blocked reviews visible with named errors or checkout warnings.
+It operates on loaded reviews whose approval evidence has been observed; it does
+not fetch every historical review or change GitHub approvals.
 
 A server cannot close or resume an active chat whose executor it does not own.
 Closing remains active until the provider acknowledges exit; a failed close
@@ -1083,6 +1160,41 @@ There are three ways to configure which models run your analysis, each building 
 **Advanced** — For each enabled analysis level, pick different provider+model combinations. Level 1 might use a fast model while Level 3 uses a thorough one. Supports the same per-model options as Review Council (timeout, instructions, tier). Consolidation model is selected separately. Results consolidate first within each level (if multiple reviewers), then across levels.
 
 The key difference from Review Council is consolidation order: Advanced consolidates within each level first, then across levels, so there are no per-reviewer rollups.
+
+#### Built-in four-model councils
+
+In either PR or Local mode, open **Analyze → Council → Start from a template**:
+
+| Template | Enabled review levels | Tradeoff |
+| --- | --- | --- |
+| Four-model focused review | Changes and file context (1–2) | Less model usage than full review |
+| Four-model full review | Changes, file and codebase context (1–3) | Broader coverage and more model usage |
+
+Both templates use these four OMP reviewers at `high` reasoning effort with the
+Thorough prompt tier:
+
+- `zai/glm-5.3-flash:high`
+- `google-antigravity/gemini-3.8-flash:high`
+- `muse-code/muse-wonder-full-1.0:high`
+- `openai-codex/gpt-6.1-sol:high`
+
+Muse Wonder Full also consolidates the results. These are explicit model
+selectors, independent of shared OMP aliases and routing defaults.
+
+Change each reviewer's model, prompt tier, timeout or instructions; toggle review
+levels; or change the consolidator. **Analyze with Council** applies the current
+configuration without requiring a save. **Save** creates a named, reusable copy
+of a template; it never overwrites the template or an unrelated saved council.
+Select that copy from **Saved council** next time. **Save As** makes another copy.
+Saved councils can also be selected as repository/global defaults or applied
+through the CLI's `--list-councils` and `--council <handle>` options.
+
+Templates are not inserted into the saved-council database automatically. A
+configured model/provider missing from the current menu remains explicit rather
+than silently changing to a default; an unavailable provider is labeled as such.
+Model availability and OMP authentication still determine whether execution can
+succeed.
+
 
 **Example use cases:**
 

@@ -80,6 +80,7 @@ class AIPanel {
         } else {
             document.documentElement.style.setProperty('--ai-panel-width', `${this.getEffectivePanelWidth()}px`);
         }
+        this.updateFindingsAction();
     }
 
     /**
@@ -167,7 +168,7 @@ class AIPanel {
         }
 
         if (this.toggleBtn) {
-            this.toggleBtn.addEventListener('click', () => this.toggle());
+            this.toggleBtn.addEventListener('click', () => this.openFindings());
         }
 
         // AI Summary button
@@ -332,15 +333,54 @@ class AIPanel {
     }
 
     toggle() {
-        if (this.isCollapsed) {
-            this.expand();
-        } else {
-            this.collapse();
+        if (this.isCollapsed) this.expand();
+        else this.collapse();
+    }
+
+    openFindings() {
+        const aiButton = this.segmentControl?.querySelector('[data-segment="ai"]');
+        if (aiButton) this.onSegmentSelect(aiButton);
+        this.expand();
+        this.findingsList?.setAttribute('tabindex', '-1');
+        this.findingsList?.focus();
+    }
+
+    updateFindingsAction(state = this.analysisState) {
+        if (!this.toggleBtn) return;
+        const count = this.findings?.filter(f => f.status !== 'dismissed' && f.status !== 'adopted').length || 0;
+        const label = state === 'loading' ? 'AI review running'
+            : state === 'fetching' ? 'Loading AI findings'
+            : state === 'failed' ? 'AI review unavailable'
+            : state === 'complete' ? `${count} AI finding${count === 1 ? '' : 's'}`
+            : 'AI · Not reviewed';
+        this.toggleBtn.textContent = label + (this.historicalFindings ? ' · Historical' : '');
+        this.toggleBtn.title = 'Open AI findings';
+        this.toggleBtn.setAttribute('aria-label', `${this.toggleBtn.textContent}. Open AI findings`);
+        this.toggleBtn.setAttribute('aria-controls', 'ai-panel');
+        this.toggleBtn.setAttribute('aria-expanded', String(!this.isCollapsed));
+    }
+
+    setRevisionContext({ historical = false, message = '' } = {}) {
+        this.historicalFindings = historical;
+        this.revisionMessage = message;
+        this.updateFindingsAction();
+        if (this.findingsList) {
+            let notice = this.panel?.querySelector('.ai-revision-notice');
+            if (!notice) {
+                notice = document.createElement('p');
+                notice.className = 'ai-revision-notice';
+                notice.setAttribute('role', 'status');
+                this.findingsList.before(notice);
+            }
+            notice.textContent = message;
+            notice.hidden = !message;
         }
     }
 
+
     collapse() {
         this.isCollapsed = true;
+        this.toggleBtn?.setAttribute('aria-expanded', 'false');
         if (this.panel) {
             this.panel.classList.add('collapsed');
             if (this.panel.contains(document.activeElement)) {
@@ -355,6 +395,7 @@ class AIPanel {
 
     expand() {
         this.isCollapsed = false;
+        this.toggleBtn?.setAttribute('aria-expanded', 'true');
         if (this.panel) {
             this.panel.classList.remove('collapsed');
         }
@@ -421,6 +462,7 @@ class AIPanel {
      * @param {string} state - 'unknown' | 'loading' | 'complete' | 'none'
      */
     setAnalysisState(state) {
+        this.updateFindingsAction(state);
         this.analysisState = state;
         // Auto-expand panel when analysis starts
         if (state === 'loading' && this.isCollapsed) {
@@ -551,10 +593,11 @@ class AIPanel {
         // Only update analysisState if there are suggestions (analysis definitely ran).
         // If no suggestions, the caller (loadAISuggestions) should have already set
         // the correct state based on whether analysis has ever been run.
-        if (suggestions?.length > 0) {
+        if (suggestions?.length > 0 && !['failed', 'loading'].includes(this.analysisState)) {
             this.analysisState = 'complete';
         }
         this.updateSegmentCounts();
+        this.updateFindingsAction();
         this.renderFindings();
 
         // Try to restore previous selection, or auto-select first
@@ -647,6 +690,7 @@ class AIPanel {
      * - SplitButton counts = "how many comments will be submitted"
      */
     updateSegmentCounts() {
+        this.updateFindingsAction();
         const aiCount = this.findings.length;
         const commentsCount = this.comments.length;
         // External threads are PR-only; hidden in Local mode. The button is
@@ -803,6 +847,8 @@ class AIPanel {
                             <p>Analyzing PR...</p>
                         </div>
                     `;
+                } else if (this.analysisState === 'fetching' || this.analysisState === 'failed') {
+                    emptyContent = `<div class="empty-state-title">${this.analysisState === 'failed' ? 'Could not load AI review' : 'Loading AI findings…'}</div>`;
                 } else if (this.analysisState === 'complete') {
                     // Analysis ran, but no issues found
                     emptyContent = `
@@ -1210,7 +1256,82 @@ class AIPanel {
      * @param {('LEFT'|'RIGHT')} [side] - Diff side; resolved from the finding
      *   model (finding.side) when omitted, defaulting to 'RIGHT'.
      */
+    async openHistoricalFinding(findingId, file, line, side) {
+        const runId = window.prManager?.analysisHistoryManager?.getSelectedRunId();
+        const manager = window.prManager;
+        const reviewId = manager?.currentPR?.id;
+        if (!runId) {
+            window.toast?.showWarning('The original diff is unavailable for this legacy review.');
+            return;
+        }
+        try {
+            const response = await fetch(`/api/analyses/runs/${encodeURIComponent(runId)}?includeDiff=true`);
+            if (!response.ok) throw new Error('Could not load the saved review diff.');
+            const { run } = await response.json();
+            if (manager?.currentPR?.id !== reviewId || manager?.analysisHistoryManager?.getSelectedRunId() !== runId) return;
+            if (String(run?.id) !== String(runId) || String(run?.review_id) !== String(reviewId)) throw new Error('Saved review context does not match this review.');
+            if (typeof run?.diff !== 'string') throw new Error('The original diff was not saved for this review. Historical findings remain available in the list.');
+            const finding = this.findings.find(f => String(f.id) === String(findingId));
+            const targetSide = side || finding?.side || 'RIGHT';
+            const dialog = document.createElement('dialog');
+            dialog.className = 'historical-diff-dialog';
+            const heading = document.createElement('h2');
+            heading.id = 'historical-diff-title';
+            dialog.setAttribute('aria-labelledby', heading.id);
+            heading.textContent = `Historical AI review · ${run.head_sha?.slice(0, 7) || 'revision unknown'}`;
+            const location = document.createElement('p');
+            location.textContent = `${file || 'Review diff'}${line ? `:${line}` : ''} · Saved code, read-only`;
+            const close = document.createElement('button');
+            close.type = 'button';
+            close.className = 'btn';
+            close.textContent = 'Close saved diff';
+            const code = document.createElement('pre');
+            code.tabIndex = 0;
+            const patches = manager.parseUnifiedDiff(run.diff);
+            const patch = patches.get(file);
+            let oldLine = 0, newLine = 0, target = null, inHunk = false;
+            for (const text of (patch || run.diff).split('\n')) {
+                const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(text);
+                if (hunk) { oldLine = Number(hunk[1]); newLine = Number(hunk[2]); inHunk = true; }
+                const row = document.createElement('span');
+                row.textContent = text + '\n';
+                const content = inHunk && !hunk && [' ', '+', '-'].includes(text[0]);
+                const number = targetSide === 'LEFT' ? oldLine : newLine;
+                const onSide = targetSide === 'LEFT' ? text[0] !== '+' : text[0] !== '-';
+                if (!target && patch && content && onSide && number === Number(line)) {
+                    target = row;
+                    row.className = 'historical-diff-target';
+                }
+                code.appendChild(row);
+                if (content) {
+                    if (text[0] !== '+') oldLine++;
+                    if (text[0] !== '-') newLine++;
+                }
+            }
+            if (line && !target) location.textContent += ' · Line is outside the saved diff context.';
+            dialog.append(heading, location, close, code);
+            const previousFocus = document.activeElement;
+            close.onclick = () => dialog.close();
+            dialog.addEventListener('close', () => { dialog.remove(); previousFocus?.focus(); }, { once: true });
+            document.body.appendChild(dialog);
+            dialog.showModal();
+            close.focus();
+            target?.scrollIntoView({ block: 'center' });
+        } catch (error) {
+            window.toast?.showWarning(error.message);
+        }
+    }
+
+    _revealDiffForNavigation() {
+        if (window.matchMedia?.('(max-width: 900px)').matches) this.collapse();
+    }
+
     async scrollToFinding(findingId, file, line, side) {
+        if (this.historicalFindings) {
+            await this.openHistoricalFinding(findingId, file, line, side);
+            return;
+        }
+        this._revealDiffForNavigation();
         const myGen = ++this._navGen;
         // Resolve the diff side: explicit arg wins, else the finding's own side,
         // else RIGHT. Deletions live on the LEFT, so a hardcoded RIGHT would
@@ -1317,6 +1438,7 @@ class AIPanel {
      *   model (comment.side) when omitted, defaulting to 'RIGHT'.
      */
     async scrollToComment(commentId, file, line, side) {
+        this._revealDiffForNavigation();
         const myGen = ++this._navGen;
         // Resolve the diff side: explicit arg wins, else the comment's own side,
         // else RIGHT.
@@ -1420,6 +1542,7 @@ class AIPanel {
      * @param {string|number} line - Anchor line; used for file/line fallback
      */
     async scrollToExternalThread(threadId, source, file, line) {
+        this._revealDiffForNavigation();
         const myGen = ++this._navGen;
         // Expand the file first if it's collapsed
         const expansion = this.expandFileIfCollapsed(file);

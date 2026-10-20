@@ -56,6 +56,30 @@ describe('Council Routes', () => {
     await closeServer(server);
   });
 
+  it('offers templates without seeding, and saves edits as an independent user council', async () => {
+    const initial = await request(server).get('/api/councils');
+    expect(initial.status).toBe(200);
+    expect(initial.body.councils).toEqual([]);
+    expect(initial.body.templates.map(t => t.name)).toEqual([
+      'Four-model focused review', 'Four-model full review'
+    ]);
+    const template = initial.body.templates[1];
+    const original = structuredClone(template.config);
+    template.config.levels['3'] = false;
+    const saved = await request(server).post('/api/councils').send({
+      name: 'My adjusted full council', type: template.type, config: template.config
+    });
+    expect(saved.status).toBe(201);
+    const updated = await request(server).get('/api/councils');
+    expect(updated.body.councils).toHaveLength(1);
+    expect(updated.body.councils[0].config).toEqual(template.config);
+    expect(updated.body.templates[1].config).toEqual(original);
+    await request(server).delete(`/api/councils/${saved.body.council.id}`).expect(200);
+    const deleted = await request(server).get('/api/councils');
+    expect(deleted.body.councils).toEqual([]);
+    expect(deleted.body.templates[1].config).toEqual(original);
+  });
+
   describe('POST /api/councils', () => {
     it('should create a council and return 201', async () => {
       const res = await request(server)

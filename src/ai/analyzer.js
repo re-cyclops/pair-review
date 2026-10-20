@@ -29,6 +29,7 @@ const { safeParseJson } = require('../utils/safe-parse-json');
 const { GitWorktreeManager } = require('../git/worktree');
 const { buildSparseCheckoutGuidance } = require('./prompts/sparse-checkout-guidance');
 const { generateDiffForExecutable } = require('../routes/executable-analysis');
+const { withModelEvidence } = require('./model-evidence');
 
 
 // GIT_DIFF_FLAGS imported from ../git/diff-flags
@@ -461,6 +462,13 @@ class Analyzer {
    * @returns {Promise<Object>} Analysis results
    */
   async analyzeAllLevels(prId, worktreePath, prMetadata, progressCallback = null, instructions = null, changedFiles = null, options = {}) {
+    if (options.skipRunCreation && !options.runId) throw new Error('runId is required when skipRunCreation is true');
+    const runId = options.runId || uuidv4();
+    return withModelEvidence(this.db, runId, () => this._analyzeAllLevels(
+      prId, worktreePath, prMetadata, progressCallback, instructions, changedFiles, { ...options, runId }));
+  }
+
+  async _analyzeAllLevels(prId, worktreePath, prMetadata, progressCallback = null, instructions = null, changedFiles = null, options = {}) {
     const runId = options.runId || uuidv4();
     const { analysisId, skipRunCreation, skipLevel3, reviewerNum, excludePrevious, serverPort, githubClient } = options;
     const logPrefix = options.logPrefix || '';
@@ -3099,9 +3107,14 @@ File-level suggestions should NOT have a line number. They apply to the entire f
    * @returns {Promise<Object>} Analysis results { runId, suggestions, summary }
    */
   async runReviewerCentricCouncil(reviewContext, councilConfig, options = {}) {
+    const runId = options.runId || uuidv4();
+    return withModelEvidence(this.db, runId, () => this._runReviewerCentricCouncil(
+      reviewContext, councilConfig, options, runId));
+  }
+
+  async _runReviewerCentricCouncil(reviewContext, councilConfig, options = {}, parentRunId = options.runId || uuidv4()) {
     const { reviewId, worktreePath, prMetadata, changedFiles, instructions } = reviewContext;
     const { analysisId, progressCallback, excludePrevious, serverPort, githubClient } = options;
-    const parentRunId = options.runId || uuidv4();
 
     logger.section('Review Council Analysis Starting (Reviewer-Centric)');
     logger.info(`Review ID: ${reviewId}, Parent Run ID: ${parentRunId}`);
@@ -3677,6 +3690,12 @@ File-level suggestions should NOT have a line number. They apply to the entire f
    * @returns {Promise<Object>} Analysis results
    */
   async runCouncilAnalysis(reviewContext, councilConfig, options = {}) {
+    const runId = options.runId || uuidv4();
+    return withModelEvidence(this.db, runId, () => this._runCouncilAnalysis(
+      reviewContext, councilConfig, { ...options, runId }));
+  }
+
+  async _runCouncilAnalysis(reviewContext, councilConfig, options = {}) {
     const { reviewId, worktreePath, prMetadata, changedFiles, instructions } = reviewContext;
     const { analysisId, progressCallback, excludePrevious, serverPort, githubClient } = options;
     const runId = options.runId || uuidv4();

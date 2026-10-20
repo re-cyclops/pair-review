@@ -1063,14 +1063,13 @@
             white-space: nowrap;
         }
 
-        .col-local-name a {
+        .col-local-name > a {
             color: var(--ai-primary);
             text-decoration: none;
             font-weight: 500;
-            font-family: var(--font-mono);
         }
 
-        .col-local-name a:hover {
+        .col-local-name > a:hover {
             color: var(--ai-secondary);
             text-decoration: underline;
         }
@@ -1464,7 +1463,7 @@
     <link rel="stylesheet" href="/css/dashboard.css">
     <link rel="stylesheet" href="/css/workspace.css">
 </head>
-<body>
+<body class="review-inbox-page">
     <div class="app">
         <!-- Sticky Header -->
         <header class="header">
@@ -1703,6 +1702,7 @@
     <script src="/js/components/ReviewEvidence.js"></script>
     <script src="/js/modules/draft-store.js"></script>
     <script src="/js/components/Workspace.js"></script>
+    <script src="/js/components/BulkAnalysisLauncher.js"></script>
     <script src="/js/index.js"></script>
     <script src="/js/components/ReviewInbox.js"></script>
 </body>

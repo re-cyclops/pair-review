@@ -899,12 +899,12 @@ td.col-select {
     overflow-wrap: anywhere;
 }
 
-.col-local-name a {
+.col-local-name > a {
     color: var(--color-text-primary);
     text-decoration: none;
 }
 
-.col-local-name a:hover {
+.col-local-name > a:hover {
     color: var(--color-accent-primary);
     text-decoration: underline;
 }
@@ -1580,4 +1580,12 @@ td.col-select {
     .recent-reviews-table tbody tr:last-child td {
         border-bottom-color: var(--color-border-primary);
     }
+}
+
+/* Preserve the select-all control above stacked, labelled inbox rows. */
+@media (max-width: 768px) {
+    .review-inbox-page .recent-reviews-table:has(.col-select) thead { display: block; }
+    .review-inbox-page .recent-reviews-table thead th:not(.col-select) { display: none; }
+    .review-inbox-page .recent-reviews-table thead th.col-select { width: auto; }
+    .review-inbox-page .recent-reviews-table tbody td.col-select { width: auto; }
 }

@@ -31,6 +31,7 @@ const { GitHubClient } = require('../github/client');
 const { PRArgumentParser } = require('../github/parser');
 const { resolveReviewBinding } = require('../utils/host-resolution');
 const reviewProgress = require('../review-progress');
+const { actualModelsForRun } = require('../ai/model-evidence');
 
 const router = express.Router();
 
@@ -57,6 +58,7 @@ router.get('/api/reviews/recent', (req, res) => {
   const reviews = rows.slice(0, limit).map(row => {
     const pr = safeParseJson(row.pr_data) || {};
     const local = row.review_type === 'local';
+    const latestRun = safeParseJson(row.latest_ai_run);
     return { id: row.id, reviewType: row.review_type, repository: local ? path.basename(row.repository) : row.repository,
       number: row.pr_number, title: row.title || row.name || path.basename(row.repository),
       headSha: local ? row.local_head_sha : pr.head_sha || null, host: row.host || null,
@@ -64,7 +66,8 @@ router.get('/api/reviews/recent', (req, res) => {
       draftCount: row.draft_count, hasDraftSummary: Boolean(row.has_summary),
       lastReviewedHead: row.last_reviewed_head || null,
       aiRunCount: Number(row.ai_run_count || 0),
-      latestAiRun: safeParseJson(row.latest_ai_run),
+      latestAiRun: latestRun ? { ...latestRun, requestedProvider: latestRun.provider, requestedModel: latestRun.model,
+        actualModels: actualModelsForRun({ activity_state: row.activity }) } : null,
       updatedAt: row.updated_at, activity: safeParseJson(row.activity),
       url: local ? `/local/${row.id}` : `/pr/${row.repository.split('/').map(encodeURIComponent).join('/')}/${row.pr_number}${row.host ? `?host=${encodeURIComponent(row.host)}` : ''}` };
   });

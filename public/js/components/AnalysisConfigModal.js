@@ -392,7 +392,7 @@ class AnalysisConfigModal {
           <div class="council-footer-left" id="council-footer-left" style="display: none;">
             <span class="council-dirty-hint" id="council-dirty-hint">Unsaved changes</span>
             <button class="btn btn-sm btn-save-council" id="council-footer-save-btn"
-              title="Save configuration changes. Unsaved changes will be auto-saved as a new configuration when you analyze.">Save</button>
+              title="Save configuration changes for reuse. Templates can be analyzed directly without saving.">Save</button>
           </div>
           <button class="btn btn-secondary" data-action="cancel">Cancel</button>
           <button class="btn btn-primary btn-analyze" data-action="submit" title="Start Analysis (Cmd/Ctrl+Enter)">

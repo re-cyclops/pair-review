@@ -102,15 +102,60 @@
   font-size: 14px;
 }
 
-/* Confirm dialog buttons should be centered */
+dialog:is(.confirm-dialog-overlay, .text-input-dialog-overlay) {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 16px;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-primary);
+}
+
+dialog:is(.confirm-dialog-overlay, .text-input-dialog-overlay)::backdrop {
+  background: transparent;
+}
+
+.confirm-dialog-container {
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  height: auto;
+}
+
+.confirm-dialog-container .modal-body {
+  overscroll-behavior: contain;
+}
+
+.confirm-dialog-container button {
+  min-height: 44px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.confirm-dialog-container button:focus-visible {
+  outline: 2px solid var(--color-accent-primary);
+  outline-offset: 2px;
+}
+
 .confirm-dialog-container .modal-footer {
   justify-content: center;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 480px) {
+  .confirm-dialog-container .modal-footer {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
 }
 
 /* Message is set via textContent, so blank lines in the string are the only
    way a caller can express a paragraph break. Honour them. */
 #confirm-dialog-message {
   white-space: pre-line;
+  overflow-wrap: anywhere;
 }
 
 /* Opt-in "don't ask again"-style checkbox row (ConfirmDialog checkboxLabel) */
@@ -139,7 +184,7 @@
 /* When a secondary button is visible (3 buttons), widen and stack vertically.
    column-reverse puts Confirm (primary) on top, Cancel on bottom. */
 .confirm-dialog-container.has-secondary {
-  min-width: 440px;
+  width: min(480px, calc(100vw - 32px));
 }
 
 .confirm-dialog-container.has-secondary .modal-footer {

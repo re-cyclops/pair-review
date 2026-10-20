@@ -56,7 +56,17 @@
     body.append(element('p', s.fetchedAt ? `Fetched ${new Date(s.fetchedAt).toLocaleString()}${s.availability === 'stale' ? ' · stale; refresh failed' : ''}` : 'Host evidence unavailable', { class: 'workspace-muted' }));
     if (s.error) body.append(element('p', `${s.error}${s.retryAfterSeconds ? ` · retry after ${s.retryAfterSeconds}s` : ''}`, { role: 'status' }));
     const refreshButton = element('button', 'Refresh this evidence', { type: 'button' });
-    refreshButton.addEventListener('click', refresh);
+    refreshButton.addEventListener('click', async () => {
+      if (refreshButton.disabled) return;
+      refreshButton.disabled = true;
+      refreshButton.textContent = 'Refreshing evidence…';
+      refreshButton.setAttribute('aria-busy', 'true');
+      try { await refresh(); } finally {
+        refreshButton.disabled = false;
+        refreshButton.textContent = 'Refresh this evidence';
+        refreshButton.removeAttribute('aria-busy');
+      }
+    });
     body.append(refreshButton);
     const facts = element('dl');
     const fact = (name, value) => facts.append(element('dt', name), element('dd', value));

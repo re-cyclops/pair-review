@@ -17,9 +17,13 @@ const finish = () => {
   }
   if (result.fail) { console.error('Synthetic provider failure'); process.exit(1); }
   const body = { suggestions: result.suggestions || [], summary: 'Synthetic fixture review completed.' };
-  console.log(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify(body) }], stopReason: 'stop' } }));
+  console.log(JSON.stringify({ type: 'message_end', message: { role: 'assistant', provider: result.provider, model: result.model,
+    content: [{ type: 'text', text: JSON.stringify(body) }], stopReason: 'stop' } }));
   process.exit(0);
 };
 console.log(JSON.stringify({ type: 'message_start', message: { role: 'assistant', content: [] } }));
+// External-provider readiness: the process has opened its actual checkout and
+// can now wait for a result without racing application diff preparation.
+fs.appendFileSync(`${gate}.started.jsonl`, JSON.stringify({ pid: process.pid, cwd: process.cwd(), args: process.argv.slice(2) }) + '\n');
 watcher = fs.watch(path.dirname(gate), (event, file) => { if (file === path.basename(gate)) finish(); });
 finish();

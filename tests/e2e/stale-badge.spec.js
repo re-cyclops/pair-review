@@ -43,7 +43,7 @@ test.describe('Stale PR Badge', () => {
 
     const badge = page.locator('#stale-badge');
     await expect(badge).toBeVisible();
-    await expect(badge.locator('.stale-badge-text')).toHaveText('STALE');
+    await expect(badge.getByRole('button', { name: 'Update to latest commits' })).toBeVisible();
   });
 
   test('auto-refreshes silently when stale and no session data', async ({ page }) => {
@@ -86,12 +86,10 @@ test.describe('Stale PR Badge', () => {
       });
     });
 
-    const refreshPromise = page.waitForRequest("**/api/pr/test-owner/test-repo/1/refresh");
+    const refreshPromise = page.waitForRequest('**/api/pr/test-owner/test-repo/1/refresh');
     await page.goto('/pr/test-owner/test-repo/1');
     await waitForDiffToRender(page);
     await refreshPromise;
-
-    // Badge should NOT appear (silent refresh)
     const badge = page.locator('#stale-badge');
     await expect(badge).toBeHidden();
 

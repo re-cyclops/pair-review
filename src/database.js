@@ -5703,8 +5703,8 @@ class AnalysisRunRepository {
   async getById(id, { includeDiff = false } = {}) {
     const columns = [
       'id', 'review_id', 'provider', 'model', 'tier', 'custom_instructions', 'global_instructions', 'repo_instructions', 'request_instructions',
-      'head_sha', 'summary', 'status', 'total_suggestions', 'files_analyzed', 'started_at', 'completed_at',
-      'parent_run_id', 'config_type', 'levels_config', 'level_outcomes', 'review_baseline', 'protocol_snapshot'
+      'head_sha', 'scope_start', 'scope_end', 'summary', 'status', 'total_suggestions', 'files_analyzed', 'started_at', 'completed_at',
+      'parent_run_id', 'config_type', 'levels_config', 'level_outcomes', 'review_baseline', 'protocol_snapshot', 'activity_state'
     ];
     if (includeDiff) {
       columns.splice(columns.indexOf('head_sha') + 1, 0, 'diff'); // Insert diff after head_sha
@@ -5732,7 +5732,7 @@ class AnalysisRunRepository {
     const columns = [
       'id', 'review_id', 'provider', 'model', 'tier', 'custom_instructions', 'global_instructions', 'repo_instructions', 'request_instructions',
       'head_sha', 'summary', 'status', 'total_suggestions', 'files_analyzed', 'started_at', 'completed_at',
-      'parent_run_id', 'config_type', 'levels_config', 'level_outcomes', 'review_baseline', 'protocol_snapshot'
+      'parent_run_id', 'config_type', 'levels_config', 'level_outcomes', 'review_baseline', 'protocol_snapshot', 'activity_state'
     ];
     if (includeDiff) {
       columns.splice(columns.indexOf('head_sha') + 1, 0, 'diff'); // Insert diff after head_sha
@@ -5770,7 +5770,7 @@ class AnalysisRunRepository {
     const columns = [
       'id', 'review_id', 'provider', 'model', 'tier', 'custom_instructions', 'global_instructions', 'repo_instructions', 'request_instructions',
       'head_sha', 'summary', 'status', 'total_suggestions', 'files_analyzed', 'started_at', 'completed_at',
-      'parent_run_id', 'config_type', 'levels_config', 'level_outcomes', 'review_baseline', 'protocol_snapshot'
+      'parent_run_id', 'config_type', 'levels_config', 'level_outcomes', 'review_baseline', 'protocol_snapshot', 'activity_state'
     ];
     if (includeDiff) {
       columns.splice(columns.indexOf('head_sha') + 1, 0, 'diff'); // Insert diff after head_sha
@@ -5797,7 +5797,7 @@ class AnalysisRunRepository {
     return query(this.db, `
       SELECT id, review_id, provider, model, tier, custom_instructions, global_instructions, repo_instructions, request_instructions,
              head_sha, summary, status, total_suggestions, files_analyzed, started_at, completed_at,
-             parent_run_id, config_type, levels_config, level_outcomes, review_baseline, protocol_snapshot
+             parent_run_id, config_type, levels_config, level_outcomes, review_baseline, protocol_snapshot, activity_state
       FROM analysis_runs
       WHERE parent_run_id = ?
       ORDER BY started_at ASC

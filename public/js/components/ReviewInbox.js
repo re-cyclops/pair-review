@@ -34,6 +34,7 @@
         this.drain();
       }, { rootMargin: '120px' });
       this.mutations = new MutationObserver(changes => {
+        if (changes.some(change => [...change.addedNodes].some(node => node.nodeType === 1 && (node.matches?.('.select-mode-header,.tab-pane-header,.btn-select-toggle') || node.querySelector?.('.select-mode-header,.tab-pane-header,.btn-select-toggle'))))) this.placeStatus();
         if (changes.some(change => change.target.matches?.('tr') || [...change.addedNodes, ...change.removedNodes].some(node => node.nodeType === 1 && (node.matches?.('tr,table,tbody,.tab-pane') || node.querySelector?.('tr'))))) this.scan();
       });
       this.mutations.observe(this.root, { childList: true, subtree: true });
@@ -50,6 +51,7 @@
         this.applyFilters();
         this.workspace.loadReviews();
       });
+      window.addEventListener('bulkAnalysisChanged', () => { this.renderRows(); this.applyFilters(); });
       window.addEventListener('workspaceActivity', event => {
         this.runs = event.detail.runs; this.renderRows(); this.applyFilters(); this.refreshVisible();
       });
@@ -119,14 +121,23 @@
         else if (this.primary === 'teams') this.root.querySelector('[data-workspace-view="all"]')?.click();
         this.applyFilters(true);
       });
-      const refresh = element('button', 'Refresh visible evidence', { type: 'button' });
-      refresh.addEventListener('click', () => {
-        for (const record of this.records.values()) if (record.row.getClientRects().length && !record.queued) {
-          record.queued = true; record.force = true; this.queue.push(record);
+      const refresh = this.refreshBtn = element('button', 'Refresh status', { type: 'button' });
+      refresh.addEventListener('click', async () => {
+        if (refresh.disabled) return;
+        refresh.disabled = true;
+        refresh.setAttribute('aria-busy', 'true');
+        refresh.textContent = 'Refreshing status…';
+        try {
+          const results = await Promise.all([...this.records.values()].filter(record => !record.local && record.row.getClientRects().length).map(record => this.load(record, true)));
+          this.operationStatus.textContent = results.some(result => result.availability === 'unavailable' || result.availability === 'stale')
+            ? 'Some evidence could not be refreshed. Inspect unavailable rows and try again.' : 'Visible evidence refreshed.';
+        } finally {
+          refresh.disabled = false;
+          refresh.removeAttribute('aria-busy');
+          refresh.textContent = 'Refresh status';
         }
-        this.drain();
       });
-      this.sort = element('button', 'Apply next-action order', { type: 'button', title: 'Drafts and personal requests first, then waiting items; oldest activity breaks ties. Background updates stop reordering once you interact.' });
+      this.sort = element('button', 'Sort by next action', { type: 'button', title: 'Drafts and personal requests first, then waiting items; oldest activity breaks ties. Background updates stop reordering once you interact.' });
       this.sort.addEventListener('click', () => { this.applyFilters(true); this.sortRows(true); });
       this.hideApprovedBtn = element('button', this.hideApproved ? 'Showing unapproved only' : 'Hide approved', {
         type: 'button',
@@ -149,18 +160,23 @@
         title: 'Remove local history for pull requests you have already approved'
       });
       this.clearApprovedBtn.addEventListener('click', () => this.clearApprovedReviews());
-      this.status = element('p', '', { class: 'workspace-muted', role: 'status', 'aria-live': 'polite' });
+      this.status = element('p', '', { class: 'workspace-muted workspace-results-status', role: 'status', 'aria-live': 'polite' });
+      this.operationStatus = element('p', '', { class: 'workspace-muted workspace-operation-status', role: 'status', 'aria-live': 'polite' });
+      this.requestDateNotice = element('p', '', { class: 'workspace-muted workspace-operation-status', role: 'status', 'aria-live': 'polite' });
       this.filters = element('details', null, { class: 'workspace-filters' });
       this.filterSummary = element('summary', 'Filters and order');
       const options = element('div', null, { class: 'workspace-filter-options' });
-      options.append(this.repository, this.author, this.view, this.hideApprovedBtn, this.clearApprovedBtn, refresh, this.sort);
+      const labelled = (text, control) => { const label = element('label', text); label.append(control); return label; };
+      options.append(labelled('Repository', this.repository), labelled('Author', this.author), labelled('Review state', this.view), this.hideApprovedBtn, this.clearApprovedBtn, refresh, this.sort);
       this.filters.append(this.filterSummary, options);
       const wide = matchMedia('(min-width: 769px)');
       this.filters.open = wide.matches;
       wide.addEventListener('change', () => { this.filters.open = wide.matches; });
-      tools.append(this.search, this.filters);
+      const searchLabel = labelled('Search', this.search);
+      searchLabel.className = 'workspace-search-field';
+      tools.append(searchLabel, this.filters);
       this.root.before(heading);
-      this.root.querySelector('.section-header').after(tools, this.status);
+      this.root.querySelector('.section-header').after(tools, this.status, this.requestDateNotice, this.operationStatus);
       const form = this.root.querySelector('#pr-tab .start-review-section');
       if (form) {
         const launcher = element('details', null, { class: 'workspace-open-review' });
@@ -168,6 +184,17 @@
         form.before(launcher);
         launcher.append(element('summary', 'Open a pull request by URL'), form);
         this.root.querySelector('#pr-tab').append(launcher);
+      }
+    }
+
+    placeStatus() {
+      const header = this.root.querySelector('.tab-pane.active .select-mode-header, .tab-pane.active .tab-pane-header');
+      if (header) {
+        header.classList.add('workspace-results-header');
+        if (this.status.parentElement !== header) header.prepend(this.status);
+      } else {
+        const tools = this.root.querySelector('.workspace-inbox-tools');
+        if (this.status.previousElementSibling !== tools) tools.after(this.status);
       }
     }
 
@@ -182,24 +209,37 @@
         const number = Number(row.dataset.number || row.querySelector('.col-pr')?.textContent.match(/\d+/)?.[0]);
         const title = row.querySelector('.col-title, .col-local-name');
         const local = !!row.dataset.sessionId;
-        if (!repository || !number && !local || !title) continue;
-        title.querySelector('.workspace-row-state')?.remove();
+        const lane = name => row.querySelector(`.col-${name}`);
+        if (!repository || !number && !local || !title || !lane('ai') || !lane('state') || !lane('actions') || !local && !lane('requested')) continue;
+        for (const cell of row.querySelectorAll('.col-ai, .col-state, .col-requested')) cell.replaceChildren();
+        row.querySelector('.col-actions .workspace-next-action')?.remove();
         const link = row.querySelector('.col-pr a');
         const host = row.dataset.host || (link ? new URL(link.href).searchParams.get('host') : null);
         const record = { row, repository, number, host, local, title: title.textContent, key: local ? `local:${row.dataset.sessionId}` : `${hostIdentity(host)}:${repository.toLowerCase()}#${number}` };
         const summary = element('div', null, { class: 'workspace-row-state' });
+        record.requested = local ? null : element('time', 'Request history not fetched');
+        record.requestContext = local ? null : element('div', '', { class: 'inbox-secondary' });
+        record.model = element('div', '', { class: 'inbox-secondary' });
         record.badge = element('span', '', { class: 'workspace-review-badge', hidden: '' });
+        record.decisions = element('span', '', { class: 'workspace-review-decisions' });
         record.approvals = element('button', 'Approvals not fetched', { type: 'button', 'aria-haspopup': 'dialog' });
         record.checks = element('button', 'CI not fetched', { type: 'button', 'aria-haspopup': 'dialog' });
         record.reason = element('span', 'Responsibility not fetched');
         record.activity = element('button', 'Not AI reviewed', { type: 'button', class: 'workspace-ai-pill', 'aria-haspopup': 'dialog' });
         record.draft = element('span');
         record.next = element('a', 'Inspect next action', { class: 'workspace-next-action', href: local ? `/local/${row.dataset.sessionId}` : link?.href || '#' });
+        if (!local && !link) {
+          record.next.href = `/?reviewUrl=${encodeURIComponent(row.dataset.prUrl || '')}${host ? `&host=${encodeURIComponent(host)}` : ''}`;
+          record.next.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); row.click(); });
+        }
         if (local) { record.approvals.textContent = 'Inspect local review'; record.checks.hidden = true; record.reason.textContent = 'Local only'; }
         for (const button of [record.approvals, record.checks]) button.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); this.inspect(record); });
         record.activity.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); this.showAIHistory(record); });
-        summary.append(record.badge, record.next, record.approvals, record.checks, record.reason, record.activity, record.draft);
-        title.append(summary);
+        summary.append(record.badge, record.decisions, record.approvals, record.checks, record.draft);
+        lane('state').append(summary);
+        lane('ai').append(record.activity, record.model);
+        if (!local) lane('requested').append(record.requested, record.requestContext, record.reason);
+        row.querySelector('.col-actions')?.prepend(record.next);
         row.tabIndex = 0;
         this.records.set(row, record);
         this.observer.observe(row);
@@ -302,6 +342,10 @@
       entry.head = head;
       entry.refresh = refresh;
       entry.reads++;
+      for (const current of this.records.values()) if (current.key === record.key && !current.snapshot) {
+        current.snapshot = { availability: 'loading' };
+        this.render(current);
+      }
       entry.promise = (async () => {
         let value;
         try {
@@ -360,65 +404,140 @@
         } else if (viewerChangesRequested) {
           record.badge.hidden = false;
           record.badge.dataset.status = 'changes-requested';
-          write(record.badge, 'Changes requested');
+          write(record.badge, 'Changes requested by you');
         } else {
           record.badge.hidden = true;
           record.badge.removeAttribute('data-status');
           write(record.badge, '');
         }
       }
+      if (record.requested) {
+        const request = s?.viewer?.reviewRequest;
+        const date = request?.firstRequestedAt && new Date(request.firstRequestedAt);
+        const validDate = request?.availability === 'known' && date && Number.isFinite(date.getTime());
+        const missingSchema = s?.viewer && !Object.hasOwn(s.viewer, 'reviewRequest') && !['loading', 'unavailable'].includes(s.availability) && !s.error;
+        const failed = s?.availability === 'unavailable' || !!s?.error;
+        const reasons = {
+          'incomplete-history': 'Request history is incomplete.',
+          'unknown-viewer': 'Your host account could not be identified.',
+          'unknown-request-target': 'A historical request has an unidentified recipient.',
+          'unknown-team-membership': 'Your team membership could not be established.',
+          'invalid-request-date': 'The host returned an invalid request date.',
+          unauthenticated: 'Sign in to the host to load request history.',
+          'rate-limited': 'The host rate limit was reached. Try refreshing later.',
+          'permission-denied-or-rate-limited': 'The host denied access or rate-limited request history.',
+          'not-available': 'Request history is not available from the host.',
+          'offline-or-unsupported': 'The host is offline or does not support request history.'
+        };
+        const explanation = missingSchema ? ''
+          : failed ? 'Request history could not be loaded. Refresh status to try again.'
+            : request?.availability === 'known' && request.firstRequestedAt && !validDate ? reasons['invalid-request-date']
+              : request?.availability !== 'known' && request ? reasons[request.reason] || 'Request history could not be established.'
+                : '';
+        write(record.requested, validDate
+          ? `${stale ? 'Last observed: ' : ''}${date.toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })}`
+          : missingSchema ? 'Server update needed'
+            : failed || request?.availability === 'unavailable' ? 'Request date unavailable'
+              : s?.availability === 'loading' ? 'Loading request history…'
+                : !s ? 'Request history not fetched'
+                  : request?.availability === 'known' && !request.firstRequestedAt ? 'No recorded request' : 'Request date unknown');
+        record.requested.title = validDate ? `First requested: ${date.toLocaleString()} (${request.firstRequestedAt})` : explanation || record.requested.textContent;
+        if (validDate) record.requested.setAttribute('datetime', request.firstRequestedAt);
+        else record.requested.removeAttribute('datetime');
+        write(record.requestContext, validDate ? [
+          request.source === 'team' ? `Via team ${request.team?.name || request.team?.slug || '(unknown)'}` : 'Direct request to you',
+          request.requestedBy?.login ? `by @${request.requestedBy.login}` : request.requestedBy?.name ? `by ${request.requestedBy.name}` : ''
+        ].filter(Boolean).join(' · ') : explanation);
+      }
       if (s) {
         const approving = s.approvals?.approving?.map(person => person.reviewer?.name || person.reviewer?.login || person.login).filter(Boolean) || [];
-        write(record.approvals, `${stale ? 'Stale: ' : ''}${partialReviews ? 'Review history partial · approvals unknown' : s.approvals?.observedCount == null ? 'Approvals unavailable' : `${s.approvals.observedCount} approved${approving.length ? ` · ${approving.join(', ')}` : ''}${s.approvals.requiredCount == null ? '' : ` · ${s.approvals.requiredCount} required`}`}`);
-        write(record.checks, `${stale ? 'Stale: ' : ''}${checkLabel(s.checks)}`);
+        const approvalText = `${stale ? 'Stale: ' : ''}${partialReviews ? 'Approvals unknown · partial history' : s.approvals?.observedCount == null ? 'Approvals unavailable' : `${s.approvals.observedCount} approved${s.approvals.requiredCount == null ? '' : ` / ${s.approvals.requiredCount} required`}`}`;
+        write(record.approvals, approvalText);
+        record.approvals.title = approving.length ? `Approvals: ${approving.join(', ')}` : approvalText;
+        const counts = s.checks?.counts;
+        const attention = Number(counts?.failed || 0) + Number(counts?.actionRequired || 0) + Number(counts?.cancelled || 0);
+        const compactChecks = !counts || s.checks?.availability === 'unavailable' ? 'CI unavailable'
+          : attention ? `CI: ${attention} need attention`
+            : counts.pending ? `CI: ${counts.pending} pending`
+              : `CI: ${counts.passed || 0} passed${s.checks?.availability === 'partial' ? ' · partial' : ''}`;
+        write(record.checks, `${stale ? 'Stale: ' : ''}${compactChecks}`);
         record.checks.dataset.tone = !stale && (s.checks?.counts?.failed || s.checks?.counts?.actionRequired) ? 'error' : !stale && s.checks?.counts?.passed && !s.checks?.counts?.pending ? 'good' : '';
         const reasonText = s.viewer?.reason || 'Review responsibility unavailable';
-        write(record.reason, viewerApproved && reasonText.startsWith('You already approved') ? '' : `${stale ? 'Last observed: ' : ''}${reasonText}`);
-        record.checks.title = `Head ${s.headSha || 'unknown'} · fetched ${s.fetchedAt ? new Date(s.fetchedAt).toLocaleString() : 'never'}`;
+        const history = s.viewer?.reviewRequest;
+        const repeatsRequest = history?.availability === 'known' && history.firstRequestedAt
+          && (history.source === 'direct' && s.viewer?.requestedDirectly || history.source === 'team' && s.viewer?.requestedViaTeam);
+        const responsibility = repeatsRequest || viewerApproved && reasonText.startsWith('You already approved') ? '' : reasonText;
+        write(record.reason, responsibility ? `${stale ? 'Last observed: ' : ''}${s.viewer?.requestedDirectly ? 'Currently requested from you' : s.viewer?.requestedViaTeam ? 'Currently requested via team' : responsibility}` : '');
+        record.reason.title = reasonText;
+        record.checks.title = `${checkLabel(s.checks)} · Head ${s.headSha || 'unknown'} · fetched ${s.fetchedAt ? new Date(s.fetchedAt).toLocaleString() : 'never'}`;
+        const viewerLogin = s.viewer?.identity?.login;
+        const changes = (s.approvals?.effective || []).filter(review => review.state === 'CHANGES_REQUESTED'
+          && !(viewerChangesRequested && viewerLogin && review.reviewer?.login?.toLowerCase() === viewerLogin.toLowerCase()));
+        write(record.decisions, changes.length
+          ? `${stale ? 'Last observed: ' : ''}${partialReviews ? 'Observed in partial history: changes requested by ' : 'Changes requested by '}${changes.map(review => review.reviewer?.login ? `@${review.reviewer.login}` : review.reviewer?.name || 'reviewer identity unavailable').join(', ')}`
+          : '');
       }
       const run = this.runs?.filter(run => run.reviewId === local?.id).sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)))[0];
-      const latestAi = local?.latestAiRun || run || null;
+      const savedAi = local?.latestAiRun;
+      const latestAi = run && (!savedAi || run.analysisId === savedAi.id || Date.parse(run.startedAt) >= Date.parse(savedAi.startedAt))
+        ? { ...(run.analysisId === savedAi?.id ? savedAi : {}), ...run, totalSuggestions: run.suggestionsCount ?? run.totalSuggestions ?? (run.analysisId === savedAi?.id ? savedAi.totalSuggestions : undefined) } : savedAi || null;
       const aiRunCount = Math.max(Number(local?.aiRunCount || 0), run ? 1 : 0);
-      const isAiRunning = Boolean(run && ['starting', 'queued', 'running', 'cancellation_requested'].includes(run.status));
+      const actualModels = latestAi?.actualModels || [];
+      const modelNames = actualModels.map(item => [item.provider, item.model].filter(Boolean).join('/')).filter(Boolean);
+      write(record.model, latestAi ? modelNames.length > 1 ? `${modelNames[0]} +${modelNames.length - 1} · inspect history` : modelNames[0] || 'Model not recorded' : '');
+      record.model.title = modelNames.join(', ');
+      const isAiRunning = Boolean(latestAi && ['starting', 'queued', 'running', 'cancellation_requested'].includes(latestAi.status));
       record.aiReviewed = Boolean(aiRunCount > 0 || (latestAi && latestAi.status === 'completed'));
       if (isAiRunning) {
         record.activity.dataset.aiState = 'running';
-        write(record.activity, `AI reviewing \u00B7 ${run.stage || run.status.replaceAll('_', ' ')}`);
+        write(record.activity, `AI reviewing \u00B7 ${latestAi.stage || latestAi.status.replaceAll('_', ' ')}`);
       } else if (latestAi && aiRunCount > 0) {
         const status = latestAi.status || 'completed';
         const count = Number(latestAi.totalSuggestions ?? latestAi.suggestionsCount ?? 0);
-        const modelLabel = [latestAi.provider, latestAi.model].filter(Boolean).join('/');
         const runsLabel = aiRunCount > 1 ? ` \u00B7 ${aiRunCount} runs` : '';
         if (status === 'completed') {
           record.activity.dataset.aiState = 'reviewed';
-          write(record.activity, `AI reviewed \u00B7 ${count === 0 ? '0 findings' : `${count} finding${count === 1 ? '' : 's'}`}${modelLabel ? ` \u00B7 ${modelLabel}` : ''}${runsLabel}`);
+          write(record.activity, `AI reviewed \u00B7 ${count === 0 ? '0 findings' : `${count} finding${count === 1 ? '' : 's'}`}${runsLabel}`);
         } else {
           record.activity.dataset.aiState = status === 'failed' ? 'error' : 'reviewed';
-          write(record.activity, `AI ${status.replaceAll('_', ' ')}${modelLabel ? ` \u00B7 ${modelLabel}` : ''}${runsLabel}`);
+          write(record.activity, `AI ${status.replaceAll('_', ' ')}${runsLabel}`);
         }
       } else {
         record.activity.dataset.aiState = 'unreviewed';
         write(record.activity, 'Not AI reviewed');
       }
-      const hasActiveDraft = viewerApproved ? Number(local?.draftCount) > 0 : hasDraft(local);
-      write(record.draft, hasActiveDraft ? draftLabel(local) : '');
-      write(record.next, hasActiveDraft ? 'Preview saved draft' : record.local ? 'Continue local review'
-        : viewerApproved ? 'View review'
-        : !s || stale ? 'Inspect available evidence' : s.viewer?.self ? 'Inspect your pull request'
-          : s.viewer?.requestedDirectly || s.viewer?.effectiveReview?.state === 'CHANGES_REQUESTED' && s.viewer.newRevision ? 'Review requested changes'
-            : s.viewer?.effectiveReview?.state === 'CHANGES_REQUESTED' ? 'Check author updates'
-              : s.viewer?.requestedViaTeam ? 'Inspect team request' : 'Open review');
+      const bulk = window.bulkAnalysisLauncher?.state(record.local
+        ? { local: true, reviewId: record.row.dataset.sessionId }
+        : { owner: record.repository.split('/')[0], repo: record.repository.split('/')[1], number: record.number, host: record.host });
+      if (bulk && bulk.status !== 'completed' && (!bulk.analysisId || !latestAi || (latestAi.analysisId || latestAi.id) === bulk.analysisId)) {
+        record.activity.dataset.aiState = ['failed', 'uncertain'].includes(bulk.status) ? 'error'
+          : ['queued', 'preparing', 'launching', 'accepted', 'starting', 'running', 'cancellation_requested'].includes(bulk.status) ? 'running' : 'reviewed';
+        write(record.activity, `AI ${bulk.message}`);
+        record.activity.title = bulk.message;
+        if (!bulk.analysisId || (latestAi?.analysisId || latestAi?.id) !== bulk.analysisId) {
+          write(record.model, 'Execution model pending');
+          record.model.title = '';
+        }
+      }
+      const hasActiveDraft = hasDraft(local);
+      write(record.draft, [s?.draft ? 'Draft pull request' : '', hasActiveDraft ? draftLabel(local) : ''].filter(Boolean).join(' · '));
+      write(record.next, hasActiveDraft ? 'Preview draft' : record.local ? 'Continue local review'
+        : s?.viewer?.newRevision ? 'Review new commits'
+          : viewerApproved || viewerChangesRequested ? 'View review' : 'Review PR');
       if (local?.url) record.next.href = local.url;
     }
 
     applyFilters(explicit = false) {
       const query = this.search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
       let visible = 0;
+      let loaded = 0;
       let unknown = 0;
       let deferred = 0;
+      let needsServerUpdate = false;
       const protectedRow = this.root.querySelector('tr:hover') || document.activeElement.closest('tr');
       const holdMembership = !explicit && protectedRow && this.root.contains(protectedRow);
       for (const record of this.records.values()) {
+        if (record.row.closest('.tab-pane')?.classList.contains('active')) loaded++;
         const s = record.snapshot;
         const local = this.local(record);
         const unavailable = !record.local && (!s || ['stale', 'unavailable'].includes(s.availability) || s.fetchedAt && Date.now() - new Date(s.fetchedAt).getTime() > 120000);
@@ -465,49 +584,88 @@
         else record.row.hidden = hidden;
         if (!record.row.hidden && record.row.closest('.tab-pane')?.classList.contains('active')) {
           visible++;
+          if (!record.local && s?.viewer && !Object.hasOwn(s.viewer, 'reviewRequest') && !['loading', 'unavailable'].includes(s.availability) && !s.error) needsServerUpdate = true;
           if (primary == null || secondary == null || unavailable) unknown++;
         }
       }
-      const message = `${visible} ${deferred ? 'displayed' : 'matching'} loaded review${visible === 1 ? '' : 's'}${unknown ? ` · ${unknown} with unknown or stale evidence kept visible` : ''}.${deferred ? ` ${deferred} filter updates held to keep your target stable; reapply a filter when ready.` : ''} Filters apply to loaded reviews; Show more includes older entries when available.`;
+      this.placeStatus();
+      const message = `${visible} ${deferred ? 'displayed' : 'matching'} of ${loaded} loaded${unknown ? ` · ${unknown} with unavailable or outdated status` : ''}${deferred ? ` · ${deferred} updates held; reapply filters when ready` : ''}`;
       if (this.status.textContent !== message) this.status.textContent = message;
+      const requestDateMessage = needsServerUpdate ? 'Request dates need a server restart. Finish active analyses, restart pair-review, then reload this page.' : '';
+      if (this.requestDateNotice.textContent !== requestDateMessage) this.requestDateNotice.textContent = requestDateMessage;
       const filterCount = Number(!!this.repository.value) + Number(!!this.author.value) + Number(this.view.value !== 'all');
       this.filterSummary.textContent = `Filters and order${filterCount ? ` · ${filterCount} active` : ''}`;
       window.dispatchEvent(new CustomEvent('workspaceFilterChanged'));
-      const clearableIds = [...this.records.values()]
-        .filter(r => r.viewerApproved && r.row.dataset.reviewId && !(Number(this.local(r)?.draftCount) > 0))
-        .map(r => Number(r.row.dataset.reviewId));
+      const clearableIds = this.approvedCandidates().map(record => Number(record.row.dataset.reviewId));
       if (this.clearApprovedBtn) {
-        this.clearApprovedBtn.hidden = clearableIds.length === 0;
-        this.clearApprovedBtn.textContent = `Clear approved (${clearableIds.length})`;
+        this.clearApprovedBtn.hidden = !this.clearingApproved && clearableIds.length === 0;
+        this.clearApprovedBtn.disabled = Boolean(this.clearingApproved);
+        this.clearApprovedBtn.setAttribute('aria-busy', String(Boolean(this.clearingApproved)));
+        this.clearApprovedBtn.textContent = this.clearingApproved ? 'Clearing approved…' : `Clear approved (${clearableIds.length})`;
       }
     }
 
 
+    approvedCandidates() {
+      return [...this.records.values()].filter(record => record.viewerApproved && record.row.dataset.reviewId);
+    }
+
     async clearApprovedReviews() {
-      const ids = [...this.records.values()]
-        .filter(r => r.viewerApproved && r.row.dataset.reviewId && !(Number(this.local(r)?.draftCount) > 0))
-        .map(r => Number(r.row.dataset.reviewId));
+      if (this.clearingApproved) return;
+      const candidates = this.approvedCandidates();
+      const ids = [...new Set(candidates.map(record => Number(record.row.dataset.reviewId)))];
       if (!ids.length) return;
-      this.clearApprovedBtn.disabled = true;
+      this.clearingApproved = true;
+      this.applyFilters();
+      const context = this.workspace.contextVersion;
       try {
-        const response = await fetch('/api/worktrees/bulk-delete', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ids })
+        const unique = [...new Map(candidates.map(record => [record.row.dataset.reviewId, record])).values()];
+        const comments = unique.reduce((count, record) => count + Number(this.local(record)?.draftCount || 0), 0);
+        const summaries = unique.filter(record => this.local(record)?.hasDraftSummary).length;
+        const targets = unique.map(record => `${record.repository} #${record.number}${record.host ? ` (${record.host})` : ''}`).join('\n');
+        const confirmed = await window.confirmDialog.show({
+          title: 'Clear approved local reviews?',
+          message: `Remove local history and saved drafts for ${ids.length} approved review${ids.length === 1 ? '' : 's'}? This includes ${comments} saved comment${comments === 1 ? '' : 's'} and ${summaries} saved review summar${summaries === 1 ? 'y' : 'ies'} (body or decision). Remote reviews stay unchanged. Active work is not cancelled; shared checkouts may be retained.\n\n${targets}`,
+          confirmText: 'Remove local history and drafts'
         });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || 'Could not clear approved reviews');
-        for (const record of this.records.values()) {
-          if (ids.includes(Number(record.row.dataset.reviewId))) {
-            record.row.remove();
+        if (confirmed !== 'confirm' || context !== this.workspace.contextVersion) return;
+        const errors = [], warnings = [], removed = new Set();
+        for (let offset = 0; offset < ids.length; offset += 50) {
+          const batch = ids.slice(offset, offset + 50);
+          try {
+            const response = await fetch('/api/worktrees/bulk-delete', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: batch })
+            });
+            const data = await response.json();
+            if (context !== this.workspace.contextVersion) return;
+            if (!response.ok) throw new Error(data.error || 'Could not clear approved reviews');
+            const failed = new Set((data.errors || []).map(item => Number(item.id)));
+            errors.push(...(data.errors || []));
+            warnings.push(...(data.warnings || []));
+            for (const id of batch) if (!failed.has(id)) removed.add(id);
+          } catch (error) {
+            errors.push(...batch.map(id => ({ id, error: error.message })));
           }
         }
+        for (const record of this.records.values()) if (removed.has(Number(record.row.dataset.reviewId))) record.row.remove();
         this.scan();
-        window.toast?.success(`Cleared ${data.deleted || ids.length} approved review${(data.deleted || ids.length) === 1 ? '' : 's'} from inbox.`);
+        this.cleanupResults?.remove();
+        this.cleanupResults = element('section', null, { class: 'bulk-removal-results', role: 'status', 'aria-live': 'polite' });
+        this.cleanupResults.append(element('p', `Removed ${removed.size} approved local review${removed.size === 1 ? '' : 's'}; retained ${ids.length - removed.size}. Remote reviews unchanged.`));
+        const list = element('ul');
+        for (const item of [...errors.map(item => ({ ...item, message: `Retained — ${item.error}` })), ...warnings]) {
+          const target = unique.find(record => Number(record.row.dataset.reviewId) === Number(item.id));
+          list.append(element('li', `${target ? `${target.repository} #${target.number}` : `Review ${item.id}`}: ${item.message}`));
+        }
+        if (list.childNodes.length) this.cleanupResults.append(list);
+        this.status.after(this.cleanupResults);
+        await Promise.all([this.workspace.loadReviews(), window.refreshRecentReviews?.()]);
       } catch (error) {
         window.toast?.error(`Clear approved failed: ${error.message}`);
+        this.operationStatus.textContent = `Clear approved failed: ${error.message}. Try again.`;
       } finally {
-        this.clearApprovedBtn.disabled = false;
+        this.clearingApproved = false;
+        this.applyFilters();
       }
     }
 
@@ -534,6 +692,7 @@
       try {
         const response = await fetch(`/api/analyses/runs?reviewId=${local.id}`);
         const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `History unavailable (${response.status})`);
         const runs = data.runs || [];
         this.aiHistoryBody.replaceChildren();
         if (!runs.length) {
@@ -548,7 +707,8 @@
           const count = Number(run.total_suggestions || 0);
           const header = element('p');
           const badge = element('strong', idx === 0 ? `Latest (#${runs.length})` : `Run #${runs.length - idx}`);
-          const meta = element('span', ` \u00B7 ${[run.provider, run.model].filter(Boolean).join('/')} \u00B7 ${count === 0 ? '0 findings' : `${count} finding${count === 1 ? '' : 's'}`} \u00B7 ${run.completed_at || run.started_at || ''}${run.head_sha ? ` \u00B7 @${String(run.head_sha).slice(0, 7)}` : ''}`);
+          const actual = run.actualModels?.length ? run.actualModels.map(item => [item.provider, item.model].filter(Boolean).join('/')).join(', ') : 'model not recorded';
+          const meta = element('span', ` \u00B7 ${actual} \u00B7 ${count === 0 ? '0 findings' : `${count} finding${count === 1 ? '' : 's'}`} \u00B7 ${run.completed_at || run.started_at || ''}${run.head_sha ? ` \u00B7 @${String(run.head_sha).slice(0, 7)}` : ''}`);
           header.append(badge, meta);
           card.append(header);
           if (run.summary) {

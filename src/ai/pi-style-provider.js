@@ -255,7 +255,8 @@ class PiStyleProvider extends AIProvider {
         const parsed = finalizePiResponseParsing({
           textContent: responseState.textContent,
           rawOutput: responseState.rawOutput,
-          rawOutputTruncated: responseState.rawOutputTruncated
+          rawOutputTruncated: responseState.rawOutputTruncated,
+          actualModels: responseState.actualModels,
         }, level, levelPrefix, this.cliName);
         if (parsed.success) {
           logger.success(`${levelPrefix} Successfully parsed JSON response`);
@@ -388,7 +389,8 @@ class PiStyleProvider extends AIProvider {
       return finalizePiResponseParsing({
         textContent: responseState.textContent,
         rawOutput: responseState.rawOutput,
-        rawOutputTruncated: responseState.rawOutputTruncated
+        rawOutputTruncated: responseState.rawOutputTruncated,
+        actualModels: responseState.actualModels
       }, level, levelPrefix, this.cliName);
 
     } catch (parseError) {

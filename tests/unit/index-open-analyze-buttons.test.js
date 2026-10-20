@@ -16,6 +16,7 @@
  * getElementById calls during module initialisation succeed.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { JSDOM } from 'jsdom';
 
 // ---------------------------------------------------------------------------
 // DOM + browser globals setup
@@ -770,10 +771,7 @@ describe('Index page Open/Analyze buttons', () => {
   }
 
   it('escapes GitHub-supplied collection values in HTML attributes', () => {
-    // Titles, owners and repos come straight from the GitHub search API, so they
-    // are remote input. escapeHtml() is text-node escaping and leaves quotes
-    // intact, which let a crafted title close `title="` and open a new
-    // attribute — an event handler, i.e. script execution on the dashboard.
+    // GitHub values must remain inert whether used as visible text or attributes.
     const html = indexModule.renderCollectionPrRow({
       owner: 'sh"op',
       repo: 'wo"rld',
@@ -787,7 +785,9 @@ describe('Index page Open/Analyze buttons', () => {
 
     // No attribute anywhere in the row may start with `on`.
     expect(attributeSkeleton(html)).not.toMatch(/\son[a-z]+\s*=/i);
-    expect(html).toContain('title="Fix &quot; onmouseover=&quot;alert(1)&quot; crash"');
+    const parsed = new JSDOM(`<table>${html}</table>`);
+    expect(parsed.window.document.querySelector('.col-title').textContent).toBe('Fix " onmouseover="alert(1)" crash');
+    parsed.window.close();
     expect(html).toContain('data-owner="sh&quot;op"');
     expect(html).toContain('data-repo="wo&quot;rld"');
     expect(html).toContain('?x=&quot; onload=&quot;alert(1)');
@@ -805,7 +805,9 @@ describe('Index page Open/Analyze buttons', () => {
     });
 
     expect(attributeSkeleton(html)).not.toMatch(/\son[a-z]+\s*=/i);
-    expect(html).toContain('title="Fix &quot; onmouseover=&quot;alert(1)&quot; crash"');
+    const parsed = new JSDOM(`<table>${html}</table>`);
+    expect(parsed.window.document.querySelector('.col-title').textContent).toBe('Fix " onmouseover="alert(1)" crash');
+    parsed.window.close();
   });
 
   it('preserves GitHub URL casing for GitHub and Graphite actions', () => {
