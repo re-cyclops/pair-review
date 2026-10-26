@@ -22,9 +22,17 @@ const parse = value => {
 
 const identity = db => ({ instanceId, dbId: computeDbId(db.name), version });
 
+const stageLabels = { level1: 'Level 1', 1: 'Level 1', level2: 'Level 2', 2: 'Level 2',
+  level3: 'Level 3', 3: 'Level 3', consolidation: 'Consolidation', 4: 'Consolidation' };
 const hasFailure = value => {
   if (typeof value === 'string') return ['failed', 'error', 'cancelled'].includes(value);
   return value && typeof value === 'object' && Object.values(value).some(hasFailure);
+};
+const partialStage = (outcomes, levels) => {
+  const source = outcomes && typeof outcomes === 'object' ? outcomes : levels && typeof levels === 'object' ? levels : null;
+  const failed = source ? Object.entries(source).filter(([key, val]) => stageLabels[key] && hasFailure(val)).map(([key]) => stageLabels[key]) : [];
+  const unique = [...new Set(failed)];
+  return unique.length ? `Partial results; ${unique.join(', ')} failed` : 'Partial results; one or more stages failed';
 };
 
 const read = (db, id) => parse(db.prepare('SELECT activity_state FROM analysis_runs WHERE id = ?').get(id)?.activity_state);
@@ -85,13 +93,14 @@ const update = (db, id, progress = {}) => {
   const row = db.prepare('SELECT status, level_outcomes, total_suggestions FROM analysis_runs WHERE id = ?').get(id);
   if (!row) return previous;
   let status = previous.status === 'cancellation_requested' ? 'cancelled' : progress.status || previous.status;
-  if (status === 'completed' && (hasFailure(progress.levels) || hasFailure(parse(row.level_outcomes)))) status = 'partial';
+  const outcomes = parse(row.level_outcomes);
+  if (status === 'completed' && (hasFailure(progress.levels) || hasFailure(outcomes))) status = 'partial';
   if (terminal.has(previous.status) && status !== previous.status && !(previous.status === 'completed' && status === 'partial')) return previous;
   const runningLevel = Object.entries(progress.levels || {}).reverse().find(([, level]) => level?.status === 'running');
   const now = new Date().toISOString();
   const state = {
     ...previous, status, sequence: previous.sequence + 1, lastEventAt: now,
-    stage: status === 'partial' ? 'Partial results; one or more stages failed'
+    stage: status === 'partial' ? partialStage(outcomes, progress.levels)
       : terminal.has(status) ? `Analysis ${status}`
         : status === 'cancellation_requested' ? 'Waiting for executor cancellation acknowledgement'
           : runningLevel ? (stages[runningLevel[0]] || 'Running reviewer') : previous.stage,
@@ -137,7 +146,7 @@ const cancelOwnedRuns = (acknowledged = false) => {
 
 const snapshot = db => {
   const rows = db.prepare(`SELECT a.id, a.review_id, a.status, a.provider, a.model, a.head_sha,
-    a.total_suggestions,
+    a.total_suggestions, a.level_outcomes,
     a.started_at, a.completed_at, a.parent_run_id, a.activity_state, r.review_type, r.pr_number, r.repository
     FROM analysis_runs a JOIN reviews r ON r.id = a.review_id WHERE a.parent_run_id IS NULL
     AND (a.status = 'running' OR (a.activity_state IS NOT NULL AND
@@ -153,7 +162,11 @@ const snapshot = db => {
       lastEventAt: null, seenAt: null
     };
     const owned = stored.instanceId === instanceId && owners.get(row.id)?.deref() === db;
-    return { ...stored, observation: terminal.has(stored.status) ? 'recorded' : owned ? 'live' : 'unavailable',
+    const outcomes = parse(row.level_outcomes);
+    const stage = stored.status === 'partial' && stored.stage === 'Partial results; one or more stages failed'
+      ? partialStage(outcomes) : stored.stage;
+    return { ...stored, stage, levelOutcomes: outcomes,
+      observation: terminal.has(stored.status) ? 'recorded' : owned ? 'live' : 'unavailable',
       suggestionsCount: stored.entryPoint === 'result-import' ? row.total_suggestions : stored.suggestionsCount,
       ...(terminal.has(stored.status) || owned ? {} : { status: 'unknown', stage: 'Owning executor is not observed on this instance' }) };
   });

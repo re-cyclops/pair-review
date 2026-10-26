@@ -5,6 +5,19 @@ if (process.argv.includes('--version')) { console.log('Deterministic OMP fixture
 const gate = process.env.WORKSPACE_PROVIDER_GATE;
 if (!gate) throw new Error('WORKSPACE_PROVIDER_GATE is required; this is not a real provider');
 if (process.env.WORKSPACE_PROVIDER_IGNORE_TERM === '1') process.on('SIGTERM', () => {});
+// Only a live test run signals the gate. When the harness dies first (crash,
+// SIGKILL, interrupted runner) nothing ever writes it, and this process would
+// watch forever — observed as day-old orphans. Providers spawn this fixture
+// detached in its own process group, so even the e2e group-kill of the
+// workspace server cannot reach it. A live test resolves the gate in seconds;
+// this cap retires only abandoned fixtures, including the SIGTERM-ignoring
+// variant above. Exit 75 (EX_TEMPFAIL) makes a legitimately too-slow test
+// fail visibly instead of hanging.
+const maxLifeMs = Number(process.env.WORKSPACE_PROVIDER_MAX_LIFE_MS || 10 * 60 * 1000);
+setTimeout(() => {
+  console.error(`Workspace provider fixture timed out after ${maxLifeMs}ms waiting for its gate; exiting`);
+  process.exit(75);
+}, maxLifeMs);
 let watcher;
 const finish = () => {
   if (!fs.existsSync(gate)) return;

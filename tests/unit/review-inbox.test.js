@@ -371,6 +371,18 @@ it('keeps completed finding count and actual model identity instead of a generic
   expect(record.model.textContent).toContain('codex/chosen-model');
 });
 
+it('shows finding counts and failed stages on partial AI runs instead of a bare AI partial label', () => {
+  inbox.workspace.reviews = [{ id: 10, reviewType: 'pr', repository: 'example/project', number: 42, aiRunCount: 1,
+    latestAiRun: { id: 'partial-run', status: 'partial', startedAt: '2026-10-22T14:35:03Z', totalSuggestions: 2,
+      levelOutcomes: { level1: 'success', level2: 'success', level3: 'failed', consolidation: 'success' },
+      stage: 'Partial results; Level 3 failed',
+      actualModels: [{ provider: 'muse-code', model: 'muse-wonder-full-1.0' }] } }];
+  inbox.render(record);
+  expect(record.activity.dataset.aiState).toBe('reviewed');
+  expect(record.activity.textContent).toBe('AI partial \u00B7 2 findings (L3 failed)');
+  expect(record.activity.title).toContain('Level 3 failed');
+});
+
 it.each(['completed', 'failed'])('does not let older running activity hide a newer persisted %s result', status => {
   inbox.workspace.reviews = [{ id: 10, reviewType: 'pr', repository: 'example/project', number: 42, aiRunCount: 2,
     latestAiRun: { id: 'new-terminal', status, startedAt: '2026-10-20T00:00:00Z', totalSuggestions: 4,

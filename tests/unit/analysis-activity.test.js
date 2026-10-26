@@ -37,7 +37,12 @@ describe('durable activity', () => {
     await start('partial');
     await repo.update('partial', { status: 'completed', totalSuggestions: 3, levelOutcomes: { 1: 'success', consolidation: 'failed' } });
     shared.broadcastProgress('partial', { status: 'completed', levels: {} });
-    expect(activity.snapshot(db).runs[0]).toMatchObject({ status: 'partial', suggestionsCount: 3 });
+    expect(activity.snapshot(db).runs[0]).toMatchObject({
+      status: 'partial',
+      stage: 'Partial results; Consolidation failed',
+      suggestionsCount: 3,
+      levelOutcomes: { 1: 'success', consolidation: 'failed' }
+    });
   });
 
   it('keeps a council partial when another voice completes after a nested stage failure', async () => {

@@ -487,24 +487,41 @@
       write(record.model, latestAi ? modelNames.length > 1 ? `${modelNames[0]} +${modelNames.length - 1} · inspect history` : modelNames[0] || 'Model not recorded' : '');
       record.model.title = modelNames.join(', ');
       const isAiRunning = Boolean(latestAi && ['starting', 'queued', 'running', 'cancellation_requested'].includes(latestAi.status));
-      record.aiReviewed = Boolean(aiRunCount > 0 || (latestAi && latestAi.status === 'completed'));
+      record.aiReviewed = Boolean(aiRunCount > 0 || (latestAi && ['completed', 'partial'].includes(latestAi.status)));
       if (isAiRunning) {
         record.activity.dataset.aiState = 'running';
         write(record.activity, `AI reviewing \u00B7 ${latestAi.stage || latestAi.status.replaceAll('_', ' ')}`);
+        record.activity.title = latestAi.stage || '';
       } else if (latestAi && aiRunCount > 0) {
         const status = latestAi.status || 'completed';
         const count = Number(latestAi.totalSuggestions ?? latestAi.suggestionsCount ?? 0);
+        const findingsLabel = count === 0 ? '0 findings' : `${count} finding${count === 1 ? '' : 's'}`;
         const runsLabel = aiRunCount > 1 ? ` \u00B7 ${aiRunCount} runs` : '';
+        const outcomes = latestAi.levelOutcomes || latestAi.level_outcomes;
+        const failedStages = outcomes && typeof outcomes === 'object'
+          ? [['level1', 'L1'], ['1', 'L1'], ['level2', 'L2'], ['2', 'L2'], ['level3', 'L3'], ['3', 'L3'], ['consolidation', 'consolidation']]
+            .filter(([key]) => ['failed', 'error', 'cancelled'].includes(outcomes[key]?.status || outcomes[key]))
+            .map(([, label]) => label)
+          : [];
+        const uniqueFailed = [...new Set(failedStages)];
         if (status === 'completed') {
           record.activity.dataset.aiState = 'reviewed';
-          write(record.activity, `AI reviewed \u00B7 ${count === 0 ? '0 findings' : `${count} finding${count === 1 ? '' : 's'}`}${runsLabel}`);
+          write(record.activity, `AI reviewed \u00B7 ${findingsLabel}${runsLabel}`);
+          record.activity.title = `AI review completed (${findingsLabel})`;
+        } else if (status === 'partial') {
+          record.activity.dataset.aiState = 'reviewed';
+          const failNote = uniqueFailed.length ? ` (${uniqueFailed.join(', ')} failed)` : '';
+          write(record.activity, `AI partial \u00B7 ${findingsLabel}${failNote}${runsLabel}`);
+          record.activity.title = latestAi.stage || `Finished with partial results${failNote}: ${findingsLabel}`;
         } else {
           record.activity.dataset.aiState = status === 'failed' ? 'error' : 'reviewed';
           write(record.activity, `AI ${status.replaceAll('_', ' ')}${runsLabel}`);
+          record.activity.title = latestAi.stage || `AI ${status.replaceAll('_', ' ')}`;
         }
       } else {
         record.activity.dataset.aiState = 'unreviewed';
         write(record.activity, 'Not AI reviewed');
+        record.activity.title = '';
       }
       const bulk = window.bulkAnalysisLauncher?.state(record.local
         ? { local: true, reviewId: record.row.dataset.sessionId }
@@ -703,14 +720,26 @@
           return;
         }
         runs.forEach((run, idx) => {
-          const card = element('article', null, { class: 'workspace-run', 'data-state': run.status || 'completed' });
+          const outcomes = run.level_outcomes && typeof run.level_outcomes === 'object' ? run.level_outcomes : null;
+          const stageSummary = outcomes
+            ? [['level1', 'Level 1'], ['level2', 'Level 2'], ['level3', 'Level 3'], ['consolidation', 'Consolidation']]
+              .filter(([key]) => key in outcomes)
+              .map(([key, label]) => `${label}: ${outcomes[key]?.status || outcomes[key]}`)
+            : [];
+          const hasStageFailure = Boolean(outcomes && Object.values(outcomes).some(val => ['failed', 'error', 'cancelled'].includes(val?.status || val)));
+          const displayStatus = run.status === 'completed' && hasStageFailure ? 'partial' : (run.status || 'completed');
+          const card = element('article', null, { class: 'workspace-run', 'data-state': displayStatus });
           const count = Number(run.total_suggestions || 0);
           const header = element('p');
           const badge = element('strong', idx === 0 ? `Latest (#${runs.length})` : `Run #${runs.length - idx}`);
           const actual = run.actualModels?.length ? run.actualModels.map(item => [item.provider, item.model].filter(Boolean).join('/')).join(', ') : 'model not recorded';
-          const meta = element('span', ` \u00B7 ${actual} \u00B7 ${count === 0 ? '0 findings' : `${count} finding${count === 1 ? '' : 's'}`} \u00B7 ${run.completed_at || run.started_at || ''}${run.head_sha ? ` \u00B7 @${String(run.head_sha).slice(0, 7)}` : ''}`);
+          const statusNote = displayStatus !== 'completed' ? ` \u00B7 ${displayStatus}` : '';
+          const meta = element('span', `${statusNote} \u00B7 ${actual} \u00B7 ${count === 0 ? '0 findings' : `${count} finding${count === 1 ? '' : 's'}`} \u00B7 ${run.completed_at || run.started_at || ''}${run.head_sha ? ` \u00B7 @${String(run.head_sha).slice(0, 7)}` : ''}`);
           header.append(badge, meta);
           card.append(header);
+          if (stageSummary.length && hasStageFailure) {
+            card.append(element('p', `Stages \u2014 ${stageSummary.join(' \u00B7 ')}`, { class: 'workspace-muted' }));
+          }
           if (run.summary) {
             card.append(element('p', run.summary, { class: 'workspace-muted' }));
           }

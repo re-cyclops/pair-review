@@ -49,7 +49,7 @@ router.get('/api/reviews/recent', (req, res) => {
       p.title, p.host, p.pr_data, MAX(COALESCE(julianday(p.last_accessed_at), 0), julianday(r.updated_at)) AS touched,
       d.draft_count, d.has_summary, json_extract(r.review_progress, '$.reviewed.head') AS last_reviewed_head,
       (SELECT COUNT(*) FROM analysis_runs a WHERE a.review_id = r.id AND a.parent_run_id IS NULL) AS ai_run_count,
-      (SELECT json_object('id', a.id, 'status', a.status, 'provider', a.provider, 'model', a.model, 'totalSuggestions', a.total_suggestions, 'completedAt', a.completed_at, 'startedAt', a.started_at, 'headSha', a.head_sha) FROM analysis_runs a WHERE a.review_id = r.id AND a.parent_run_id IS NULL ORDER BY julianday(a.started_at) DESC, a.rowid DESC LIMIT 1) AS latest_ai_run,
+      (SELECT json_object('id', a.id, 'status', a.status, 'provider', a.provider, 'model', a.model, 'totalSuggestions', a.total_suggestions, 'completedAt', a.completed_at, 'startedAt', a.started_at, 'headSha', a.head_sha, 'levelOutcomes', json(a.level_outcomes)) FROM analysis_runs a WHERE a.review_id = r.id AND a.parent_run_id IS NULL ORDER BY julianday(a.started_at) DESC, a.rowid DESC LIMIT 1) AS latest_ai_run,
       (SELECT activity_state FROM analysis_runs a WHERE a.review_id = r.id AND a.parent_run_id IS NULL ORDER BY julianday(a.started_at) DESC, a.rowid DESC LIMIT 1) AS activity
     FROM reviews r LEFT JOIN pr_metadata p ON p.repository = r.repository COLLATE NOCASE AND p.pr_number = r.pr_number
     JOIN (${getDraftStateQuery()}) d ON d.review_id = r.id
@@ -59,6 +59,7 @@ router.get('/api/reviews/recent', (req, res) => {
     const pr = safeParseJson(row.pr_data) || {};
     const local = row.review_type === 'local';
     const latestRun = safeParseJson(row.latest_ai_run);
+    const activityState = safeParseJson(row.activity);
     return { id: row.id, reviewType: row.review_type, repository: local ? path.basename(row.repository) : row.repository,
       number: row.pr_number, title: row.title || row.name || path.basename(row.repository),
       headSha: local ? row.local_head_sha : pr.head_sha || null, host: row.host || null,
@@ -66,9 +67,12 @@ router.get('/api/reviews/recent', (req, res) => {
       draftCount: row.draft_count, hasDraftSummary: Boolean(row.has_summary),
       lastReviewedHead: row.last_reviewed_head || null,
       aiRunCount: Number(row.ai_run_count || 0),
-      latestAiRun: latestRun ? { ...latestRun, requestedProvider: latestRun.provider, requestedModel: latestRun.model,
+      latestAiRun: latestRun ? { ...latestRun,
+        status: activityState?.status === 'partial' && latestRun.status === 'completed' ? 'partial' : latestRun.status,
+        stage: activityState?.stage || null,
+        requestedProvider: latestRun.provider, requestedModel: latestRun.model,
         actualModels: actualModelsForRun({ activity_state: row.activity }) } : null,
-      updatedAt: row.updated_at, activity: safeParseJson(row.activity),
+      updatedAt: row.updated_at, activity: activityState,
       url: local ? `/local/${row.id}` : `/pr/${row.repository.split('/').map(encodeURIComponent).join('/')}/${row.pr_number}${row.host ? `?host=${encodeURIComponent(row.host)}` : ''}` };
   });
   const last = rows[Math.min(rows.length, limit) - 1];
