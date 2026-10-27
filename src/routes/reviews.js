@@ -411,9 +411,11 @@ router.put('/api/reviews/:reviewId/comments/:id', validateReviewId, async (req, 
     const { id } = req.params;
     const { body, included, expected_revision, draft_key } = req.body;
 
-    if (body !== undefined && (typeof body !== 'string' || !body.trim())) {
+    // An empty body is allowed only for an explicitly excluded draft: empty
+    // comments are optional and are skipped at submission.
+    if (body !== undefined && (typeof body !== 'string' || (!body.trim() && included !== false))) {
       return res.status(400).json({
-        error: 'Comment body cannot be empty'
+        error: 'Comment body cannot be empty unless the draft is excluded'
       });
     }
     if ((body === undefined && included === undefined) || (included !== undefined && typeof included !== 'boolean')) {

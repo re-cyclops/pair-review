@@ -78,6 +78,12 @@
       return !entry.base ? entry.body !== '' : entry.body !== entry.base.body || entry.included !== Boolean(entry.base.included);
     }
 
+    // A comment draft with no text is optional: it is excluded from the
+    // submission and is never an error the author must resolve.
+    isEmpty(entry) {
+      return entry.mode !== 'summary' && !(entry.body || '').trim();
+    }
+
     hasPending(reviewId) {
       return [...this.entries.values()].some(entry => entry.reviewId === reviewId && (this.dirty(entry) || entry.saving || entry.conflict));
     }
@@ -201,10 +207,21 @@
       if (this.serverChanged) throw new Error('Server instance changed. Reload before saving; your recovery text is retained.');
       if (entry.paused) throw new Error('Review recovered text before saving it');
       if (entry.conflict) throw new Error('Resolve this draft conflict before saving');
-      if (entry.mode !== 'summary' && !entry.body.trim()) {
-        entry.state = 'Save failed: empty comment; finish editing or delete the draft';
-        this.render(entry);
-        throw new Error(entry.state);
+      if (this.isEmpty(entry)) {
+        // Normalize the saved body only; never rewrite a textarea the author
+        // may still be typing whitespace into.
+        entry.body = '';
+        entry.included = false;
+        if (!entry.base) {
+          entry.state = 'Empty — optional; nothing to save'; // taste-skill-ignore
+          this.preserve(entry);
+          return null;
+        }
+        if (!this.dirty(entry)) {
+          entry.state = 'Empty — excluded; won’t be submitted'; // taste-skill-ignore
+          this.preserve(entry);
+          return entry.base;
+        }
       }
       const body = entry.body;
       const included = entry.included;
@@ -221,7 +238,7 @@
           });
           entry.base = summary ? { ...data, draft_key: entry.key, included: true } : data.comment;
           entry.paused = false;
-          entry.state = this.dirty(entry) ? 'Unsaved changes' : 'Saved locally';
+          entry.state = this.dirty(entry) ? 'Unsaved changes' : this.isEmpty(entry) ? 'Empty — excluded; won’t be submitted' : 'Saved locally'; // taste-skill-ignore
           this.preserve(entry);
           window.dispatchEvent(new CustomEvent('reviewDraftSaved', { detail: { reviewId: entry.reviewId, comment: entry.mode === 'summary' ? null : entry.base, summary: entry.mode === 'summary' ? entry.base : null } }));
           return entry.base;
@@ -349,8 +366,17 @@
 
     render(entry) {
       for (const view of entry.views) {
-        view.status.textContent = this.serverChanged ? 'Server changed: reload to save; recovery text retained'
-          : `${entry.state || 'Unsaved changes'}${entry.mode !== 'summary' && entry.base && !entry.included ? ' · excluded' : ''}${entry.recoveryFailed ? ' · browser recovery unavailable; keep this page open' : ''}`;
+        // Quiet when settled: a saved, included draft needs no status line,
+        // and a saved empty draft is already labelled by its card badge.
+        // Anything the author must act on (unsaved, excluded, failed) still
+        // speaks.
+        const settled = !this.serverChanged && !entry.conflict && !entry.recoveryFailed && (
+          (entry.state === 'Saved locally' && (entry.mode === 'summary' || entry.included)) ||
+          (this.isEmpty(entry) && entry.state?.startsWith('Empty')));
+        view.status.textContent = settled ? ''
+          : this.serverChanged ? 'Server changed: reload to save; recovery text retained'
+          : `${entry.state || 'Unsaved changes'}${entry.mode !== 'summary' && entry.base && !entry.included && !this.isEmpty(entry) ? ' · excluded' : ''}${entry.recoveryFailed ? ' · browser recovery unavailable; keep this page open' : ''}`;
+        view.status.dataset.state = entry.conflict || entry.state?.startsWith('Save failed') ? 'error' : this.isEmpty(entry) ? 'empty' : 'ok';
         view.resolve.hidden = !entry.conflict && !entry.state?.startsWith('Save failed');
       }
       if (entry.recoveryStatus?.isConnected) entry.recoveryStatus.textContent = entry.state;

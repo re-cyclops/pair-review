@@ -204,12 +204,16 @@ async function buildSubmissionManifest({ db, reviewId, client, target, config = 
   const cleanup = cleanupAttempt(db, reviewId);
   if (cleanup) blockers.push('The review was submitted successfully, but its local draft cleanup is incomplete. Finish local cleanup from its receipt before publishing another review.');
   const drafts = readDrafts(db, reviewId, selection).map(row => draftData(row, selection));
-  const comments = drafts.filter(comment => comment.included);
+  // Empty drafts are optional: they are never selected for publication and
+  // never block it. The preview reports how many were skipped, so the skip
+  // is explicit rather than silent.
+  const isEmptyDraft = comment => typeof comment.body !== 'string' || !comment.body.trim();
+  const skippedEmpty = drafts.filter(isEmptyDraft).length;
+  const comments = drafts.filter(comment => comment.included && !isEmptyDraft(comment));
   if (selection?.kind === 'analysis' && comments.length !== new Set(selection.ids).size) blockers.push('The selected analysis results changed. Start a new preview.');
   for (const comment of comments) {
     const errors = [];
     const anchor = comment.wire;
-    if (typeof comment.body !== 'string' || !comment.body.trim()) errors.push('Comment text is empty.');
     if (index && !index.files.has(anchor.path)) errors.push('This file is not in the current PR diff. Exclude the comment or explicitly move its text into the review body.');
     if (destination && comment.originalHead !== destination.head) errors.push(comment.originalHead ? 'This draft is anchored to an older head. Review its anchor on the current revision.' : 'This draft has no recorded head. Confirm its anchor on the current revision.');
     if (index && !anchor.isFileLevel && (!Number.isInteger(anchor.line) || anchor.line < 1 ||
@@ -235,7 +239,7 @@ async function buildSubmissionManifest({ db, reviewId, client, target, config = 
     target: destination, local, mode, event: decision, body: text, bodyRevision: body === undefined ? review.draft_revision : null,
     association: review.associated_pr ? JSON.parse(review.associated_pr) : null,
     selection, pendingReviewId: pending?.id || null, pendingBody: pending?.body ?? text, comments, count: comments.length, prose };
-  return { ...manifest, digest: digest(manifest), drafts, pending, blockers, allowedEvents,
+  return { ...manifest, digest: digest(manifest), drafts, skippedEmpty, pending, blockers, allowedEvents,
     fetchedAt: now(), attempt: cleanup ? receipt(db, cleanup.id) : prior ? receipt(db, prior.id) : null };
 }
 
@@ -244,14 +248,15 @@ function targetIdentity(target) {
 }
 
 function frozenManifest(manifest) {
-  const { drafts, pending, blockers, allowedEvents, fetchedAt, attempt, ...frozen } = manifest;
+  const { drafts, skippedEmpty, pending, blockers, allowedEvents, fetchedAt, attempt, ...frozen } = manifest;
   return frozen;
 }
 
 function assertLocalCurrent(db, manifest) {
   const review = db.prepare('SELECT * FROM reviews WHERE id = ?').get(manifest.reviewId);
   if (!review || manifest.bodyRevision !== null && (review.draft_revision !== manifest.bodyRevision || review.draft_body !== manifest.body || review.draft_event !== manifest.event)) throw fail('Review body or decision changed after preview. Confirm a new preview.');
-  const selected = readDrafts(db, manifest.reviewId, manifest.selection).map(row => draftData(row, manifest.selection)).filter(comment => comment.included);
+  const selected = readDrafts(db, manifest.reviewId, manifest.selection).map(row => draftData(row, manifest.selection))
+    .filter(comment => comment.included && typeof comment.body === 'string' && comment.body.trim());
   const expected = manifest.comments.map(({ errors, ...comment }) => comment);
   if (digest(selected) !== digest(expected)) throw fail('Selected draft text, inclusion or anchors changed after preview. Confirm a new preview.');
 }

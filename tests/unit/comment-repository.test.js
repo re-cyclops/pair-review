@@ -403,6 +403,31 @@ describe('CommentRepository', () => {
       await expect(commentRepo.updateComment(commentId.lastID, { body: '' })).rejects.toThrow('cannot be empty');
     });
 
+    it('should allow an empty body when the draft is explicitly excluded (optional comment)', async () => {
+      const commentId = await run(db, `
+        INSERT INTO comments (review_id, source, file, line_start, body)
+        VALUES (?, ?, ?, ?, ?)
+      `, [1, 'user', 'test.js', 10, 'Original comment']);
+
+      const previous = await commentRepo.getComment(commentId.lastID);
+      await commentRepo.updateComment(commentId.lastID, { body: '', included: false, expected_revision: previous.revision, draft_key: previous.draft_key });
+
+      const comment = await queryOne(db, 'SELECT * FROM comments WHERE id = ?', [commentId.lastID]);
+      expect(comment.body).toBe('');
+      expect(comment.included).toBe(0);
+    });
+
+    it('should still reject an empty body for an included draft', async () => {
+      const commentId = await run(db, `
+        INSERT INTO comments (review_id, source, file, line_start, body)
+        VALUES (?, ?, ?, ?, ?)
+      `, [1, 'user', 'test.js', 10, 'Original comment']);
+
+      const previous = await commentRepo.getComment(commentId.lastID);
+      await expect(commentRepo.updateComment(commentId.lastID, { body: '  ', included: true, expected_revision: previous.revision, draft_key: previous.draft_key }))
+        .rejects.toThrow('cannot be empty');
+    });
+
   });
 
   describe('deleteComment', () => {

@@ -94,6 +94,22 @@ describe('Manifest-bound native review publication', () => {
     expect(db.prepare('SELECT status, included FROM comments WHERE id = ?').get(excluded)).toEqual({ status: 'active', included: 0 });
   });
 
+  it('skips empty optional drafts instead of blocking publication', async () => {
+    const keep = await draft('Publish this one');
+    const cleared = await draft('Author cleared this text');
+    const row = await repo.getComment(cleared);
+    await repo.updateComment(cleared, { body: '', included: false, expected_revision: row.revision, draft_key: row.draft_key });
+    const manifest = await preview();
+    expect(manifest.skippedEmpty).toBe(1);
+    expect(manifest.comments.map(comment => comment.id)).toEqual([keep]);
+    expect(manifest.blockers.join(' ')).not.toContain('empty');
+    const result = await publish(manifest);
+    expect(result.status, JSON.stringify(result.data)).toBe(200);
+    expect(result.data.receipt.state).toBe('submitted');
+    const remote = [...host.state.reviews.values()][0];
+    expect(remote.comments.map(comment => comment.body)).toEqual(['Publish this one']);
+  });
+
   it('checks only selected prose while publishing technical Markdown byte for byte', async () => {
     app.get('config').review_prose = { profile: 'Fixture style', rules: { 'long-dashes': 'advisory', 'terminal-period': 'advisory' } };
     const body = 'This might fail\u2014under cancellation. Could we retain `literal.name.`?\n\n```suggestion\nconst label = \"keep\u2014this.\";\n```\n';

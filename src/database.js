@@ -4040,8 +4040,11 @@ class CommentRepository {
    * Markdown code blocks. A conflict returns the current record without writing.
    */
   async updateComment(id, { body, included, expected_revision, draft_key }) {
-    if (body !== undefined && (typeof body !== 'string' || !body.trim())) {
-      throw Object.assign(new Error('Comment body cannot be empty'), { statusCode: 400 });
+    // An empty body is a valid optional draft only when it is explicitly
+    // excluded: it is then skipped at submission, never published.
+    const excludedEmpty = typeof body === 'string' && !body.trim() && (included === false || included === 0);
+    if (body !== undefined && !excludedEmpty && (typeof body !== 'string' || !body.trim())) {
+      throw Object.assign(new Error('Comment body cannot be empty unless the draft is excluded'), { statusCode: 400 });
     }
     return this.db.transaction(() => {
       const current = this.db.prepare("SELECT * FROM comments WHERE id = ? AND source = 'user'").get(id);
