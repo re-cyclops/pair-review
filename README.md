@@ -930,6 +930,25 @@ It is available in the inbox, PR and local reviews, and settings. Opening it
 from an editor or another dialog preserves that editor's text; `Escape`
 returns focus to the previous control.
 
+Press `?` for the full shortcut list. Shortcut chips live inside the buttons
+they act on and stay hidden until you hold `Cmd`, `Ctrl`, or `Alt`. The review flow is keyboard-first:
+outdated external comments. In the review dialog, `Cmd+Enter` (macOS) or
+`Ctrl+Enter` submits, `Cmd+Shift+Enter` prepares the exact final preview
+without publishing, `Cmd+S` saves every draft locally, `Alt+1` / `Alt+2` /
+`Alt+3` choose Approve / Comment / Request changes, and `Alt+↑` / `Alt+↓`
+move between the summary and each draft editor. The dialog opens with the
+summary focused, editors grow with their text, and preparing a preview
+scrolls it into view. An armed exact final
+preview still publishes only from its **Publish** button; the submit chord
+moves focus to it instead of firing it. In a comment editor,
+`Cmd+Enter` saves the comment and `Escape` cancels the edit. Empty comment
+drafts are optional: clear the text and the draft is marked **Empty —
+skipped**, excluded from the submission, and reported in the final preview;
+it never blocks saving or publishing. Outdated external comments (the code
+they reference changed after they were written) carry an amber **Outdated**
+badge and an explanatory note; the review panel counts them and can hide
+them (`o`).
+
 Use `Tab` and `Shift+Tab` to navigate analysis configuration, and `Space` to
 change its level and remember-setting checkboxes. Diff and sound menus focus
 their first enabled control when opened and return focus to their trigger on
