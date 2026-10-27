@@ -434,8 +434,19 @@
             : request?.availability === 'known' && request.firstRequestedAt && !validDate ? reasons['invalid-request-date']
               : request?.availability !== 'known' && request ? reasons[request.reason] || 'Request history could not be established.'
                 : '';
+        // Scan-friendly: "Today, 11:43 AM" / "Oct 23, 11:43 AM"; the year and
+        // time zone appear only when they disambiguate. Exact value stays in
+        // the title and datetime attribute.
+        const compactDate = d => {
+          const now = new Date();
+          const sameDay = d.toDateString() === now.toDateString();
+          const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+          if (sameDay) return `Today, ${time}`;
+          const day = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', ...(d.getFullYear() !== now.getFullYear() ? { year: 'numeric' } : {}) });
+          return `${day}, ${time}`;
+        };
         write(record.requested, validDate
-          ? `${stale ? 'Last observed: ' : ''}${date.toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })}`
+          ? `${stale ? 'Last observed: ' : ''}${compactDate(date)}`
           : missingSchema ? 'Server update needed'
             : failed || request?.availability === 'unavailable' ? 'Request date unavailable'
               : s?.availability === 'loading' ? 'Loading request history…'

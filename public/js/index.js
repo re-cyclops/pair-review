@@ -651,10 +651,10 @@
         '<thead>' +
           '<tr>' +
             '<th scope="col" class="col-identity">Pull request</th>' +
-            '<th scope="col">First requested</th>' +
-            '<th scope="col">AI review</th>' +
-            '<th scope="col">Review state</th>' +
-            '<th scope="col">Actions</th>' +
+            '<th scope="col" class="col-requested">First requested</th>' +
+            '<th scope="col" class="col-ai">AI review</th>' +
+            '<th scope="col" class="col-state">Review state</th>' +
+            '<th scope="col" class="col-actions">Actions</th>' +
           '</tr>' +
         '</thead>' +
         '<tbody id="' + tbodyId + '">' +
@@ -1337,10 +1337,10 @@
           '<thead>' +
             '<tr>' +
               '<th scope="col" class="col-identity">Pull request</th>' +
-              '<th scope="col">First requested</th>' +
-              '<th scope="col">AI review</th>' +
-              '<th scope="col">Review state</th>' +
-              '<th scope="col">Actions</th>' +
+              '<th scope="col" class="col-requested">First requested</th>' +
+              '<th scope="col" class="col-ai">AI review</th>' +
+              '<th scope="col" class="col-state">Review state</th>' +
+              '<th scope="col" class="col-actions">Actions</th>' +
             '</tr>' +
           '</thead>' +
           '<tbody id="recent-reviews-tbody">' +
