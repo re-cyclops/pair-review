@@ -1,346 +1,134 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
 // @vitest-environment jsdom
-/**
- * Unit tests for CommentManager.displaySuggestionEditForm()
- *
- * Tests the edit form that appears when a user chooses to edit an AI
- * suggestion before adopting it. The form should display the suggestion
- * body in a textarea and call onSave/onCancel callbacks without making
- * any API calls.
- *
- * Regression test: displaySuggestionEditForm must NOT call fetch.
- * Editing a suggestion should only invoke the onSave callback with
- * the edited text — the caller is responsible for persisting.
- */
-
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-
-// Setup global.window before importing production code that assigns to it
-window.escapeHtmlAttribute = (s) => s;
-window.emojiPicker = undefined;
-
-// Import the actual CommentManager class from production code
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { once } from 'node:events';
+import express from 'express';
+import { createTestDatabase } from '../utils/schema.js';
+const routes = require('../../src/routes/reviews');
 const { CommentManager } = require('../../public/js/modules/comment-manager.js');
+const draftModule = require.resolve('../../public/js/modules/draft-store.js');
+delete require.cache[draftModule];
+require(draftModule);
+const drafts = window.reviewDrafts;
+const realFetch = globalThis.fetch;
+let db, server, base, manager, targetRow, offline;
 
-/**
- * Create a minimal CommentManager instance for testing
- */
-function createTestCommentManager() {
-  const commentManager = Object.create(CommentManager.prototype);
-  commentManager.prManager = null;
-  commentManager.currentCommentForm = null;
-  commentManager.autoResizeTextarea = vi.fn();
-  commentManager.updateSuggestionButtonState = vi.fn();
-  commentManager.insertSuggestionBlock = vi.fn();
-  return commentManager;
-}
-
-/**
- * Create a minimal suggestion object
- */
-function createSuggestion(overrides = {}) {
-  return {
-    id: 'sug-1',
-    body: 'const x = 1;',
-    type: 'issue',
-    title: 'Use const instead of let',
-    file: 'src/app.js',
-    lineNumber: 42,
-    diffPosition: 10,
-    side: 'RIGHT',
-    ...overrides,
+beforeEach(async () => {
+  sessionStorage.clear();
+  drafts.entries.clear();
+  drafts.connect({ dbId: 'suggestion-editor-db', instanceId: 'suggestion-editor-instance' });
+  db = createTestDatabase();
+  db.prepare("INSERT INTO reviews (id, repository, pr_number) VALUES (1, 'owner/repo', 1)").run();
+  db.prepare("INSERT INTO comments (id, review_id, file, line_start, line_end, side, body, source) VALUES (1, 1, 'a.js', 42, 44, 'LEFT', 'Original AI finding', 'ai')").run();
+  db.prepare("INSERT INTO comments (id, review_id, file, line_start, line_end, side, body, source) VALUES (2, 1, 'a.js', 42, 44, 'LEFT', 'Original AI finding', 'ai')").run();
+  const app = express();
+  app.use(express.json());
+  app.set('db', db);
+  app.set('config', { comment_format: 'plain' });
+  app.use(routes);
+  server = app.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  base = `http://127.0.0.1:${server.address().port}`;
+  offline = false;
+  vi.stubGlobal('fetch', (url, options) => {
+    if (offline) return Promise.reject(new TypeError('Connection unavailable'));
+    return realFetch(new URL(url, base), options);
+  });
+  window.prManager = {
+    currentPR: { id: 1, head_sha: 'a'.repeat(40) }, loadUserComments() {},
+    escapeHtml(text) { const node = document.createElement('span'); node.textContent = text; return node.innerHTML; }
   };
+  document.body.innerHTML = '<table><tbody><tr id="target"></tr></tbody></table>';
+  document.body.append(drafts.button);
+  targetRow = document.getElementById('target');
+  manager = Object.create(CommentManager.prototype);
+  manager.prManager = window.prManager;
+  manager.currentCommentForm = null;
+});
+
+afterEach(async () => {
+  for (const entry of drafts.entries.values()) clearTimeout(entry.timer);
+  await Promise.allSettled([...drafts.entries.values()].map(entry => entry.saving));
+  clearTimeout(drafts.refreshTimer);
+  const stopped = new Promise(resolve => server.close(resolve));
+  server.closeAllConnections();
+  await stopped;
+  db.close();
+  drafts.entries.clear();
+  sessionStorage.clear();
+  vi.unstubAllGlobals();
+});
+
+async function openEditor(onSave = async () => {}, id = 1) {
+  const row = manager.displaySuggestionEditForm({ id, file: 'a.js', lineNumber: 42, lineEnd: 44,
+    side: 'LEFT', body: 'Original AI finding', type: 'issue', title: 'Preserve this invariant' }, targetRow, onSave, () => {});
+  const textarea = row.querySelector('textarea');
+  await textarea.draftReady;
+  return { row, textarea };
 }
 
-/**
- * Build a minimal DOM table with a tbody and a target row.
- * Returns { table, tbody, targetRow }.
- */
-function createTableDOM() {
-  const table = document.createElement('table');
-  const tbody = document.createElement('tbody');
-  const targetRow = document.createElement('tr');
-  targetRow.className = 'target-row';
-  tbody.appendChild(targetRow);
-  table.appendChild(tbody);
-  document.body.appendChild(table);
-  return { table, tbody, targetRow };
+function edit(textarea, body) {
+  textarea.value = body;
+  textarea.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-describe('CommentManager.displaySuggestionEditForm', () => {
-  let commentManager;
-  let table;
-  let tbody;
-  let targetRow;
-
-  beforeEach(() => {
-    commentManager = createTestCommentManager();
-    ({ table, tbody, targetRow } = createTableDOM());
+describe('Edited suggestion draft preservation', () => {
+  it('saves edited text excluded from publication without adopting the AI finding', async () => {
+    const { row, textarea } = await openEditor();
+    const body = '    preserveWhitespace();\n\nKeep `technical_value`.\n';
+    edit(textarea, body);
+    await drafts.flush(textarea.draftEntry);
+    expect(db.prepare("SELECT body, included, parent_id, side, line_start, line_end FROM comments WHERE source = 'user'").get())
+      .toEqual({ body, included: 0, parent_id: 1, side: 'LEFT', line_start: 42, line_end: 44 });
+    expect(db.prepare('SELECT body, status FROM comments WHERE id = 1').get())
+      .toEqual({ body: 'Original AI finding', status: 'active' });
+    row.querySelector('.cancel-edit-btn').click();
+    expect(row.isConnected).toBe(false);
+    expect(db.prepare("SELECT body FROM comments WHERE source = 'user'").get().body).toBe(body);
   });
 
-  afterEach(() => {
-    document.body.innerHTML = '';
-    vi.restoreAllMocks();
-  });
-
-  it('creates form row after targetRow with correct classes', () => {
-    const suggestion = createSuggestion();
-
-    const formRow = commentManager.displaySuggestionEditForm(
-      suggestion, targetRow, vi.fn(), vi.fn()
-    );
-
-    expect(formRow.tagName).toBe('TR');
-    expect(formRow.classList.contains('user-comment-row')).toBe(true);
-    expect(formRow.classList.contains('suggestion-edit-pending')).toBe(true);
-    // Inserted after targetRow
-    expect(targetRow.nextSibling).toBe(formRow);
-    expect(formRow.parentNode).toBe(tbody);
-  });
-
-  it('pre-fills textarea with suggestion body', () => {
-    const suggestion = createSuggestion({ body: 'function hello() {}' });
-
-    const formRow = commentManager.displaySuggestionEditForm(
-      suggestion, targetRow, vi.fn(), vi.fn()
-    );
-
-    const textarea = formRow.querySelector('.comment-edit-textarea');
-    expect(textarea).not.toBeNull();
-    expect(textarea.value).toBe('function hello() {}');
-  });
-
-  it('onSave callback receives edited text when Adopt is clicked', async () => {
-    const onSave = vi.fn().mockResolvedValue(undefined);
-    const suggestion = createSuggestion({ body: 'original text' });
-
-    const formRow = commentManager.displaySuggestionEditForm(
-      suggestion, targetRow, onSave, vi.fn()
-    );
-
-    const textarea = formRow.querySelector('.comment-edit-textarea');
-    textarea.value = 'edited text';
-
-    const saveBtn = formRow.querySelector('.save-edit-btn');
-    saveBtn.click();
-    await vi.waitFor(() => expect(onSave).toHaveBeenCalled());
-
-    expect(onSave).toHaveBeenCalledWith('edited text');
-  });
-
-  it('onCancel callback fires when Cancel is clicked', () => {
-    const onCancel = vi.fn();
-    const suggestion = createSuggestion();
-
-    const formRow = commentManager.displaySuggestionEditForm(
-      suggestion, targetRow, vi.fn(), onCancel
-    );
-
-    const cancelBtn = formRow.querySelector('.cancel-edit-btn');
-    cancelBtn.click();
-
-    expect(onCancel).toHaveBeenCalledTimes(1);
-  });
-
-  it('form row is removed from DOM on save', async () => {
-    const onSave = vi.fn().mockResolvedValue(undefined);
-    const suggestion = createSuggestion();
-
-    const formRow = commentManager.displaySuggestionEditForm(
-      suggestion, targetRow, onSave, vi.fn()
-    );
-
-    expect(formRow.parentNode).toBe(tbody);
-
-    const saveBtn = formRow.querySelector('.save-edit-btn');
-    saveBtn.click();
-    await vi.waitFor(() => expect(formRow.parentNode).toBeNull());
-  });
-
-  it('form row is removed from DOM on cancel', () => {
-    const suggestion = createSuggestion();
-
-    const formRow = commentManager.displaySuggestionEditForm(
-      suggestion, targetRow, vi.fn(), vi.fn()
-    );
-
-    expect(formRow.parentNode).toBe(tbody);
-
-    const cancelBtn = formRow.querySelector('.cancel-edit-btn');
-    cancelBtn.click();
-
-    expect(formRow.parentNode).toBeNull();
-  });
-
-  it('does NOT call fetch (regression: edit must not immediately adopt)', async () => {
-    const fetchSpy = vi.spyOn(global, 'fetch');
-    const onSave = vi.fn().mockResolvedValue(undefined);
-    const suggestion = createSuggestion();
-
-    const formRow = commentManager.displaySuggestionEditForm(
-      suggestion, targetRow, onSave, vi.fn()
-    );
-
-    // Click save — should only call onSave, never fetch
-    const saveBtn = formRow.querySelector('.save-edit-btn');
-    saveBtn.click();
-    await vi.waitFor(() => expect(onSave).toHaveBeenCalled());
-
-    expect(fetchSpy).not.toHaveBeenCalled();
-  });
-
-  it('shows suggestion title and type badge correctly', () => {
-    const suggestion = createSuggestion({
-      type: 'praise',
-      title: 'Great error handling',
+  it('includes the same acknowledged draft on explicit adoption instead of creating a duplicate or rewriting its text', async () => {
+    const { row, textarea } = await openEditor(async (editedText, draft) => {
+      const response = await fetch('/api/reviews/1/suggestions/1/edit', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'adopt_edited', editedText, draft }) });
+      if (!response.ok) throw new Error((await response.json()).error);
     });
-
-    const formRow = commentManager.displaySuggestionEditForm(
-      suggestion, targetRow, vi.fn(), vi.fn()
-    );
-
-    // Title is rendered
-    const titleEl = formRow.querySelector('.adopted-title');
-    expect(titleEl).not.toBeNull();
-    expect(titleEl.textContent).toBe('Great error handling');
-
-    // Praise badge is rendered
-    const praiseBadge = formRow.querySelector('.adopted-praise-badge');
-    expect(praiseBadge).not.toBeNull();
-    expect(praiseBadge.textContent).toContain('Nice Work');
+    const body = 'Exact edited finding.\n\n    doNotRewrite();\n';
+    edit(textarea, body);
+    const saved = await drafts.flush(textarea.draftEntry);
+    row.querySelector('.save-edit-btn').click();
+    await vi.waitFor(() => expect(row.isConnected).toBe(false));
+    expect(db.prepare("SELECT id, body, included, parent_id FROM comments WHERE source = 'user'").all())
+      .toEqual([{ id: saved.id, body, included: 1, parent_id: 1 }]);
+    expect(db.prepare('SELECT body, status FROM comments WHERE id = 1').get())
+      .toEqual({ body: 'Original AI finding', status: 'adopted' });
   });
 
-  it('does not show praise badge for non-praise types', () => {
-    const suggestion = createSuggestion({ type: 'issue' });
-
-    const formRow = commentManager.displaySuggestionEditForm(
-      suggestion, targetRow, vi.fn(), vi.fn()
-    );
-
-    const praiseBadge = formRow.querySelector('.adopted-praise-badge');
-    expect(praiseBadge).toBeNull();
+  it('retains offline text and the editor when explicit saving fails', async () => {
+    const { row, textarea } = await openEditor();
+    offline = true;
+    edit(textarea, 'Unacknowledged text\n');
+    const button = row.querySelector('.save-edit-btn');
+    button.click();
+    await vi.waitFor(() => expect(button.disabled).toBe(false));
+    expect(row.isConnected).toBe(true);
+    expect(textarea.value).toBe('Unacknowledged text\n');
+    expect(db.prepare("SELECT id FROM comments WHERE source = 'user'").all()).toEqual([]);
+    const recovered = JSON.parse(sessionStorage.getItem(`${drafts.prefix}1:${textarea.draftEntry.key}`));
+    expect(recovered.body).toBe('Unacknowledged text\n');
+    expect(recovered.included).toBe(false);
   });
 
-  it('form row stays in DOM and save button re-enables on save failure', async () => {
-    const onSave = vi.fn().mockRejectedValue(new Error('network error'));
-    const suggestion = createSuggestion();
-
-    const formRow = commentManager.displaySuggestionEditForm(
-      suggestion, targetRow, onSave, vi.fn()
-    );
-
-    const saveBtn = formRow.querySelector('.save-edit-btn');
-    saveBtn.click();
-    await vi.waitFor(() => expect(saveBtn.disabled).toBe(false));
-
-    // Form should stay in DOM for retry
-    expect(formRow.parentNode).toBe(tbody);
-  });
-
-  it('removes previous pending form when opening a new one', () => {
-    const suggestion1 = createSuggestion({ id: 'sug-1' });
-    const suggestion2 = createSuggestion({ id: 'sug-2' });
-
-    const formRow1 = commentManager.displaySuggestionEditForm(
-      suggestion1, targetRow, vi.fn(), vi.fn()
-    );
-    expect(formRow1.parentNode).toBe(tbody);
-
-    const formRow2 = commentManager.displaySuggestionEditForm(
-      suggestion2, targetRow, vi.fn(), vi.fn()
-    );
-
-    // First form should have been removed
-    expect(formRow1.parentNode).toBeNull();
-    expect(formRow2.parentNode).toBe(tbody);
-  });
-
-  it('does not call onSave when textarea is empty or whitespace', () => {
-    const onSave = vi.fn();
-    const suggestion = createSuggestion();
-
-    const formRow = commentManager.displaySuggestionEditForm(
-      suggestion, targetRow, onSave, vi.fn()
-    );
-
-    const textarea = formRow.querySelector('.comment-edit-textarea');
-    textarea.value = '   ';
-
-    const saveBtn = formRow.querySelector('.save-edit-btn');
-    saveBtn.click();
-
-    expect(onSave).not.toHaveBeenCalled();
-    // Form should stay in DOM
-    expect(formRow.parentNode).toBe(tbody);
-  });
-
-  it('save button is labeled "Save"', () => {
-    const suggestion = createSuggestion();
-
-    const formRow = commentManager.displaySuggestionEditForm(
-      suggestion, targetRow, vi.fn(), vi.fn()
-    );
-
-    const saveBtn = formRow.querySelector('.save-edit-btn');
-    expect(saveBtn.textContent).toBe('Save');
-  });
-
-  it('shows "Lines X-Y" for multi-line suggestions', () => {
-    const suggestion = createSuggestion({ lineNumber: 10, lineEnd: 15 });
-
-    const formRow = commentManager.displaySuggestionEditForm(
-      suggestion, targetRow, vi.fn(), vi.fn()
-    );
-
-    const lineInfo = formRow.querySelector('.user-comment-line-info');
-    expect(lineInfo).not.toBeNull();
-    expect(lineInfo.textContent).toBe('Lines 10-15');
-  });
-
-  it('shows "Line X" when lineEnd equals lineNumber', () => {
-    const suggestion = createSuggestion({ lineNumber: 42, lineEnd: 42 });
-
-    const formRow = commentManager.displaySuggestionEditForm(
-      suggestion, targetRow, vi.fn(), vi.fn()
-    );
-
-    const lineInfo = formRow.querySelector('.user-comment-line-info');
-    expect(lineInfo).not.toBeNull();
-    expect(lineInfo.textContent).toBe('Line 42');
-  });
-
-  it('shows "Line X" when lineEnd is null', () => {
-    const suggestion = createSuggestion({ lineNumber: 7, lineEnd: null });
-
-    const formRow = commentManager.displaySuggestionEditForm(
-      suggestion, targetRow, vi.fn(), vi.fn()
-    );
-
-    const lineInfo = formRow.querySelector('.user-comment-line-info');
-    expect(lineInfo).not.toBeNull();
-    expect(lineInfo.textContent).toBe('Line 7');
-  });
-
-  it('sets data-line-end to lineEnd for multi-line suggestions', () => {
-    const suggestion = createSuggestion({ lineNumber: 10, lineEnd: 20 });
-
-    const formRow = commentManager.displaySuggestionEditForm(
-      suggestion, targetRow, vi.fn(), vi.fn()
-    );
-
-    const textarea = formRow.querySelector('.comment-edit-textarea');
-    expect(textarea.dataset.lineEnd).toBe('20');
-  });
-
-  it('sets data-line-end to lineNumber when lineEnd is missing', () => {
-    const suggestion = createSuggestion({ lineNumber: 10 });
-    delete suggestion.lineEnd;
-
-    const formRow = commentManager.displaySuggestionEditForm(
-      suggestion, targetRow, vi.fn(), vi.fn()
-    );
-
-    const textarea = formRow.querySelector('.comment-edit-textarea');
-    expect(textarea.dataset.lineEnd).toBe('10');
+  it('retains the first offline edit when another suggestion replaces its form', async () => {
+    const first = await openEditor();
+    offline = true;
+    edit(first.textarea, 'Keep the first unsaved draft\n');
+    const second = await openEditor(async () => {}, 2);
+    expect(first.row.isConnected).toBe(false);
+    expect(second.row.isConnected).toBe(true);
+    expect(drafts.entries.get(first.textarea.draftEntry.key).body).toBe('Keep the first unsaved draft\n');
+    expect(JSON.parse(sessionStorage.getItem(`${drafts.prefix}1:${first.textarea.draftEntry.key}`)).body)
+      .toBe('Keep the first unsaved draft\n');
+    expect(db.prepare("SELECT id FROM comments WHERE source = 'user'").all()).toEqual([]);
   });
 });

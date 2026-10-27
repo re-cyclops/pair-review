@@ -18,9 +18,12 @@
     <link rel="icon" type="image/png" href="/favicon.png">
 
     <link rel="stylesheet" href="/css/analysis-config.css">
+    <link rel="stylesheet" href="/css/toast.css">
 
     <style>
         :root {
+            color-scheme: light;
+
             /* Typography */
             --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
             --font-mono: ui-monospace, 'SF Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
@@ -72,6 +75,8 @@
         }
 
         [data-theme="dark"] {
+            color-scheme: dark;
+
             /* Dark theme colors */
             --color-bg-primary: #0d1117;
             --color-bg-secondary: #161b22;
@@ -185,6 +190,7 @@
             font-weight: 400;
             margin-left: 6px;
             opacity: 0.7;
+            font-variant-numeric: tabular-nums;
         }
 
         .header-right {
@@ -205,7 +211,8 @@
             border-radius: var(--radius-md);
             border: none;
             cursor: pointer;
-            transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+            touch-action: manipulation;
+            transition: background-color 150ms cubic-bezier(0.32, 0.72, 0, 1), border-color 150ms cubic-bezier(0.32, 0.72, 0, 1), color 150ms cubic-bezier(0.32, 0.72, 0, 1), transform 120ms cubic-bezier(0.32, 0.72, 0, 1);
             white-space: nowrap;
             text-decoration: none;
         }
@@ -640,6 +647,7 @@
 
         .recent-reviews-table .col-pr {
             white-space: nowrap;
+            font-variant-numeric: tabular-nums;
         }
 
         .recent-reviews-table .col-pr a {
@@ -647,6 +655,7 @@
             text-decoration: none;
             font-weight: 500;
             font-family: var(--font-mono);
+            font-variant-numeric: tabular-nums;
         }
 
         .recent-reviews-table .col-pr a:hover {
@@ -666,6 +675,7 @@
             color: var(--color-text-tertiary);
             font-size: 13px;
             white-space: nowrap;
+            font-variant-numeric: tabular-nums;
         }
 
         .recent-reviews-table .col-author {
@@ -866,7 +876,8 @@
             border: none;
             border-bottom: 2px solid transparent;
             cursor: pointer;
-            transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+            touch-action: manipulation;
+            transition: background-color 150ms cubic-bezier(0.32, 0.72, 0, 1), border-color 150ms cubic-bezier(0.32, 0.72, 0, 1), color 150ms cubic-bezier(0.32, 0.72, 0, 1), transform 120ms cubic-bezier(0.32, 0.72, 0, 1);
             white-space: nowrap;
         }
 
@@ -906,6 +917,7 @@
         .fetched-at-label {
             font-size: 12px;
             color: var(--color-fg-muted);
+            font-variant-numeric: tabular-nums;
         }
 
         .btn-refresh {
@@ -1008,6 +1020,7 @@
             color: var(--ai-primary);
             font-weight: 500;
             font-family: var(--font-mono);
+            font-variant-numeric: tabular-nums;
             cursor: pointer;
         }
 
@@ -1050,14 +1063,13 @@
             white-space: nowrap;
         }
 
-        .col-local-name a {
+        .col-local-name > a {
             color: var(--ai-primary);
             text-decoration: none;
             font-weight: 500;
-            font-family: var(--font-mono);
         }
 
-        .col-local-name a:hover {
+        .col-local-name > a:hover {
             color: var(--ai-secondary);
             text-decoration: underline;
         }
@@ -1104,15 +1116,23 @@
 
         .delete-confirm-inner {
             display: flex;
+            flex-wrap: wrap;
             align-items: center;
             gap: 8px;
-            font-size: 13px;
+            font-size: 14px;
             color: var(--color-text-secondary);
         }
 
+        .delete-confirm-inner > span {
+            flex: 1 1 28rem;
+            min-width: 0;
+            overflow-wrap: anywhere;
+        }
+
         .delete-confirm-inner .btn-confirm-yes {
-            padding: 2px 10px;
-            font-size: 12px;
+            padding: 8px 12px;
+            min-height: 44px;
+            font-size: 14px;
             font-weight: 500;
             background: var(--color-danger);
             color: #ffffff;
@@ -1126,8 +1146,9 @@
         }
 
         .delete-confirm-inner .btn-confirm-no {
-            padding: 2px 10px;
-            font-size: 12px;
+            padding: 8px 12px;
+            min-height: 44px;
+            font-size: 14px;
             font-weight: 500;
             background: transparent;
             color: var(--color-text-secondary);
@@ -1147,17 +1168,22 @@
         .btn-select-toggle {
             display: inline-flex;
             align-items: center;
+            justify-content: center;
             gap: 6px;
-            padding: 4px 12px;
+            min-height: 34px;
+            padding: 0 14px;
             font-family: var(--font-sans);
-            font-size: 12px;
-            font-weight: 500;
+            font-size: 12.5px;
+            font-weight: 600;
             color: var(--color-text-secondary);
-            background: transparent;
+            background: var(--color-bg-primary);
             border: 1px solid var(--color-border-primary);
-            border-radius: var(--radius-md);
+            border-radius: 8px;
+            box-shadow: 0 1px 2px var(--color-shadow);
             cursor: pointer;
-            transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+            touch-action: manipulation;
+            font-variant-numeric: tabular-nums;
+            transition: background-color 150ms cubic-bezier(0.32, 0.72, 0, 1), border-color 150ms cubic-bezier(0.32, 0.72, 0, 1), color 150ms cubic-bezier(0.32, 0.72, 0, 1), transform 120ms cubic-bezier(0.32, 0.72, 0, 1);
         }
 
         .btn-select-toggle:hover {
@@ -1165,10 +1191,14 @@
             color: var(--color-text-primary);
         }
 
+        .btn-select-toggle:active:not(:disabled) {
+            transform: scale(0.98);
+        }
+
         .btn-select-toggle.active {
-            background: var(--color-accent-subtle);
+            background: var(--color-accent-primary);
             border-color: var(--color-accent-primary);
-            color: var(--color-accent-primary);
+            color: #ffffff;
         }
 
         /* Checkbox column */
@@ -1197,76 +1227,124 @@
             display: none;
         }
 
-        /* Inline bulk action controls — appear next to Select button */
+        /* Inline bulk action controls — elevated command strip */
         .bulk-inline-actions {
             display: inline-flex;
             align-items: center;
+            flex-wrap: wrap;
             gap: 8px;
+            padding: 5px 8px 5px 12px;
+            background: var(--color-bg-primary);
+            border: 1px solid var(--color-border-primary);
+            border-radius: 10px;
+            box-shadow: 0 4px 14px var(--color-shadow);
+            font-variant-numeric: tabular-nums;
+            transition: background-color 150ms cubic-bezier(0.32, 0.72, 0, 1), border-color 150ms cubic-bezier(0.32, 0.72, 0, 1), color 150ms cubic-bezier(0.32, 0.72, 0, 1), transform 120ms cubic-bezier(0.32, 0.72, 0, 1);
         }
 
         .bulk-action-count {
-            font-size: 12px;
-            font-weight: 500;
-            color: var(--color-text-secondary);
+            padding: 0 4px 0 2px;
+            font-size: 12.5px;
+            font-weight: 600;
+            color: var(--color-text-primary);
+            font-variant-numeric: tabular-nums;
         }
 
         .bulk-action-buttons {
             display: inline-flex;
+            align-items: center;
+            flex-wrap: wrap;
             gap: 6px;
         }
 
-        .btn-bulk-delete {
-            padding: 4px 12px;
-            font-size: 12px;
-            font-weight: 500;
-            background: var(--color-danger);
-            color: #ffffff;
-            border: none;
-            border-radius: var(--radius-sm);
+        .bulk-inline-actions button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 32px;
+            padding: 0 12px;
+            font-size: 12.5px;
+            font-weight: 600;
+            border: 1px solid transparent;
+            border-radius: 7px;
             cursor: pointer;
+            white-space: nowrap;
+            touch-action: manipulation;
+            font-variant-numeric: tabular-nums;
+            transition: background-color 150ms cubic-bezier(0.32, 0.72, 0, 1), border-color 150ms cubic-bezier(0.32, 0.72, 0, 1), color 150ms cubic-bezier(0.32, 0.72, 0, 1), transform 120ms cubic-bezier(0.32, 0.72, 0, 1);
+        }
+
+        .bulk-inline-actions button:active:not(:disabled) {
+            transform: scale(0.98);
+        }
+
+        .btn-bulk-submit {
+            background: var(--color-accent-primary);
+            color: #ffffff;
+            border-color: var(--color-accent-primary);
+        }
+
+        .btn-bulk-submit:hover:not(:disabled) {
+            background: var(--color-accent-hover);
+            border-color: var(--color-accent-hover);
+        }
+
+        .btn-bulk-analyze {
+            background: var(--color-accent-subtle);
+            color: var(--color-accent-primary);
+            border-color: rgba(9, 105, 218, 0.35);
+        }
+
+        .btn-bulk-analyze:hover:not(:disabled) {
+            background: rgba(9, 105, 218, 0.12);
+            border-color: var(--color-accent-primary);
+        }
+
+        .btn-bulk-open {
+            background: var(--color-bg-secondary);
+            color: var(--color-text-primary);
+            border-color: var(--color-border-primary);
+        }
+
+        .btn-bulk-open:hover:not(:disabled) {
+            background: var(--color-bg-tertiary);
+        }
+
+        .btn-bulk-delete {
+            background: rgba(209, 36, 47, 0.08);
+            color: var(--color-danger);
+            border-color: rgba(209, 36, 47, 0.28);
         }
 
         .btn-bulk-delete:hover:not(:disabled) {
-            background: var(--color-danger-hover);
-        }
-
-        .btn-bulk-delete:disabled {
-            opacity: 0.4;
-            cursor: default;
-        }
-
-        .btn-bulk-open,
-        .btn-bulk-analyze {
-            padding: 4px 12px;
-            font-size: 12px;
-            font-weight: 500;
-            background: var(--color-accent-primary);
+            background: var(--color-danger);
             color: #ffffff;
-            border: none;
-            border-radius: var(--radius-sm);
-            cursor: pointer;
+            border-color: var(--color-danger);
         }
 
-        .btn-bulk-open:hover:not(:disabled),
-        .btn-bulk-analyze:hover:not(:disabled) {
-            opacity: 0.9;
+        .bulk-confirm-buttons .btn-bulk-delete {
+            background: var(--color-danger);
+            color: #ffffff;
+            border-color: var(--color-danger);
         }
 
+        .bulk-confirm-buttons .btn-bulk-delete:hover:not(:disabled) {
+            background: var(--color-danger-hover);
+            border-color: var(--color-danger-hover);
+        }
+
+        .btn-bulk-delete:disabled,
         .btn-bulk-open:disabled,
-        .btn-bulk-analyze:disabled {
-            opacity: 0.4;
+        .btn-bulk-analyze:disabled,
+        .btn-bulk-submit:disabled {
+            opacity: 0.45;
             cursor: default;
         }
 
         .btn-bulk-cancel {
-            padding: 4px 12px;
-            font-size: 12px;
-            font-weight: 500;
             background: transparent;
             color: var(--color-text-secondary);
-            border: 1px solid var(--color-border-primary);
-            border-radius: var(--radius-sm);
-            cursor: pointer;
+            border-color: var(--color-border-primary);
         }
 
         .btn-bulk-cancel:hover {
@@ -1275,6 +1353,23 @@
         }
 
         /* Confirmation state — hide normal action buttons, show confirm buttons */
+        .bulk-inline-actions.confirming {
+            flex-wrap: wrap;
+            min-width: 0;
+            max-width: 100%;
+        }
+
+        .bulk-inline-actions.confirming .bulk-action-count {
+            flex-basis: 100%;
+            font-size: 14px;
+            white-space: normal;
+        }
+
+        .bulk-confirm-buttons button {
+            min-height: 44px;
+            font-size: 14px;
+        }
+
         .bulk-inline-actions .bulk-confirm-buttons {
             display: none;
             gap: 6px;
@@ -1292,11 +1387,33 @@
             display: none;
         }
 
+        .bulk-removal-results {
+            margin: 12px 0;
+            padding: 12px 16px;
+            border: 1px solid var(--color-border-primary);
+            border-radius: 6px;
+            font-size: 14px;
+            overflow-wrap: anywhere;
+        }
+
+        .bulk-removal-results h3 {
+            margin: 0 0 8px;
+            font-size: inherit;
+        }
+
+        .bulk-removal-results ul {
+            margin: 0;
+            padding-left: 20px;
+        }
+
         /* Select mode header row (between form and table, for PR/Local tabs) */
         .select-mode-header {
             display: none;
             justify-content: flex-end;
-            padding: 0 0 8px 0;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 0 12px 0;
+            font-variant-numeric: tabular-nums;
         }
 
         .select-mode-header.visible {
@@ -1343,14 +1460,16 @@
             }
         }
     </style>
+    <link rel="stylesheet" href="/css/dashboard.css">
+    <link rel="stylesheet" href="/css/workspace.css">
 </head>
-<body>
+<body class="review-inbox-page">
     <div class="app">
         <!-- Sticky Header -->
         <header class="header">
             <div class="header-left">
                 <a href="/" class="logo">
-                    <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="24" height="24">
+                    <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="24" height="24" aria-hidden="true">
                         <path transform="rotate(-50 12 12)" d="M18.178 8c5.096 0 5.096 8 0 8-5.095 0-7.133-8-12.356-8-5.096 0-5.096 8 0 8 5.223 0 7.26-8 12.356-8z"/>
                     </svg>
                     <span class="logo-text">pair<span class="logo-accent">review</span></span>
@@ -1365,7 +1484,7 @@
                     </svg>
                 </button>
                 <a class="btn btn-icon" id="settings-btn" href="/settings" title="Global settings" aria-label="Open global settings">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
                         <circle cx="12" cy="12" r="3"/>
                         <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
                     </svg>
@@ -1381,12 +1500,12 @@
                 <div class="recent-reviews-section" id="recent-reviews-section">
                     <div class="section-header" id="recent-reviews-header">
                         <div class="tab-bar" id="unified-tab-bar">
-                            <button class="tab-btn active" data-tab="pr-tab" type="button">Pull Requests</button>
-                            <button class="tab-btn" data-tab="review-requests-tab" type="button">My Review Requests</button>
-                            <button class="tab-btn" data-tab="team-reviews-tab" type="button">Team Review Requests</button>
-                            <button class="tab-btn" data-tab="my-prs-tab" type="button">My PRs</button>
-                            <span class="tab-divider"></span>
-                            <button class="tab-btn" data-tab="local-tab" type="button">Local Reviews</button>
+                            <button class="tab-btn active" data-tab="pr-tab" data-workspace-view="all" type="button">Review inbox</button>
+                            <button class="tab-btn" data-tab="review-requests-tab" data-workspace-view="needs-you" type="button">Needs you</button>
+                            <button class="tab-btn" data-tab="pr-tab" data-workspace-view="drafts" type="button">Ready to preview</button>
+                            <button class="tab-btn" data-tab="team-reviews-tab" data-workspace-view="teams" type="button" hidden>Team requests</button>
+                            <button class="tab-btn" data-tab="my-prs-tab" type="button">My pull requests</button>
+                            <button class="tab-btn" data-tab="local-tab" type="button">Local reviews</button>
                         </div>
                     </div>
 
@@ -1401,7 +1520,9 @@
                                     type="text"
                                     class="start-review-input"
                                     id="pr-url-input"
-                                    placeholder="Enter PR URL"
+                                    name="pr-url"
+                                    placeholder="Enter PR URL…"
+                                    aria-label="Pull request URL"
                                     autocomplete="off"
                                     spellcheck="false"
                                 >
@@ -1412,14 +1533,14 @@
                                     Analyze
                                 </button>
                             </form>
-                            <div class="start-review-error" id="start-review-error-pr"></div>
-                            <div class="start-review-loading" id="start-review-loading-pr">
-                                <div class="spinner"></div>
-                                <span id="start-review-loading-text-pr">Creating worktree and fetching PR data...</span>
+                            <div class="start-review-error" id="start-review-error-pr" role="alert"></div>
+                            <div class="start-review-loading" id="start-review-loading-pr" role="status" aria-live="polite">
+                                <div class="spinner" aria-hidden="true"></div>
+                                <span id="start-review-loading-text-pr">Creating worktree and fetching PR data…</span>
                             </div>
                         </div>
                         <div id="recent-reviews-container" class="recent-reviews-loading">
-                            Loading recent reviews...
+                            Loading recent reviews…
                         </div>
                     </div>
 
@@ -1427,12 +1548,12 @@
                     <div class="tab-pane" id="review-requests-tab">
                         <div class="tab-pane-header">
                             <span class="fetched-at-label" id="review-requests-fetched-at"></span>
-                            <button class="btn-refresh" id="refresh-review-requests" title="Refresh from GitHub">
-                                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z"/></svg>
+                            <button type="button" class="btn-refresh" id="refresh-review-requests" title="Refresh from GitHub" aria-label="Refresh review requests from GitHub">
+                                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z"/></svg>
                             </button>
                         </div>
                         <div id="review-requests-container" class="recent-reviews-loading">
-                            Loading...
+                            Loading…
                         </div>
                     </div>
 
@@ -1445,7 +1566,8 @@
                                         type="text"
                                         class="team-filter-input"
                                         id="team-reviews-team-input"
-                                        placeholder="org/team"
+                                        name="team-filter"
+                                        placeholder="org/team…"
                                         autocomplete="off"
                                         spellcheck="false"
                                         aria-label="Filter by team (org/team)"
@@ -1457,12 +1579,12 @@
                                 <span class="team-filter-hint" id="team-reviews-filter-hint" role="alert" hidden>Use the form org/team.</span>
                             </div>
                             <span class="fetched-at-label" id="team-reviews-fetched-at"></span>
-                            <button class="btn-refresh" id="refresh-team-reviews" title="Refresh from GitHub">
-                                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z"/></svg>
+                            <button type="button" class="btn-refresh" id="refresh-team-reviews" title="Refresh from GitHub" aria-label="Refresh team review requests from GitHub">
+                                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z"/></svg>
                             </button>
                         </div>
                         <div id="team-reviews-container" class="recent-reviews-loading">
-                            Loading...
+                            Loading…
                         </div>
                     </div>
 
@@ -1470,12 +1592,12 @@
                     <div class="tab-pane" id="my-prs-tab">
                         <div class="tab-pane-header">
                             <span class="fetched-at-label" id="my-prs-fetched-at"></span>
-                            <button class="btn-refresh" id="refresh-my-prs" title="Refresh from GitHub">
-                                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z"/></svg>
+                            <button type="button" class="btn-refresh" id="refresh-my-prs" title="Refresh from GitHub" aria-label="Refresh my pull requests from GitHub">
+                                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z"/></svg>
                             </button>
                         </div>
                         <div id="my-prs-container" class="recent-reviews-loading">
-                            Loading...
+                            Loading…
                         </div>
                     </div>
 
@@ -1487,7 +1609,9 @@
                                     type="text"
                                     class="start-review-input"
                                     id="local-path-input"
-                                    placeholder="Enter directory path (e.g. /Users/me/project)"
+                                    name="local-path"
+                                    placeholder="Enter directory path (e.g. /Users/me/project)…"
+                                    aria-label="Local repository directory path"
                                     autocomplete="off"
                                     spellcheck="false"
                                 >
@@ -1501,14 +1625,14 @@
                                     Analyze
                                 </button>
                             </form>
-                            <div class="start-review-error" id="start-review-error-local"></div>
-                            <div class="start-review-loading" id="start-review-loading-local">
-                                <div class="spinner"></div>
-                                <span id="start-review-loading-text-local">Starting local review...</span>
+                            <div class="start-review-error" id="start-review-error-local" role="alert"></div>
+                            <div class="start-review-loading" id="start-review-loading-local" role="status" aria-live="polite">
+                                <div class="spinner" aria-hidden="true"></div>
+                                <span id="start-review-loading-text-local">Starting local review…</span>
                             </div>
                         </div>
                         <div id="local-reviews-container" class="recent-reviews-loading">
-                            Loading local reviews...
+                            Loading local reviews…
                         </div>
                     </div>
                 </div>
@@ -1521,8 +1645,8 @@
         <div class="help-modal" id="help-modal" role="dialog" aria-labelledby="help-modal-title" aria-modal="true">
             <div class="help-modal-header">
                 <h2 class="help-modal-title" id="help-modal-title">Getting Started</h2>
-                <button class="help-modal-close" id="help-modal-close" title="Close">
-                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                <button type="button" class="help-modal-close" id="help-modal-close" title="Close" aria-label="Close help modal">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
                         <path fill-rule="evenodd" d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 01-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"></path>
                     </svg>
                 </button>
@@ -1575,6 +1699,11 @@
     <script src="/js/components/AdvancedConfigTab.js"></script>
     <script src="/js/theme.js"></script>
     <script src="/js/repo-links.js"></script>
+    <script src="/js/components/ReviewEvidence.js"></script>
+    <script src="/js/modules/draft-store.js"></script>
+    <script src="/js/components/Workspace.js"></script>
+    <script src="/js/components/BulkAnalysisLauncher.js"></script>
     <script src="/js/index.js"></script>
+    <script src="/js/components/ReviewInbox.js"></script>
 </body>
 </html>

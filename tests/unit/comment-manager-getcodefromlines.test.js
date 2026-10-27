@@ -16,6 +16,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { JSDOM } from 'jsdom';
 
 // Setup global.window before importing production code that assigns to it
 global.window = global.window || {};
@@ -302,98 +303,39 @@ describe('CommentManager.getCodeFromLines', () => {
 });
 
 describe('CommentManager.insertSuggestionBlock', () => {
-  let commentManager;
+  let dom, original, commentManager, textarea;
 
   beforeEach(() => {
+    original = { window: global.window, document: global.document, Event: global.Event };
+    dom = new JSDOM(`<div class="d2h-file-wrapper" data-file-name="test.js"><table><tbody>
+      <tr data-line-number="10" data-file-name="test.js" data-side="LEFT"><td><span class="d2h-code-line-ctn">  const oldValue = 1;</span></td></tr>
+      <tr data-line-number="10" data-file-name="test.js" data-side="RIGHT"><td><span class="d2h-code-line-ctn">  const currentValue = 2;</span></td></tr>
+      </tbody></table></div><textarea data-file="test.js" data-line="10" data-line-end="10" data-side="RIGHT"></textarea>`);
+    global.window = dom.window;
+    global.document = dom.window.document;
+    global.Event = dom.window.Event;
     commentManager = createTestCommentManager();
+    textarea = document.querySelector('textarea');
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    dom.window.close();
+    Object.assign(global, original);
   });
 
-  /**
-   * Create a mock textarea element
-   */
-  function createMockTextarea(attrs = {}) {
-    const textarea = {
-      dataset: {
-        file: attrs.file || 'test.js',
-        line: String(attrs.line || 10),
-        lineEnd: String(attrs.lineEnd || attrs.line || 10),
-        side: attrs.side
-      },
-      value: attrs.value || '',
-      selectionStart: attrs.selectionStart || 0,
-      selectionEnd: attrs.selectionEnd || 0,
-      setSelectionRange: vi.fn(),
-      focus: vi.fn(),
-      style: {}
-    };
-    return textarea;
-  }
-
-  it('should read side from textarea dataset and pass to getCodeFromLines', () => {
-    const textarea = createMockTextarea({ side: 'RIGHT', line: 10 });
-    const getCodeSpy = vi.spyOn(commentManager, 'getCodeFromLines').mockReturnValue('new code');
-    vi.spyOn(commentManager, 'hasSuggestionBlock').mockReturnValue(false);
-    vi.spyOn(commentManager, 'autoResizeTextarea').mockImplementation(() => {});
-    vi.spyOn(commentManager, 'updateSuggestionButtonState').mockImplementation(() => {});
-
+  it('inserts only the requested diff side and notifies the real editor of the exact Markdown', () => {
+    let edited;
+    textarea.addEventListener('input', () => { edited = textarea.value; });
     commentManager.insertSuggestionBlock(textarea, null);
-
-    expect(getCodeSpy).toHaveBeenCalledWith('test.js', 10, 10, 'RIGHT');
+    expect(textarea.value).toBe('```suggestion\n  const currentValue = 2;\n```');
+    expect(edited).toBe(textarea.value);
+    expect(textarea.value.slice(textarea.selectionStart, textarea.selectionEnd)).toBe('  const currentValue = 2;');
   });
 
-  it('should read LEFT side from textarea dataset for delete lines', () => {
-    const textarea = createMockTextarea({ side: 'LEFT', line: 10 });
-    const getCodeSpy = vi.spyOn(commentManager, 'getCodeFromLines').mockReturnValue('old code');
-    vi.spyOn(commentManager, 'hasSuggestionBlock').mockReturnValue(false);
-    vi.spyOn(commentManager, 'autoResizeTextarea').mockImplementation(() => {});
-    vi.spyOn(commentManager, 'updateSuggestionButtonState').mockImplementation(() => {});
-
+  it('preserves an existing suggestion block rather than duplicating or replacing its content', () => {
+    const originalText = 'Reason\n\n```suggestion\n  const chosenValue = 3;\n```';
+    textarea.value = originalText;
     commentManager.insertSuggestionBlock(textarea, null);
-
-    expect(getCodeSpy).toHaveBeenCalledWith('test.js', 10, 10, 'LEFT');
-  });
-
-  it('should warn and pass undefined when side is missing from textarea', () => {
-    const textarea = createMockTextarea({ line: 10 });
-    // Explicitly remove side to simulate missing attribute
-    delete textarea.dataset.side;
-
-    const getCodeSpy = vi.spyOn(commentManager, 'getCodeFromLines').mockReturnValue('code');
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.spyOn(commentManager, 'hasSuggestionBlock').mockReturnValue(false);
-    vi.spyOn(commentManager, 'autoResizeTextarea').mockImplementation(() => {});
-    vi.spyOn(commentManager, 'updateSuggestionButtonState').mockImplementation(() => {});
-
-    commentManager.insertSuggestionBlock(textarea, null);
-
-    expect(warnSpy).toHaveBeenCalledWith('[Suggestion] textarea missing data-side attribute, defaulting to RIGHT');
-    // side is undefined — defaulting to RIGHT is tested separately in 'side defaulting' tests
-    expect(getCodeSpy).toHaveBeenCalledWith('test.js', 10, 10, undefined);
-  });
-
-  it('should not insert suggestion when one already exists', () => {
-    const textarea = createMockTextarea({ side: 'RIGHT', value: '```suggestion\ncode\n```' });
-    vi.spyOn(commentManager, 'hasSuggestionBlock').mockReturnValue(true);
-    const getCodeSpy = vi.spyOn(commentManager, 'getCodeFromLines');
-
-    commentManager.insertSuggestionBlock(textarea, null);
-
-    expect(getCodeSpy).not.toHaveBeenCalled();
-  });
-
-  it('should insert suggestion block with code from getCodeFromLines', () => {
-    const textarea = createMockTextarea({ side: 'RIGHT', line: 10 });
-    vi.spyOn(commentManager, 'getCodeFromLines').mockReturnValue('  const x = 1;');
-    vi.spyOn(commentManager, 'hasSuggestionBlock').mockReturnValue(false);
-    vi.spyOn(commentManager, 'autoResizeTextarea').mockImplementation(() => {});
-    vi.spyOn(commentManager, 'updateSuggestionButtonState').mockImplementation(() => {});
-
-    commentManager.insertSuggestionBlock(textarea, null);
-
-    expect(textarea.value).toBe('```suggestion\n  const x = 1;\n```');
+    expect(textarea.value).toBe(originalText);
   });
 });

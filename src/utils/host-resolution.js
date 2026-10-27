@@ -293,6 +293,26 @@ function resolvePreflightBinding(bindingRepository, config, host) {
   return primary;
 }
 
+// The same recorded-target binding serves PR routes and explicitly associated
+// local reviews. An absent token never falls back across hosts.
+async function resolveReviewBinding({ db, config, repository, prNumber, recordedTarget, fallbackToken }) {
+  const [owner, repo] = repository.split('/');
+  let recorded = recordedTarget;
+  if (recorded === undefined && Number.isInteger(prNumber) && prNumber > 0) {
+    const { PRMetadataRepository } = require('../database');
+    recorded = await new PRMetadataRepository(db).getPRHostWithRecordedUrl(repository, prNumber);
+  }
+  const recordedHost = recorded === undefined ? undefined : resolveRecordedHost(config,
+    resolveBindingRepositoryFromPR(owner, repo, config), recorded.host, recorded.recordedUrl);
+  const bindingRepository = resolveBindingRepositoryForHost(owner, repo, config, recordedHost);
+  const options = recordedHost === undefined ? {} : storedHostToOption(config, bindingRepository, recordedHost);
+  const binding = resolveHostBinding(bindingRepository, config, options);
+  if (binding.token) return { binding, token: binding.token, bindingRepository };
+  if (binding.apiHost) throw new Error(`Authentication is unavailable for ${repository} on its configured host`);
+  if (fallbackToken) return { binding: { ...binding, token: fallbackToken, source: 'app:githubToken' }, token: fallbackToken, bindingRepository };
+  return null;
+}
+
 module.exports = {
   storedHostToOption,
   explicitHostForBinding,
@@ -304,4 +324,5 @@ module.exports = {
   isDualHostRepoConfig,
   getConfiguredApiHost,
   resolvePreflightBinding,
+  resolveReviewBinding,
 };

@@ -66,7 +66,7 @@ async function startMCPStdio() {
   redirectConsoleToStderr();
 
   const { initializeDatabase } = require('./database');
-  const { startServer } = require('./server');
+  const { startServer, gracefulShutdown } = require('./server');
   const { loadConfig, resolveDbName } = require('./config');
   const { createMCPServer } = require('./routes/mcp');
   const { GlobalSettingsService } = require('./settings/global-settings-service');
@@ -115,6 +115,9 @@ async function startMCPStdio() {
 
   const mcpServer = createMCPServer(db, { port, config });
   const transport = new StdioServerTransport();
+  // This transport owns this process and its HTTP server, not another instance.
+  // Begin cleanup on EOF before a client needs to escalate to process signals.
+  process.stdin.once('end', () => gracefulShutdown('stdio EOF'));
   await mcpServer.connect(transport);
 
   console.error(`[MCP] Web UI: http://localhost:${port}`);

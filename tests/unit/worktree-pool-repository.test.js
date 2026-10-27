@@ -562,26 +562,30 @@ describe('WorktreePoolRepository', () => {
 
   // ── claimByPR ────────────────────────────────────────────────────────────
   describe('claimByPR', () => {
-    it('atomically finds and marks an existing PR assignment as in_use', async () => {
-      await repo.create({ id: 'pool-a', repository: 'owner/repo', path: '/tmp/a' });
-      await repo.markInUse('pool-a', 42);
-      // Simulate it was released then re-claimed
+    it('holds an assigned checkout exclusively until its refresh settles', async () => {
+      await repo.create({ id: 'pool-a', repository: 'owner/repo', path: '/tmp/a', prNumber: 42 });
       await repo.markAvailable('pool-a');
-      // markAvailable clears current_review_id but preserves current_pr_number? No — let's set it up properly
-      // Actually markAvailable only clears current_review_id, not current_pr_number.
-      // To have a valid findByPR, we need current_pr_number set.
-      db.prepare("UPDATE worktree_pool SET current_pr_number = 42 WHERE id = 'pool-a'").run();
+      const competing = new WorktreePoolRepository(db);
 
-      const result = await repo.claimByPR(42, 'owner/repo');
+      expect((await repo.claimByPR(42, 'owner/repo')).id).toBe('pool-a');
+      await expect(competing.claimByPR(42, 'owner/repo')).rejects.toMatchObject({ statusCode: 409 });
+      expect(await competing.claimAvailable('owner/repo')).toBeNull();
 
-      expect(result).toBeTruthy();
-      expect(result.id).toBe('pool-a');
-      // After claim, should be marked in_use
-      const row = getPoolRow('pool-a');
-      expect(row.status).toBe('in_use');
-      expect(row.current_pr_number).toBe(42);
-      expect(row.last_switched_at).toBeTruthy();
-      expect(row.current_review_id).toBeNull();
+      await repo.markInUse('pool-a', 42);
+      expect((await competing.claimByPR(42, 'owner/repo')).id).toBe('pool-a');
+      await expect(repo.claimByPR(42, 'owner/repo')).rejects.toMatchObject({ statusCode: 409 });
+    });
+
+    it('skips a checkout reserved for removal without preventing use of another slot', async () => {
+      await repo.create({ id: 'pool-a', repository: 'owner/repo', path: '/tmp/a' });
+      await repo.create({ id: 'pool-b', repository: 'owner/repo', path: '/tmp/b' });
+      const { WorktreeLockManager } = require('../../src/git/worktree-lock');
+      const locks = new WorktreeLockManager(db);
+      locks.acquire('/tmp/a', 'removal');
+
+      expect((await repo.claimAvailable('owner/repo')).id).toBe('pool-b');
+      locks.release('/tmp/a', 'removal');
+      expect((await repo.claimAvailable('owner/repo')).id).toBe('pool-a');
     });
 
     it('returns null when no entry matches the PR', async () => {
@@ -592,17 +596,6 @@ describe('WorktreePoolRepository', () => {
       expect(result).toBeNull();
     });
 
-    it('claims entry even if it was already in_use for same PR', async () => {
-      await repo.create({ id: 'pool-a', repository: 'owner/repo', path: '/tmp/a' });
-      await repo.markInUse('pool-a', 77);
-
-      const result = await repo.claimByPR(77, 'owner/repo');
-
-      expect(result).toBeTruthy();
-      expect(result.id).toBe('pool-a');
-      const row = getPoolRow('pool-a');
-      expect(row.status).toBe('in_use');
-    });
 
     it('is case-insensitive on repository', async () => {
       await repo.create({ id: 'pool-a', repository: 'Owner/Repo', path: '/tmp/a' });
@@ -614,14 +607,12 @@ describe('WorktreePoolRepository', () => {
       expect(result.id).toBe('pool-a');
     });
 
-    it('does not claim a worktree in switching state', async () => {
+    it('reports an existing refresh as busy rather than offering a new checkout', async () => {
       await repo.create({ id: 'pool-a', repository: 'owner/repo', path: '/tmp/a' });
       await repo.markInUse('pool-a', 42);
       await repo.markSwitching('pool-a');
 
-      const result = await repo.claimByPR(42, 'owner/repo');
-
-      expect(result).toBeNull();
+      await expect(repo.claimByPR(42, 'owner/repo')).rejects.toMatchObject({ statusCode: 409 });
       // Entry should remain in switching state, not reclaimed
       const row = getPoolRow('pool-a');
       expect(row.status).toBe('switching');

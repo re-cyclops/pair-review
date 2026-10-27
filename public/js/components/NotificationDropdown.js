@@ -77,6 +77,12 @@ class NotificationDropdown {
   _renderPopover() {
     const popover = document.createElement('div');
     popover.className = 'notification-popover';
+    popover.id = 'notification-popover';
+    popover.setAttribute('role', 'dialog');
+    popover.setAttribute('aria-label', 'Notification sounds');
+    popover.inert = true;
+    this._btn.setAttribute('aria-controls', popover.id);
+    this._btn.setAttribute('aria-expanded', 'false');
     // Start hidden (opacity 0, shifted up)
     popover.style.opacity = '0';
     popover.style.transform = 'translateY(-4px)';
@@ -114,7 +120,12 @@ class NotificationDropdown {
     popover.appendChild(divider);
 
     // --- Test sound link ---
-    const testLink = document.createElement('div');
+    const testLink = document.createElement('button');
+    testLink.type = 'button';
+    testLink.style.background = 'transparent';
+    testLink.style.border = '0';
+    testLink.style.width = '100%';
+    testLink.style.textAlign = 'left';
     testLink.textContent = 'Test sound';
     testLink.style.padding = '8px 12px';
     testLink.style.fontSize = '0.8125rem';
@@ -185,9 +196,12 @@ class NotificationDropdown {
     this._popoverEl.style.transform = 'translateX(-50%) translateY(-4px)';
 
     // Make visible
+    this._popoverEl.inert = false;
+    this._btn.setAttribute('aria-expanded', 'true');
     this._popoverEl.style.opacity = '1';
     this._popoverEl.style.pointerEvents = 'auto';
     this._visible = true;
+    this._popoverEl.querySelector('input, button')?.focus();
 
     // Animate into final position
     requestAnimationFrame(() => {
@@ -207,6 +221,8 @@ class NotificationDropdown {
     // Escape to dismiss
     this._escapeHandler = (e) => {
       if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
         this._hide();
       }
     };
@@ -215,6 +231,10 @@ class NotificationDropdown {
 
   _hide() {
     if (!this._popoverEl) return;
+    const restoreFocus = this._popoverEl.contains(document.activeElement);
+    this._popoverEl.inert = true;
+    this._btn?.setAttribute('aria-expanded', 'false');
+    if (restoreFocus) this._btn?.focus();
 
     this._popoverEl.style.opacity = '0';
     this._popoverEl.style.transform = 'translateX(-50%) translateY(-4px)';

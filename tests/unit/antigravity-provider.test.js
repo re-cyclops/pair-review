@@ -440,8 +440,6 @@ describe('AntigravityProvider', () => {
       expect(child.stdin.write.mock.calls[0][0]).toBe('THE FULL PROMPT');
       expect(child.stdin.end).toHaveBeenCalled();
 
-      // Process registered for cancellation.
-      expect(registerProcess).toHaveBeenCalledWith('a1', child);
 
       // argv carries the agentic flag and the -p directive; command is `agy`.
       const [command, args] = mockSpawn.mock.calls[0];

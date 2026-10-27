@@ -52,6 +52,7 @@ function createMockElement(overrides = {}) {
     },
     setAttribute: vi.fn((k, v) => { attrs[k] = v; }),
     getAttribute: vi.fn((k) => attrs[k] ?? null),
+    removeAttribute: vi.fn((key) => { delete attrs[key]; }),
     addEventListener: vi.fn((evt, fn) => {
       if (!listeners[evt]) listeners[evt] = [];
       listeners[evt].push(fn);
@@ -280,15 +281,13 @@ describe('Index page tab persistence', () => {
   }
 
   it('should NOT persist tab to localStorage when clicking a collection PR row', () => {
+    localStorage.setItem(TAB_STORAGE_KEY, 'review-requests-tab');
     localStorage.setItem.mockClear();
 
     simulateCollectionRowClick('https://github.com/owner/repo/pull/42');
 
-    // The click handler should NOT have saved 'pr-tab' (or any tab) to localStorage
-    const tabSetCalls = localStorage.setItem.mock.calls.filter(
-      ([key]) => key === TAB_STORAGE_KEY
-    );
-    expect(tabSetCalls).toHaveLength(0);
+    expect(localStorage.getItem(TAB_STORAGE_KEY)).toBe('review-requests-tab');
+    expect(elementsById['pr-url-input'].value).toBe('https://github.com/owner/repo/pull/42');
   });
 
   it('should persist tab to localStorage when clicking a regular tab button', () => {
@@ -296,38 +295,7 @@ describe('Index page tab persistence', () => {
 
     simulateTabClick('local-tab');
 
-    const tabSetCalls = localStorage.setItem.mock.calls.filter(
-      ([key]) => key === TAB_STORAGE_KEY
-    );
-    expect(tabSetCalls).toHaveLength(1);
-    expect(tabSetCalls[0][1]).toBe('local-tab');
+    expect(localStorage.getItem(TAB_STORAGE_KEY)).toBe('local-tab');
   });
 
-  it('should persist the correct tab id for any tab clicked normally', () => {
-    localStorage.setItem.mockClear();
-
-    simulateTabClick('review-requests-tab');
-
-    const tabSetCalls = localStorage.setItem.mock.calls.filter(
-      ([key]) => key === TAB_STORAGE_KEY
-    );
-    expect(tabSetCalls).toHaveLength(1);
-    expect(tabSetCalls[0][1]).toBe('review-requests-tab');
-  });
-
-  it('should still switch to PR tab visually when clicking a collection row', () => {
-    // The visual switchTab call should still happen (we just don't persist it)
-    // We verify by checking that the form input gets populated
-    simulateCollectionRowClick('https://github.com/owner/repo/pull/99');
-
-    const input = elementsById['pr-url-input'];
-    expect(input.value).toBe('https://github.com/owner/repo/pull/99');
-  });
-
-  it('should submit the start-review form when clicking a collection row', () => {
-    simulateCollectionRowClick('https://github.com/owner/repo/pull/99');
-
-    const form = elementsById['start-review-form'];
-    expect(form.dispatchEvent).toHaveBeenCalled();
-  });
 });

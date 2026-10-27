@@ -134,7 +134,7 @@ async function getPendingReviewForUser(octokit, owner, repo, prNumber) {
     // surface `pull_request_review_id` consistently also benefit from
     // this scoped endpoint. Paginated to match GraphQL's totalCount
     // semantics.
-    let totalCount = 0;
+    let totalCount = null;
     try {
       const reviewComments = await octokit.paginate(octokit.rest.pulls.listCommentsForReview, {
         owner,
@@ -225,19 +225,29 @@ async function getReviewById(octokit, nodeId, prContext) {
       review_id: reviewId
     });
 
+    const comments = await octokit.paginate(octokit.rest.pulls.listCommentsForReview, {
+      owner: prContext.owner, repo: prContext.repo, pull_number: prContext.prNumber,
+      review_id: reviewId, per_page: 100
+    });
+    if (comments.some(comment => comment.id == null && !comment.node_id)) throw new Error('Remote review contains an unidentified comment');
     return {
-      id: deriveRestReviewId(data),
-      state: data.state,
-      submittedAt: data.submitted_at || null,
-      url: data.html_url
+      id: deriveRestReviewId(data), databaseId: data.id, body: data.body ?? '',
+      state: data.state, submittedAt: data.submitted_at || null, url: data.html_url,
+      headSha: data.commit_id, author: data.user?.login,
+      repository: `${prContext.owner}/${prContext.repo}`, prNumber: prContext.prNumber,
+      comments: comments.map(comment => ({
+        id: comment.node_id || String(comment.id), databaseId: comment.id,
+        body: comment.body, path: comment.path, line: comment.line,
+        start_line: comment.start_line, side: comment.side, start_side: comment.start_side,
+        isFileLevel: comment.subject_type === 'file', url: comment.html_url
+      }))
     };
   } catch (error) {
     if (error.status === 404) {
       logger.debug(`Review ${reviewId} not found via REST`);
       return null;
     }
-    logger.warn(`Error fetching review ${reviewId} via REST: ${error.message}`);
-    return null;
+    throw error;
   }
 }
 

@@ -12,6 +12,7 @@ const { v4: uuidv4 } = require('uuid');
 const logger = require('../utils/logger');
 const { CouncilRepository } = require('../database');
 const { getProviderClass } = require('../ai/provider');
+const { getCouncilTemplates } = require('../council-templates');
 
 const router = express.Router();
 
@@ -218,7 +219,7 @@ router.get('/api/councils', async (req, res) => {
     const councilRepo = new CouncilRepository(db);
     const councils = await councilRepo.list();
 
-    res.json({ councils });
+    res.json({ councils, templates: getCouncilTemplates() });
   } catch (error) {
     logger.error('Error listing councils:', error);
     res.status(500).json({ error: 'Failed to list councils' });

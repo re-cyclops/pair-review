@@ -67,6 +67,7 @@
 
   /** localStorage key for persisting the active tab */
   const TAB_STORAGE_KEY = 'pair-review-active-tab';
+  const VIEW_STORAGE_KEY = 'pair-review-primary-view';
   const BULK_ANALYSIS_TAB_STORAGE_KEY = 'pair-review-bulk-analysis-tab';
   const BULK_ANALYSIS_INSTRUCTIONS_STORAGE_KEY = 'pair-review-bulk-analysis-instructions';
 
@@ -232,20 +233,21 @@
     const btnEl = document.getElementById(ids.btn);
     const analyzeBtnEl = document.getElementById(ids.analyzeBtn);
     const loadingEl = document.getElementById(ids.loadingEl);
+    if (loadingEl) { loadingEl.setAttribute('role', 'status'); loadingEl.setAttribute('aria-live', 'polite'); loadingEl.setAttribute('aria-busy', String(loading)); }
     const loadingTextEl = document.getElementById(ids.loadingText);
     const errorEl = document.getElementById(ids.errorEl);
 
     if (loading) {
       if (inputEl) inputEl.disabled = true;
-      if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Starting...'; }
-      if (analyzeBtnEl) analyzeBtnEl.disabled = true;
+      if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Opening…'; btnEl.setAttribute('aria-busy', 'true'); }
+      if (analyzeBtnEl) { analyzeBtnEl.disabled = true; analyzeBtnEl.textContent = 'Preparing analysis…'; analyzeBtnEl.setAttribute('aria-busy', 'true'); }
       if (loadingEl) loadingEl.classList.add('visible');
       if (loadingTextEl && text) loadingTextEl.textContent = text;
       if (errorEl) errorEl.classList.remove('visible', 'info');
     } else {
       if (inputEl) inputEl.disabled = false;
-      if (btnEl) { btnEl.disabled = false; btnEl.textContent = ids.btnLabel; }
-      if (analyzeBtnEl) analyzeBtnEl.disabled = false;
+      if (btnEl) { btnEl.disabled = false; btnEl.textContent = ids.btnLabel; btnEl.removeAttribute('aria-busy'); }
+      if (analyzeBtnEl) { analyzeBtnEl.disabled = false; analyzeBtnEl.textContent = 'Analyze'; analyzeBtnEl.removeAttribute('aria-busy'); }
       if (loadingEl) loadingEl.classList.remove('visible');
     }
   }
@@ -296,8 +298,13 @@
     if (!tabId) return;
 
     // Deactivate all tabs in this bar
-    tabBar.querySelectorAll('.tab-btn').forEach(function (btn) { btn.classList.remove('active'); });
+    tabBar.querySelectorAll('.tab-btn').forEach(function (btn) {
+      btn.classList.remove('active');
+      btn.removeAttribute('aria-current');
+    });
     clickedBtn.classList.add('active');
+    clickedBtn.setAttribute('aria-current', 'page');
+    window.dispatchEvent(new CustomEvent('workspaceViewChanged', { detail: clickedBtn.dataset.workspaceView || 'all' }));
 
     // Find the parent container that holds the tab panes
     const container = tabBar.closest('.recent-reviews-section');
@@ -337,8 +344,8 @@
       var repoParts = session.repository.split('/');
       var settingsLink = '/repo-settings.html?owner=' + encodeURIComponent(repoParts[0]) + '&repo=' + encodeURIComponent(repoParts[1]);
       settingsHtml =
-        '<a href="' + settingsLink + '" class="btn-repo-settings" title="Repository settings">' +
-          '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">' +
+        '<a href="' + settingsLink + '" class="btn-repo-settings" title="Repository settings" aria-label="Repository settings">' +
+          '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">' +
             '<path d="M8 0a8.2 8.2 0 0 1 .701.031C9.444.095 9.99.645 10.16 1.29l.288 1.107c.018.066.079.158.212.224.231.114.454.243.668.386.123.082.233.09.299.071l1.103-.303c.644-.176 1.392.021 1.82.63.27.385.506.792.704 1.218.315.675.111 1.422-.364 1.891l-.814.806c-.049.048-.098.147-.088.294.016.257.016.515 0 .772-.01.147.038.246.088.294l.814.806c.475.469.679 1.216.364 1.891a7.977 7.977 0 0 1-.704 1.217c-.428.61-1.176.807-1.82.63l-1.102-.302c-.067-.019-.177-.011-.3.071a5.909 5.909 0 0 1-.668.386c-.133.066-.194.158-.211.224l-.29 1.106c-.168.646-.715 1.196-1.458 1.26a8.006 8.006 0 0 1-1.402 0c-.743-.064-1.289-.614-1.458-1.26l-.289-1.106c-.018-.066-.079-.158-.212-.224a5.738 5.738 0 0 1-.668-.386c-.123-.082-.233-.09-.299-.071l-1.103.303c-.644.176-1.392-.021-1.82-.63a8.12 8.12 0 0 1-.704-1.218c-.315-.675-.111-1.422.363-1.891l.815-.806c.05-.048.098-.147.088-.294a6.214 6.214 0 0 1 0-.772c.01-.147-.038-.246-.088-.294l-.815-.806C.635 6.045.431 5.298.746 4.623a7.92 7.92 0 0 1 .704-1.217c.428-.61 1.176-.807 1.82-.63l1.102.302c.067.019.177.011.3-.071.214-.143.437-.272.668-.386.133-.066.194-.158.211-.224l.29-1.106C6.009.645 6.556.095 7.299.03 7.53.01 7.764 0 8 0Zm-.571 1.525c-.036.003-.108.036-.137.146l-.289 1.105c-.147.561-.549.967-.998 1.189-.173.086-.34.183-.5.29-.417.278-.97.423-1.529.27l-1.103-.303c-.109-.03-.175.016-.195.045-.22.312-.412.644-.573.99-.014.031-.021.11.059.19l.815.806c.411.406.562.957.53 1.456a4.709 4.709 0 0 0 0 .582c.032.499-.119 1.05-.53 1.456l-.815.806c-.081.08-.073.159-.059.19.162.346.353.677.573.989.02.03.085.076.195.046l1.102-.303c.56-.153 1.113-.008 1.53.27.161.107.328.204.501.29.447.222.85.629.997 1.189l.289 1.105c.029.109.101.143.137.146a6.6 6.6 0 0 0 1.142 0c.036-.003.108-.036.137-.146l.289-1.105c.147-.561.549-.967.998-1.189.173-.086.34-.183.5-.29.417-.278.97-.423 1.529-.27l1.103.303c.109.029.175-.016.195-.045.22-.313.411-.644.573-.99.014-.031.021-.11-.059-.19l-.815-.806c-.411-.406-.562-.957-.53-1.456a4.709 4.709 0 0 0 0-.582c-.032-.499.119-1.05.53-1.456l.815-.806c.081-.08.073-.159.059-.19a6.464 6.464 0 0 0-.573-.989c-.02-.03-.085-.076-.195-.046l-1.102.303c-.56.153-1.113.008-1.53-.27a4.44 4.44 0 0 0-.501-.29c-.447-.222-.85-.629-.997-1.189l-.289-1.105c-.029-.11-.101-.143-.137-.146a6.6 6.6 0 0 0-1.142 0ZM11 8a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM9.5 8a1.5 1.5 0 1 0-3.001.001A1.5 1.5 0 0 0 9.5 8Z"/>' +
           '</svg>' +
         '</a>';
@@ -346,20 +353,20 @@
 
     return '' +
       '<tr data-session-id="' + session.id + '">' +
-        '<td class="col-local-name" title="' + escapeHtmlAttribute(session.name || 'Untitled') + '"><a href="' + link + '">' + nameDisplay + '</a></td>' +
-        '<td class="col-local-sha" title="' + escapeHtmlAttribute(session.local_head_sha || '') + '">' + escapeHtml(sha) + '</td>' +
-        '<td class="col-local-path" title="' + escapeHtmlAttribute(pathDisplay) + '">' + escapeHtml(pathDisplay) + '</td>' +
-        '<td class="col-repo">' + escapeHtml(session.repository || '') + '</td>' +
-        '<td class="col-time">' + relativeTime + '</td>' +
-        '<td class="col-actions">' +
+        '<td data-label="Local version" class="col-identity"><div class="col-local-name"><a href="' + link + '">' + nameDisplay + '</a></div><span class="col-repo">' + escapeHtml(session.repository || '') + '</span><div class="col-local-path">' + escapeHtml(pathDisplay) + '</div><div class="col-local-sha" title="' + escapeHtmlAttribute(session.local_head_sha || '') + '">Head ' + escapeHtml(sha) + '</div><div class="col-time">Updated ' + relativeTime + '</div></td>' +
+        '<td data-label="AI review" class="col-ai"></td>' +
+        '<td data-label="Local state" class="col-state"></td>' +
+        '<td data-label="Actions" class="col-actions">' +
           settingsHtml +
           '<button' +
+            ' type="button"' +
             ' class="btn-delete-session"' +
             ' data-session-id="' + session.id + '"' +
             ' data-session-path="' + escapeHtmlAttribute(pathDisplay) + '"' +
             ' title="Delete session"' +
+            ' aria-label="Delete session"' +
           '>' +
-            '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">' +
+            '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">' +
               '<path fill-rule="evenodd" d="M6.5 1.75a.25.25 0 01.25-.25h2.5a.25.25 0 01.25.25V3h-3V1.75zm4.5 0V3h2.25a.75.75 0 010 1.5H2.75a.75.75 0 010-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75zM4.496 6.675a.75.75 0 10-1.492.15l.66 6.6A1.75 1.75 0 005.405 15h5.19a1.75 1.75 0 001.741-1.575l.66-6.6a.75.75 0 00-1.492-.15l-.66 6.6a.25.25 0 01-.249.225h-5.19a.25.25 0 01-.249-.225l-.66-6.6z"></path>' +
             '</svg>' +
           '</button>' +
@@ -477,9 +484,9 @@
     if (clearBtn) clearBtn.hidden = !value;
   }
 
-  var GITHUB_ACTION_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>';
-  var GRAPHITE_ACTION_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M9.7932,1.3079L3.101,3.101l-1.7932,6.6921,4.899,4.899,6.6921-1.7931,1.7932-6.6921L9.7932,1.3079Zm1.0936,11.6921H5.1133l-2.8867-5L5.1133,3h5.7735l2.8867,5-2.8867,5Z"/><polygon points="11.3504 4.6496 6.7737 3.4232 3.4232 6.7737 4.6496 11.3504 9.2263 12.5768 12.5768 9.2263 11.3504 4.6496"/></svg>';
-  var EXTERNAL_ACTION_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M3.75 2A1.75 1.75 0 0 0 2 3.75v8.5C2 13.216 2.784 14 3.75 14h8.5A1.75 1.75 0 0 0 14 12.25v-3a.75.75 0 0 0-1.5 0v3a.25.25 0 0 1-.25.25h-8.5a.25.25 0 0 1-.25-.25v-8.5a.25.25 0 0 1 .25-.25h3a.75.75 0 0 0 0-1.5h-3Zm6.97-.53a.75.75 0 0 0 0 1.06l1.72 1.72-4.97 4.97a.75.75 0 1 0 1.06 1.06l4.97-4.97 1.72 1.72a.75.75 0 0 0 1.28-.53V2.75A.75.75 0 0 0 14.75 2h-3.5a.75.75 0 0 0-.53 1.28Z"/></svg>';
+  var GITHUB_ACTION_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>';
+  var GRAPHITE_ACTION_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M9.7932,1.3079L3.101,3.101l-1.7932,6.6921,4.899,4.899,6.6921-1.7931,1.7932-6.6921L9.7932,1.3079Zm1.0936,11.6921H5.1133l-2.8867-5L5.1133,3h5.7735l2.8867,5-2.8867,5Z"/><polygon points="11.3504 4.6496 6.7737 3.4232 3.4232 6.7737 4.6496 11.3504 9.2263 12.5768 12.5768 9.2263 11.3504 4.6496"/></svg>';
+  var EXTERNAL_ACTION_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M3.75 2A1.75 1.75 0 0 0 2 3.75v8.5C2 13.216 2.784 14 3.75 14h8.5A1.75 1.75 0 0 0 14 12.25v-3a.75.75 0 0 0-1.5 0v3a.25.25 0 0 1-.25.25h-8.5a.25.25 0 0 1-.25-.25v-8.5a.25.25 0 0 1 .25-.25h3a.75.75 0 0 0 0-1.5h-3Zm6.97-.53a.75.75 0 0 0 0 1.06l1.72 1.72-4.97 4.97a.75.75 0 1 0 1.06 1.06l4.97-4.97 1.72 1.72a.75.75 0 0 0 1.28-.53V2.75A.75.75 0 0 0 14.75 2h-3.5a.75.75 0 0 0-.53 1.28Z"/></svg>';
 
   /**
    * Render the configured external-host icon, falling back to the generic
@@ -534,7 +541,7 @@
     }
 
     if (repoLinks.github !== false) {
-      html += '<a href="' + escapeHtmlAttribute(defaultUrl) + '" target="_blank" rel="noopener" class="btn-github-link" title="Open on GitHub">' +
+      html += '<a href="' + escapeHtmlAttribute(defaultUrl) + '" target="_blank" rel="noopener" class="btn-github-link" title="Open on GitHub" aria-label="Open on GitHub">' +
         GITHUB_ACTION_ICON +
         '</a>';
     }
@@ -542,7 +549,7 @@
     if (repoLinks.graphite !== false && window.__pairReview?.enableGraphite
         && typeof context.html_url === 'string' && /^https:\/\/github\.com\//i.test(defaultUrl)) {
       var graphiteUrl = window.__pairReview.toGraphiteUrl(defaultUrl);
-      html += '<a href="' + escapeHtmlAttribute(graphiteUrl) + '" target="_blank" rel="noopener" class="btn-github-link" title="Open on Graphite">' +
+      html += '<a href="' + escapeHtmlAttribute(graphiteUrl) + '" target="_blank" rel="noopener" class="btn-github-link" title="Open on Graphite" aria-label="Open on Graphite">' +
         GRAPHITE_ACTION_ICON +
         '</a>';
     }
@@ -565,9 +572,6 @@
       ? '<a href="https://github.com/' + encodeURIComponent(pr.author) + '" target="_blank" rel="noopener">' + escapeHtml(pr.author) + '</a>'
       : '';
 
-    var authorTd = collection === 'my-prs'
-      ? ''
-      : '<td class="col-author">' + authorDisplay + '</td>';
 
     // `setup_host` is resolved by the collection API (setupHostParam): an alt
     // api_host string, the 'github' sentinel, or null to omit. Open, Analyze,
@@ -590,12 +594,11 @@
 
     return '' +
       '<tr class="collection-pr-row" data-pr-url="' + escapeHtmlAttribute(prUrl) + '" data-owner="' + escapeHtmlAttribute(pr.owner) + '" data-repo="' + escapeHtmlAttribute(pr.repo) + '" data-number="' + pr.number + '"' + hostAttr + '>' +
-        '<td class="col-repo">' + escapeHtml(repoFull) + '</td>' +
-        '<td class="col-pr"><span class="collection-pr-number">#' + pr.number + '</span></td>' +
-        '<td class="col-title" title="' + escapeHtmlAttribute(pr.title || '') + '">' + escapeHtml(pr.title || '') + '</td>' +
-        authorTd +
-        '<td class="col-time">' + relativeTime + '</td>' +
-        '<td class="col-actions">' + actionLinks + '</td>' +
+        '<td data-label="Pull request" class="col-identity"><div class="inbox-identity-meta"><span class="col-repo">' + escapeHtml(repoFull) + '</span> <span class="col-pr"><span class="collection-pr-number">#' + pr.number + '</span></span></div><div class="col-title">' + escapeHtml(pr.title || '') + '</div><div class="inbox-identity-meta"><span class="col-author">' + authorDisplay + '</span><span class="col-time">Updated ' + relativeTime + '</span></div></td>' +
+        '<td data-label="First requested" class="col-requested"></td>' +
+        '<td data-label="AI review" class="col-ai"></td>' +
+        '<td data-label="Review state" class="col-state"></td>' +
+        '<td data-label="Actions" class="col-actions">' + actionLinks + '</td>' +
       '</tr>';
   }
 
@@ -607,39 +610,39 @@
    */
   function renderCollectionTable(container, state, collection) {
     var sel = collectionSelections[collection];
-    if (sel) sel.exit();
+    var notice = document.getElementById(collection + '-availability');
+    if (!notice) {
+      notice = document.createElement('p');
+      notice.id = collection + '-availability';
+      notice.className = 'workspace-collection-status';
+      notice.setAttribute('role', 'status');
+      container.before(notice);
+    }
+    notice.textContent = state.error ? 'Queue unavailable or partial: ' + state.error + (state.prs.length ? '. Last successful cached rows are retained.' : '.') : '';
+    notice.hidden = !state.error;
 
     var fetchedAtEl = document.getElementById(collection + '-fetched-at');
     if (fetchedAtEl) {
-      // Note: this key is intentionally NOT per-team — unlike the DB cache key
-      // in src/routes/github-collections.js (which uses cacheKey()), the
-      // fetched-at timestamp is informational only. We accept a brief label
-      // mismatch when the user switches the team-reviews filter; the label
-      // updates once that view's next refresh completes. See the write site in
-      // refreshCollectionPrs.
-      var lsKey = 'github-collection-fetched-at:' + collection;
-      var displayTs = localStorage.getItem(lsKey) || state.fetchedAt;
-      fetchedAtEl.textContent = displayTs
-        ? 'Updated ' + formatRelativeTime(displayTs)
+      fetchedAtEl.textContent = state.fetchedAt
+        ? 'Updated ' + formatRelativeTime(state.fetchedAt)
         : '';
     }
 
     if (state.prs.length === 0) {
-      var emptyLsKey = 'github-collection-fetched-at:' + collection;
-      var hasFetched = state.fetchedAt || localStorage.getItem(emptyLsKey);
-      var emptyMsg = hasFetched
-        ? (COLLECTION_EMPTY_MESSAGES[collection] || 'No pull requests found.')
-        : 'Click refresh to fetch from GitHub.';
+      var emptyMsg = state.error ? 'No reliable current queue is available. Refresh when access is restored.'
+        : state.fetchedAt ? (COLLECTION_EMPTY_MESSAGES[collection] || 'No pull requests found.')
+          : 'Click refresh to fetch from GitHub.';
 
       container.innerHTML =
         '<div class="recent-reviews-empty">' +
           '<p>' + emptyMsg + '</p>' +
         '</div>';
       container.classList.remove('recent-reviews-loading');
+      if (sel) sel._updateInlineActions();
+      window.dispatchEvent(new CustomEvent('workspaceCollectionObserved', { detail: { collection, sources: state.sources } }));
       return;
     }
 
-    var authorTh = collection === 'my-prs' ? '' : '<th>Author</th>';
 
     var tbodyId = collection + '-tbody';
 
@@ -647,12 +650,11 @@
       '<table class="recent-reviews-table">' +
         '<thead>' +
           '<tr>' +
-            '<th>Repository</th>' +
-            '<th>PR</th>' +
-            '<th>Title</th>' +
-            authorTh +
-            '<th>Updated</th>' +
-            '<th>Actions</th>' +
+            '<th scope="col" class="col-identity">Pull request</th>' +
+            '<th scope="col" class="col-requested">First requested</th>' +
+            '<th scope="col" class="col-ai">AI review</th>' +
+            '<th scope="col" class="col-state">Review state</th>' +
+            '<th scope="col" class="col-actions">Actions</th>' +
           '</tr>' +
         '</thead>' +
         '<tbody id="' + tbodyId + '">' +
@@ -660,6 +662,9 @@
         '</tbody>' +
       '</table>';
     container.classList.remove('recent-reviews-loading');
+    if (sel?.active) sel._injectCheckboxes();
+    sel?._updateInlineActions();
+    window.dispatchEvent(new CustomEvent('workspaceCollectionObserved', { detail: { collection, sources: state.sources } }));
   }
 
   /**
@@ -675,6 +680,9 @@
    */
   async function loadCollectionPrs(collection, containerId, state, team, requestId) {
     var container = document.getElementById(containerId);
+    const context = window.reviewWorkspace?.contextVersion || 0;
+    if (requestId == null) requestId = state.activeRequest = (state.activeRequest || 0) + 1;
+    else if (requestId !== state.activeRequest) return;
 
     try {
       var url = '/api/github/' + collection + (team ? '?team=' + encodeURIComponent(team) : '');
@@ -682,24 +690,22 @@
       if (!response.ok) throw new Error('Failed to fetch');
       var data = await response.json();
 
-      // Discard a response a newer team-reviews request has superseded, so a
-      // slow earlier load can't repaint the table with a stale team's PRs.
-      if (requestId != null && requestId !== state.activeRequest) return;
+      // A newer request or connection owns the collection now.
+      if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== state.activeRequest) return;
 
       state.loaded = true;
       state.prs = data.prs || [];
       state.fetchedAt = data.fetched_at;
+      state.sources = data.hosts;
+      state.error = data.error || null;
 
       renderCollectionTable(container, state, collection);
     } catch (error) {
       console.error('Error loading ' + collection + ':', error);
       // Don't paint the error over a view a newer request now owns.
-      if (requestId != null && requestId !== state.activeRequest) return;
-      container.innerHTML =
-        '<div class="recent-reviews-empty">' +
-          '<p>Failed to load. Click refresh to try again.</p>' +
-        '</div>';
-      container.classList.remove('recent-reviews-loading');
+      if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== state.activeRequest) return;
+      state.error = error.message;
+      renderCollectionTable(container, state, collection);
     }
   }
 
@@ -717,8 +723,11 @@
   async function refreshCollectionPrs(collection, containerId, state, team, requestId) {
     var container = document.getElementById(containerId);
     var btn = document.getElementById('refresh-' + collection);
+    const context = window.reviewWorkspace?.contextVersion || 0;
+    if (requestId == null) requestId = state.activeRequest = (state.activeRequest || 0) + 1;
+    else if (requestId !== state.activeRequest) return;
 
-    if (btn) btn.classList.add('refreshing');
+    if (btn) { btn.classList.add('refreshing'); btn.setAttribute('aria-busy', 'true'); btn.setAttribute('aria-label', 'Refreshing pull requests…'); }
 
     // Show loading state only if this is the first load (no existing data)
     if (state.prs.length === 0) {
@@ -731,56 +740,45 @@
 
       // A newer team-reviews request has superseded this one; drop it before
       // touching the 401 message, shared state, or the table.
-      if (requestId != null && requestId !== state.activeRequest) return;
+      if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== state.activeRequest) return;
 
       if (!response.ok) {
         var errData = await response.json().catch(function() { return {}; });
-        if (response.status === 401) {
-          container.innerHTML =
-            '<div class="recent-reviews-empty">' +
-              '<p>Configure a GitHub token to see ' +
-              (COLLECTION_TOKEN_LABELS[collection] || 'pull requests') +
-              '.</p>' +
-            '</div>';
-          container.classList.remove('recent-reviews-loading');
-          return;
+        if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== state.activeRequest) return;
+        if (Array.isArray(errData.prs)) {
+          state.prs = errData.prs;
+          state.fetchedAt = errData.fetched_at;
+          state.sources = errData.hosts;
+          state.loaded = true;
         }
-        throw new Error(errData.error || 'Refresh failed');
+        throw new Error(errData.error || (response.status === 401 ? 'Authentication unavailable' : 'Refresh failed'));
       }
 
       var data = await response.json();
 
       // Re-check after the body parse: a newer request may have started while
       // the response was streaming.
-      if (requestId != null && requestId !== state.activeRequest) return;
+      if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== state.activeRequest) return;
 
       state.prs = data.prs || [];
       state.fetchedAt = data.fetched_at;
+      state.sources = data.hosts;
       state.loaded = true;
-      // Note: this key is intentionally NOT per-team — unlike the DB cache key
-      // in src/routes/github-collections.js (which uses cacheKey()), the
-      // fetched-at timestamp is informational only. We accept a brief label
-      // mismatch when the user switches the team-reviews filter; the label
-      // updates once the next refresh completes (read site: renderCollectionTable).
-      localStorage.setItem('github-collection-fetched-at:' + collection, new Date().toISOString());
+      state.error = data.error || null;
 
       renderCollectionTable(container, state, collection);
     } catch (error) {
       console.error('Error refreshing ' + collection + ':', error);
       // Don't repaint a view a newer request now owns.
-      if (requestId != null && requestId !== state.activeRequest) return;
-      // If we had existing data, keep showing it
-      if (state.prs.length > 0) {
-        renderCollectionTable(container, state, collection);
-      } else {
-        container.innerHTML =
-          '<div class="recent-reviews-empty">' +
-            '<p>Failed to fetch from GitHub. Check your token and try again.</p>' +
-          '</div>';
-        container.classList.remove('recent-reviews-loading');
-      }
+      if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== state.activeRequest) return;
+      state.error = error.message;
+      renderCollectionTable(container, state, collection);
     } finally {
-      if (btn) btn.classList.remove('refreshing');
+      if (btn && context === (window.reviewWorkspace?.contextVersion || 0) && requestId === state.activeRequest) {
+        btn.classList.remove('refreshing');
+        btn.removeAttribute('aria-busy');
+        btn.setAttribute('aria-label', 'Refresh pull requests');
+      }
     }
   }
 
@@ -844,10 +842,11 @@
    * Fetch and display local review sessions (initial load).
    */
   async function loadLocalReviews() {
-    localSelection.exit();
 
     const container = document.getElementById('local-reviews-container');
     if (!container) return;
+    const context = window.reviewWorkspace?.contextVersion || 0;
+    const requestId = localReviewsPagination.requestId = (localReviewsPagination.requestId || 0) + 1;
 
     // Reset pagination
     localReviewsPagination.lastTimestamp = null;
@@ -858,6 +857,7 @@
       if (!response.ok) throw new Error('Failed to fetch local sessions');
 
       const data = await response.json();
+      if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== localReviewsPagination.requestId) return;
 
       if (!data.success || !data.sessions || data.sessions.length === 0) {
         container.innerHTML =
@@ -876,12 +876,10 @@
         '<table class="recent-reviews-table local-table">' +
           '<thead>' +
             '<tr>' +
-              '<th>Name</th>' +
-              '<th>Head</th>' +
-              '<th>Path</th>' +
-              '<th>Repo</th>' +
-              '<th>Last Updated</th>' +
-              '<th></th>' +
+              '<th scope="col" class="col-identity">Local version</th>' +
+              '<th scope="col">AI review</th>' +
+              '<th scope="col">Local state</th>' +
+              '<th scope="col">Actions</th>' +
             '</tr>' +
           '</thead>' +
           '<tbody id="local-reviews-tbody">' +
@@ -898,11 +896,14 @@
           : '');
       container.classList.remove('recent-reviews-loading');
       localReviewsPagination.loaded = true;
+      if (localSelection.active) localSelection._injectCheckboxes();
+      localSelection._updateInlineActions();
 
       // Apply analysis-in-progress spinners to any rows with active analyses
       fetchAndApplyActiveAnalyses();
 
     } catch (error) {
+      if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== localReviewsPagination.requestId) return;
       console.error('Error loading local reviews:', error);
       container.innerHTML =
         '<div class="recent-reviews-empty">' +
@@ -982,7 +983,6 @@
     if (row.classList.contains('delete-confirm-row')) return;
 
     // Remember original HTML so we can restore on cancel.
-    // Note: restoring innerHTML is safe because all click handlers use event delegation.
     const originalHTML = row.innerHTML;
     const colCount = row.children.length;
 
@@ -990,14 +990,19 @@
     row.innerHTML =
       '<td colspan="' + colCount + '">' +
         '<div class="delete-confirm-inner">' +
-          '<span>Delete session for ' + escapeHtml(sessionPath) + '?</span>' +
-          '<button class="btn-confirm-yes" data-session-id="' + sessionId + '">Delete</button>' +
+          '<span>Remove local history and drafts for ' + escapeHtml(sessionPath) + '? Files and remote reviews stay unchanged. This does not cancel work.</span>' +
+          '<button class="btn-confirm-yes" data-session-id="' + sessionId + '">Remove local history</button>' +
           '<button class="btn-confirm-no">Cancel</button>' +
         '</div>' +
       '</td>';
 
     // Wire up buttons
     row.querySelector('.btn-confirm-yes').addEventListener('click', async function () {
+      if (this.disabled) return;
+      this.disabled = true;
+      this.textContent = 'Removing…';
+      this.setAttribute('aria-busy', 'true');
+      row.querySelector('.btn-confirm-no').disabled = true;
       try {
         const response = await fetch('/api/local/sessions/' + sessionId, {
           method: 'DELETE'
@@ -1008,6 +1013,7 @@
         }
         // Remove the row from DOM
         row.remove();
+        window.reviewWorkspace?.loadReviews();
         // If no more rows, reload to show empty state
         const tbody = document.getElementById('local-reviews-tbody');
         if (tbody && tbody.children.length === 0) {
@@ -1015,15 +1021,18 @@
         }
       } catch (error) {
         console.error('Error deleting local session:', error);
+        window.toast?.error(error.message);
         // Restore row on failure
         row.classList.remove('delete-confirm-row');
         row.innerHTML = originalHTML;
+        row.querySelector('.btn-delete-session')?.focus({ preventScroll: true });
       }
     });
 
     row.querySelector('.btn-confirm-no').addEventListener('click', function () {
       row.classList.remove('delete-confirm-row');
       row.innerHTML = originalHTML;
+      row.querySelector('.btn-delete-session')?.focus({ preventScroll: true });
     });
   }
 
@@ -1041,6 +1050,7 @@
     event.preventDefault();
 
     const input = document.getElementById('local-path-input');
+    if (input.disabled) return;
     const pathValue = input.value.trim();
 
     // Clear previous errors/info messages
@@ -1066,6 +1076,7 @@
     // The /local?path= route serves setup.html which handles the full setup flow
     let href = '/local?path=' + encodeURIComponent(pathValue);
     if (analyze) href += '&analyze=true';
+    setFormLoading('local', true, analyze ? 'Preparing analysis…' : 'Opening local review…');
     window.location.href = href;
   }
 
@@ -1096,11 +1107,12 @@
   async function handleBrowseLocal() {
     const browseBtn = document.getElementById('browse-local-btn');
     const input = document.getElementById('local-path-input');
-    if (!browseBtn || !input) return;
+    if (!browseBtn || !input || browseBtn.disabled) return;
 
     // Disable button while dialog is open
     browseBtn.disabled = true;
-    browseBtn.textContent = 'Browsing...';
+    browseBtn.textContent = 'Browsing…';
+    browseBtn.setAttribute('aria-busy', 'true');
 
     try {
       const response = await fetch('/api/local/browse', {
@@ -1129,6 +1141,7 @@
     } finally {
       browseBtn.disabled = false;
       browseBtn.textContent = 'Browse';
+      browseBtn.removeAttribute('aria-busy');
     }
   }
 
@@ -1168,28 +1181,32 @@
       host: review.host
     });
 
+    var hostAttr = review.setup_host ? ' data-host="' + escapeHtmlAttribute(review.setup_host) + '"' : '';
+    var prUrlAttr = review.html_url ? ' data-pr-url="' + escapeHtmlAttribute(review.html_url) + '"' : '';
+
     return '' +
-      '<tr data-review-id="' + review.id + '"' + reviewIdAttr + '>' +
-        '<td class="col-repo">' + escapeHtml(review.repository) + '</td>' +
-        '<td class="col-pr"><a href="' + link + '">#' + review.pr_number + '</a></td>' +
-        '<td class="col-title" title="' + escapeHtmlAttribute(review.pr_title) + '">' + escapeHtml(review.pr_title) + '</td>' +
-        '<td class="col-author">' + authorDisplay + '</td>' +
-        '<td class="col-time">' + relativeTime + '</td>' +
-        '<td class="col-actions">' +
+      '<tr data-review-id="' + review.id + '" data-owner="' + escapeHtmlAttribute(owner) + '" data-repo="' + escapeHtmlAttribute(repo) + '" data-number="' + review.pr_number + '"' + prUrlAttr + hostAttr + reviewIdAttr + '>' +
+        '<td data-label="Pull request" class="col-identity"><div class="inbox-identity-meta"><span class="col-repo">' + escapeHtml(review.repository) + '</span> <span class="col-pr"><a href="' + link + '">#' + review.pr_number + '</a></span></div><div class="col-title">' + escapeHtml(review.pr_title) + '</div><div class="inbox-identity-meta"><span class="col-author">' + authorDisplay + '</span><span class="col-time">Last opened ' + relativeTime + '</span></div></td>' +
+        '<td data-label="First requested" class="col-requested"></td>' +
+        '<td data-label="AI review" class="col-ai"></td>' +
+        '<td data-label="Review state" class="col-state"></td>' +
+        '<td data-label="Actions" class="col-actions">' +
           actionLinks +
-          '<a href="' + settingsLink + '" class="btn-repo-settings" title="Repository settings">' +
-            '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">' +
+          '<a href="' + settingsLink + '" class="btn-repo-settings" title="Repository settings" aria-label="Repository settings">' +
+            '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">' +
               '<path d="M8 0a8.2 8.2 0 0 1 .701.031C9.444.095 9.99.645 10.16 1.29l.288 1.107c.018.066.079.158.212.224.231.114.454.243.668.386.123.082.233.09.299.071l1.103-.303c.644-.176 1.392.021 1.82.63.27.385.506.792.704 1.218.315.675.111 1.422-.364 1.891l-.814.806c-.049.048-.098.147-.088.294.016.257.016.515 0 .772-.01.147.038.246.088.294l.814.806c.475.469.679 1.216.364 1.891a7.977 7.977 0 0 1-.704 1.217c-.428.61-1.176.807-1.82.63l-1.102-.302c-.067-.019-.177-.011-.3.071a5.909 5.909 0 0 1-.668.386c-.133.066-.194.158-.211.224l-.29 1.106c-.168.646-.715 1.196-1.458 1.26a8.006 8.006 0 0 1-1.402 0c-.743-.064-1.289-.614-1.458-1.26l-.289-1.106c-.018-.066-.079-.158-.212-.224a5.738 5.738 0 0 1-.668-.386c-.123-.082-.233-.09-.299-.071l-1.103.303c-.644.176-1.392-.021-1.82-.63a8.12 8.12 0 0 1-.704-1.218c-.315-.675-.111-1.422.363-1.891l.815-.806c.05-.048.098-.147.088-.294a6.214 6.214 0 0 1 0-.772c.01-.147-.038-.246-.088-.294l-.815-.806C.635 6.045.431 5.298.746 4.623a7.92 7.92 0 0 1 .704-1.217c.428-.61 1.176-.807 1.82-.63l1.102.302c.067.019.177.011.3-.071.214-.143.437-.272.668-.386.133-.066.194-.158.211-.224l.29-1.106C6.009.645 6.556.095 7.299.03 7.53.01 7.764 0 8 0Zm-.571 1.525c-.036.003-.108.036-.137.146l-.289 1.105c-.147.561-.549.967-.998 1.189-.173.086-.34.183-.5.29-.417.278-.97.423-1.529.27l-1.103-.303c-.109-.03-.175.016-.195.045-.22.312-.412.644-.573.99-.014.031-.021.11.059.19l.815.806c.411.406.562.957.53 1.456a4.709 4.709 0 0 0 0 .582c.032.499-.119 1.05-.53 1.456l-.815.806c-.081.08-.073.159-.059.19.162.346.353.677.573.989.02.03.085.076.195.046l1.102-.303c.56-.153 1.113-.008 1.53.27.161.107.328.204.501.29.447.222.85.629.997 1.189l.289 1.105c.029.109.101.143.137.146a6.6 6.6 0 0 0 1.142 0c.036-.003.108-.036.137-.146l.289-1.105c.147-.561.549-.967.998-1.189.173-.086.34-.183.5-.29.417-.278.97-.423 1.529-.27l1.103.303c.109.029.175-.016.195-.045.22-.313.411-.644.573-.99.014-.031.021-.11-.059-.19l-.815-.806c-.411-.406-.562-.957-.53-1.456a4.709 4.709 0 0 0 0-.582c-.032-.499.119-1.05.53-1.456l.815-.806c.081-.08.073-.159.059-.19a6.464 6.464 0 0 0-.573-.989c-.02-.03-.085-.076-.195-.046l-1.102.303c-.56.153-1.113.008-1.53-.27a4.44 4.44 0 0 0-.501-.29c-.447-.222-.85-.629-.997-1.189l-.289-1.105c-.029-.11-.101-.143-.137-.146a6.6 6.6 0 0 0-1.142 0ZM11 8a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM9.5 8a1.5 1.5 0 1 0-3.001.001A1.5 1.5 0 0 0 9.5 8Z"/>' +
             '</svg>' +
           '</a>' +
           '<button' +
+            ' type="button"' +
             ' class="btn-delete-review"' +
             ' data-review-id="' + review.id + '"' +
             ' data-repository="' + escapeHtmlAttribute(review.repository) + '"' +
             ' data-pr-number="' + review.pr_number + '"' +
-            ' title="Delete review"' +
+            ' title="Remove local history and drafts"' +
+            ' aria-label="Remove local history and drafts"' +
           '>' +
-            '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">' +
+            '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">' +
               '<path fill-rule="evenodd" d="M6.5 1.75a.25.25 0 01.25-.25h2.5a.25.25 0 01.25.25V3h-3V1.75zm4.5 0V3h2.25a.75.75 0 010 1.5H2.75a.75.75 0 010-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75zM4.496 6.675a.75.75 0 10-1.492.15l.66 6.6A1.75 1.75 0 005.405 15h5.19a1.75 1.75 0 001.741-1.575l.66-6.6a.75.75 0 00-1.492-.15l-.66 6.6a.25.25 0 01-.249.225h-5.19a.25.25 0 01-.249-.225l-.66-6.6z"></path>' +
             '</svg>' +
           '</button>' +
@@ -1212,7 +1229,6 @@
     if (row.classList.contains('delete-confirm-row')) return;
 
     // Remember original HTML so we can restore on cancel.
-    // Note: restoring innerHTML is safe because all click handlers use event delegation.
     const originalHTML = row.innerHTML;
     const colCount = row.children.length;
 
@@ -1220,38 +1236,47 @@
     row.innerHTML =
       '<td colspan="' + colCount + '">' +
         '<div class="delete-confirm-inner">' +
-          '<span>Delete review for ' + escapeHtml(repository) + ' #' + escapeHtml(String(prNumber)) + '?</span>' +
-          '<button class="btn-confirm-yes" data-review-id="' + reviewId + '">Delete</button>' +
+          '<span>Remove local history and drafts for ' + escapeHtml(repository) + ' #' + escapeHtml(String(prNumber)) + '? Its unshared checkout is also removed; pooled or shared checkouts stay. Remote reviews stay unchanged. This does not cancel work.</span>' +
+          '<button class="btn-confirm-yes" data-review-id="' + reviewId + '">Remove local history</button>' +
           '<button class="btn-confirm-no">Cancel</button>' +
         '</div>' +
       '</td>';
 
     // Wire up buttons
     row.querySelector('.btn-confirm-yes').addEventListener('click', async function () {
+      if (this.disabled) return;
+      this.disabled = true;
+      this.textContent = 'Removing…';
+      this.setAttribute('aria-busy', 'true');
+      row.querySelector('.btn-confirm-no').disabled = true;
       try {
         const response = await fetch('/api/worktrees/' + reviewId, {
           method: 'DELETE'
         });
 
-        if (!response.ok) {
-          const data = await response.json().catch(function () { return {}; });
-          throw new Error(data.error || 'Failed to delete review');
-        }
+        const data = await response.json().catch(function () { return {}; });
+        if (!response.ok) throw new Error(data.error || 'Failed to remove local history');
+        if (data.warning) window.toast?.error(data.warning);
+        else window.toast?.success(data.message);
 
         // Reload the recent reviews list
         await loadRecentReviews();
+        window.reviewWorkspace?.loadReviews();
 
       } catch (error) {
         console.error('Error deleting review:', error);
+        window.toast?.error(error.message);
         // Restore row on failure
         row.classList.remove('delete-confirm-row');
         row.innerHTML = originalHTML;
+        row.querySelector('.btn-delete-review')?.focus({ preventScroll: true });
       }
     });
 
     row.querySelector('.btn-confirm-no').addEventListener('click', function () {
       row.classList.remove('delete-confirm-row');
       row.innerHTML = originalHTML;
+      row.querySelector('.btn-delete-review')?.focus({ preventScroll: true });
     });
   }
 
@@ -1269,11 +1294,13 @@
    * Fetch and display recent reviews (initial load).
    * Resets pagination state and renders the full table from scratch.
    */
+  window.refreshRecentReviews = () => loadRecentReviews();
   async function loadRecentReviews() {
-    prSelection.exit();
 
     const container = document.getElementById('recent-reviews-container');
     const section = document.getElementById('recent-reviews-section');
+    const context = window.reviewWorkspace?.contextVersion || 0;
+    const requestId = recentReviewsPagination.requestId = (recentReviewsPagination.requestId || 0) + 1;
     // Reset pagination state
     recentReviewsPagination.lastTimestamp = null;
     recentReviewsPagination.hasMore = false;
@@ -1286,6 +1313,7 @@
       }
 
       const data = await response.json();
+      if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== recentReviewsPagination.requestId) return;
 
       if (!data.success || !data.reviews || data.reviews.length === 0) {
         // Show friendly empty state
@@ -1308,12 +1336,11 @@
         '<table class="recent-reviews-table">' +
           '<thead>' +
             '<tr>' +
-              '<th>Repository</th>' +
-              '<th>PR</th>' +
-              '<th>Title</th>' +
-              '<th>Author</th>' +
-              '<th>Last Opened</th>' +
-              '<th>Actions</th>' +
+              '<th scope="col" class="col-identity">Pull request</th>' +
+              '<th scope="col" class="col-requested">First requested</th>' +
+              '<th scope="col" class="col-ai">AI review</th>' +
+              '<th scope="col" class="col-state">Review state</th>' +
+              '<th scope="col" class="col-actions">Actions</th>' +
             '</tr>' +
           '</thead>' +
           '<tbody id="recent-reviews-tbody">' +
@@ -1323,11 +1350,14 @@
         renderShowMoreButton(data.hasMore);
       container.innerHTML = html;
       container.classList.remove('recent-reviews-loading');
+      if (prSelection.active) prSelection._injectCheckboxes();
+      prSelection._updateInlineActions();
 
       // Apply analysis-in-progress spinners to any rows with active analyses
       fetchAndApplyActiveAnalyses();
 
     } catch (error) {
+      if (context !== (window.reviewWorkspace?.contextVersion || 0) || requestId !== recentReviewsPagination.requestId) return;
       console.error('Error loading recent reviews:', error);
       container.innerHTML =
         '<div class="recent-reviews-empty">' +
@@ -1480,6 +1510,7 @@
     event.preventDefault();
 
     const input = document.getElementById('pr-url-input');
+    if (input.disabled) return;
     const url = input.value.trim();
 
     // Clear previous errors
@@ -1494,7 +1525,7 @@
     }
 
     // Show loading state while parsing
-    setFormLoading('pr', true, 'Validating PR URL...');
+    setFormLoading('pr', true, 'Validating PR URL…');
 
     // Parse the URL using the backend API
     const parsed = await parsePRUrl(url);
@@ -1610,9 +1641,11 @@
     this.config = config;
     this.active = false;
     this.selectedIds = new Set();
+    this.selectedRows = new Map();
     this._actionBar = null;
     this._toggleBtn = null;
     this._confirming = false;
+    this._removalResults = null;
   }
 
   SelectionMode.prototype.enter = function () {
@@ -1642,9 +1675,12 @@
   };
 
   SelectionMode.prototype.exit = function () {
+    this._removalResults?.remove();
+    this._removalResults = null;
     if (!this.active) return;
     this.active = false;
     this.selectedIds.clear();
+    this.selectedRows.clear();
     this._confirming = false;
 
     if (activeSelection === this) activeSelection = null;
@@ -1684,10 +1720,10 @@
 
     // Add select-all checkbox to thead
     var thead = table.querySelector('thead tr');
-    if (thead) {
+    if (thead && !thead.querySelector('.col-select')) {
       var th = document.createElement('th');
       th.className = 'col-select';
-      th.innerHTML = '<input type="checkbox" class="select-all-checkbox" title="Select all">';
+      th.innerHTML = '<input type="checkbox" class="select-all-checkbox" title="Select all visible" aria-label="Select all visible reviews">';
       thead.insertBefore(th, thead.firstChild);
 
       var self = this;
@@ -1716,6 +1752,9 @@
     var td = document.createElement('td');
     td.className = 'col-select';
     td.innerHTML = '<input type="checkbox" data-select-id="' + (rowId || '') + '">';
+    td.querySelector('input').checked = this.selectedIds.has(rowId);
+    td.querySelector('input').setAttribute('aria-label', 'Select review ' + rowId);
+    tr.classList.toggle('bulk-selected', this.selectedIds.has(rowId));
     tr.insertBefore(td, tr.firstChild);
 
     var self = this;
@@ -1748,6 +1787,7 @@
     var checkboxes = tbody.querySelectorAll('.col-select input[type="checkbox"]');
     for (var i = 0; i < checkboxes.length; i++) {
       var cb = checkboxes[i];
+      if (!cb.closest('tr').getClientRects().length) continue;
       cb.checked = checked;
       var id = cb.dataset.selectId;
       var row = cb.closest('tr');
@@ -1788,6 +1828,7 @@
 
   SelectionMode.prototype.onRowsAdded = function () {
     if (!this.active) return;
+    this._injectCheckboxes();
     var tbody = this._getTbody();
     if (!tbody) return;
 
@@ -1807,6 +1848,7 @@
         selectAllCb.indeterminate = this.selectedIds.size > 0;
       }
     }
+    this._updateInlineActions();
   };
 
   /**
@@ -1834,6 +1876,7 @@
     for (var i = 0; i < this.config.actions.length; i++) {
       var action = this.config.actions[i];
       var btn = document.createElement('button');
+      btn.type = 'button';
       btn.className = action.className;
       btn.textContent = action.label;
       btn.disabled = true;
@@ -1851,9 +1894,11 @@
     var confirmSpan = document.createElement('span');
     confirmSpan.className = 'bulk-confirm-buttons';
     var confirmYes = document.createElement('button');
+    confirmYes.type = 'button';
     confirmYes.className = 'btn-bulk-delete';
     confirmYes.textContent = 'Confirm';
     var confirmNo = document.createElement('button');
+    confirmNo.type = 'button';
     confirmNo.className = 'btn-bulk-cancel';
     confirmNo.textContent = 'Cancel';
     confirmSpan.appendChild(confirmYes);
@@ -1862,6 +1907,7 @@
 
     // Cancel button (exits selection mode)
     var cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
     cancelBtn.className = 'btn-bulk-cancel';
     cancelBtn.textContent = 'Cancel';
     cancelBtn.addEventListener('click', function () {
@@ -1890,6 +1936,22 @@
   };
 
   SelectionMode.prototype._updateInlineActions = function () {
+    var tbody = this._getTbody();
+    var visibleSelected = 0;
+    if (tbody) tbody.querySelectorAll('tr').forEach((row) => {
+      var id = row.dataset[this.config.rowIdAttr];
+      if (this.selectedIds.has(id)) {
+        var repository = row.querySelector('.col-repo')?.textContent.trim() || '';
+        var prLink = row.querySelector('.col-pr a');
+        var host = prLink ? new URL(prLink.href).searchParams.get('host') : null;
+        var label = prLink
+          ? repository + ' ' + prLink.textContent.trim() + (host ? ' (' + host + ')' : '')
+          : [row.querySelector('.col-local-name')?.textContent.trim(), row.querySelector('.col-local-path')?.title || repository].filter(Boolean).join(' · ');
+        this.selectedRows.set(id, { ...row.dataset, label: label || 'Review ' + id });
+        if (row.getClientRects().length) visibleSelected++;
+      }
+    });
+    for (var id of this.selectedRows.keys()) if (!this.selectedIds.has(id)) this.selectedRows.delete(id);
     if (!this._inlineEl) return;
 
     var count = this.selectedIds.size;
@@ -1897,12 +1959,12 @@
     // Update count label
     // Clear count text when not confirming (only used for confirm message)
     if (this._countEl && !this._confirming) {
-      this._countEl.textContent = '';
+      this._countEl.textContent = count + ' selected' + (count > visibleSelected ? ' · ' + (count - visibleSelected) + ' hidden' : '');
     }
 
     // Enable/disable action buttons
     for (var i = 0; i < this._actionBtns.length; i++) {
-      this._actionBtns[i].disabled = count === 0;
+      this._actionBtns[i].disabled = Boolean(this.busy) || count === 0;
     }
 
     // Exit confirming state if count drops to 0
@@ -1910,6 +1972,43 @@
       this._inlineEl.classList.remove('confirming');
       this._confirming = false;
     }
+  };
+
+  SelectionMode.prototype.showRemovalResults = function (selectedIds, data) {
+    var errors = new Map((data.errors || []).map(item => [String(item.id), item.error]));
+    var warnings = new Map((data.warnings || []).map(item => [String(item.id), item.message]));
+    var results = Array.from(selectedIds, id => ({
+      id: id,
+      label: this.selectedRows.get(id)?.label || 'Review ' + id,
+      error: errors.get(id),
+      warning: warnings.get(id)
+    }));
+    for (var result of results) {
+      if (!errors.has(result.id)) this.selectedIds.delete(result.id);
+    }
+    if (this.selectedIds.size === 0) this.exit();
+    else this._updateInlineActions();
+
+    this._removalResults?.remove();
+    var section = document.createElement('section');
+    section.className = 'bulk-removal-results';
+    section.setAttribute('aria-label', 'Local history removal results');
+    section.setAttribute('role', 'status');
+    var heading = document.createElement('h3');
+    heading.textContent = 'Local history removal results';
+    section.appendChild(heading);
+    var list = document.createElement('ul');
+    for (var result of results) {
+      var item = document.createElement('li');
+      item.dataset.reviewId = result.id;
+      item.textContent = result.label + ': ' + (result.error
+        ? 'Retained — ' + result.error
+        : 'Removed local history.' + (result.warning ? ' ' + result.warning : ''));
+      list.appendChild(item);
+    }
+    section.appendChild(list);
+    document.getElementById(this.config.containerId)?.before(section);
+    this._removalResults = section;
   };
 
   /**
@@ -1935,10 +2034,25 @@
     this._confirmNo.parentNode.replaceChild(newConfirmNo, this._confirmNo);
     this._confirmNo = newConfirmNo;
 
-    newConfirmYes.addEventListener('click', function () {
-      self._inlineEl.classList.remove('confirming');
-      self._confirming = false;
-      onConfirm();
+    newConfirmYes.addEventListener('click', async function () {
+      if (self.busy) return;
+      self.busy = true;
+      newConfirmYes.disabled = true;
+      newConfirmNo.disabled = true;
+      newConfirmYes.textContent = 'Removing…';
+      self._inlineEl.setAttribute('aria-busy', 'true');
+      try {
+        await onConfirm();
+      } finally {
+        self.busy = false;
+        newConfirmYes.disabled = false;
+        newConfirmNo.disabled = false;
+        newConfirmYes.textContent = 'Confirm';
+        self._inlineEl.removeAttribute('aria-busy');
+        self._inlineEl.classList.remove('confirming');
+        self._confirming = false;
+        self._updateInlineActions();
+      }
     });
 
     newConfirmNo.addEventListener('click', function () {
@@ -1956,7 +2070,10 @@
     tbodyId: 'recent-reviews-tbody',
     rowIdAttr: 'reviewId',
     actions: [
-      { label: 'Delete', className: 'btn-bulk-delete', handler: handleBulkDeletePR }
+      { label: 'Open', className: 'btn-bulk-open', handler: handleBulkOpen },
+      { label: 'Analyze', className: 'btn-bulk-analyze', handler: handleBulkAnalyze },
+      { label: 'Submit review', className: 'btn-bulk-submit', handler: handleBulkSubmitReview },
+      { label: 'Remove local history', className: 'btn-bulk-delete', handler: handleBulkDeletePR }
     ]
   });
 
@@ -1966,7 +2083,8 @@
     tbodyId: 'local-reviews-tbody',
     rowIdAttr: 'sessionId',
     actions: [
-      { label: 'Delete', className: 'btn-bulk-delete', handler: handleBulkDeleteLocal }
+      { label: 'Analyze', className: 'btn-bulk-analyze', handler: handleBulkAnalyze },
+      { label: 'Remove local history', className: 'btn-bulk-delete', handler: handleBulkDeleteLocal }
     ]
   });
 
@@ -1977,7 +2095,8 @@
     rowIdAttr: 'prUrl',
     actions: [
       { label: 'Open', className: 'btn-bulk-open', handler: handleBulkOpen },
-      { label: 'Analyze', className: 'btn-bulk-analyze', handler: handleBulkAnalyze }
+      { label: 'Analyze', className: 'btn-bulk-analyze', handler: handleBulkAnalyze },
+      { label: 'Submit review', className: 'btn-bulk-submit', handler: handleBulkSubmitReview }
     ]
   });
 
@@ -1988,7 +2107,8 @@
     rowIdAttr: 'prUrl',
     actions: [
       { label: 'Open', className: 'btn-bulk-open', handler: handleBulkOpen },
-      { label: 'Analyze', className: 'btn-bulk-analyze', handler: handleBulkAnalyze }
+      { label: 'Analyze', className: 'btn-bulk-analyze', handler: handleBulkAnalyze },
+      { label: 'Submit review', className: 'btn-bulk-submit', handler: handleBulkSubmitReview }
     ]
   });
 
@@ -1999,7 +2119,8 @@
     rowIdAttr: 'prUrl',
     actions: [
       { label: 'Open', className: 'btn-bulk-open', handler: handleBulkOpen },
-      { label: 'Analyze', className: 'btn-bulk-analyze', handler: handleBulkAnalyze }
+      { label: 'Analyze', className: 'btn-bulk-analyze', handler: handleBulkAnalyze },
+      { label: 'Submit review', className: 'btn-bulk-submit', handler: handleBulkSubmitReview }
     ]
   });
 
@@ -2009,10 +2130,34 @@
     'team-reviews': teamReviewsSelection,
     'my-prs': myPrsSelection
   };
+  window.addEventListener('workspaceFilterChanged', function () {
+    [prSelection, localSelection, ...Object.values(collectionSelections)].forEach(selection => selection._updateInlineActions());
+  });
+
+  window.addEventListener('workspaceContextChanged', function (event) {
+    if (event.detail.databaseChanged) {
+      [prSelection, localSelection, ...Object.values(collectionSelections)].forEach(selection => selection.exit());
+    }
+    for (const id of ['recent-reviews-container', 'local-reviews-container', 'review-requests-container', 'team-reviews-container', 'my-prs-container']) {
+      const container = document.getElementById(id);
+      if (container) container.textContent = 'Connection changed. Loading this server’s saved reviews…';
+    }
+    loadConfigAndUpdateUI();
+    loadRecentReviews();
+    loadLocalReviews();
+    for (const [collection, state] of [['review-requests', reviewRequestsState], ['team-reviews', teamReviewsState], ['my-prs', myPrsState]]) {
+      state.loaded = false;
+      state.prs = [];
+      state.fetchedAt = null;
+      state.activeRequest = (state.activeRequest || 0) + 1;
+      loadCollectionPrs(collection, `${collection}-container`, state, collection === 'team-reviews' ? getStoredTeamFilter() : undefined, state.activeRequest);
+    }
+  });
 
   async function handleBulkDeletePR(selectedIds, selectionInstance) {
     var count = selectedIds.size;
-    selectionInstance.showConfirm('Delete ' + count + ' review' + (count === 1 ? '' : 's') + '?', async function () {
+    selectionInstance.showConfirm('Remove local history and drafts for ' + count + ' review' + (count === 1 ? '' : 's') + '? Unshared checkouts are removed; pooled or shared checkouts stay. Remote reviews stay unchanged. Active work is not cancelled.', async function () {
+      var context = window.reviewWorkspace?.contextVersion || 0;
       try {
         var response = await fetch('/api/worktrees/bulk-delete', {
           method: 'POST',
@@ -2020,20 +2165,22 @@
           body: JSON.stringify({ ids: Array.from(selectedIds).map(Number) })
         });
         var data = await response.json();
+        if (context !== (window.reviewWorkspace?.contextVersion || 0)) return;
         if (!response.ok) throw new Error(data.error || 'Bulk delete failed');
 
-        if (data.failed > 0) {
-          if (window.toast) window.toast.error(data.failed + ' of ' + count + ' failed to delete');
+        if (data.failed > 0 || data.warnings?.length) {
+          const details = [...(data.errors || []).map(item => `#${item.id}: ${item.error}`), ...(data.warnings || []).map(item => `#${item.id}: ${item.message}`)];
+          window.toast?.error(`Removed ${data.deleted}; retained ${data.failed}. ${details.join(' ')}`);
         } else {
-          if (window.toast) window.toast.success('Deleted ' + data.deleted + ' review' + (data.deleted === 1 ? '' : 's'));
+          window.toast?.success('Removed local history for ' + data.deleted + ' review' + (data.deleted === 1 ? '' : 's') + '. Remote reviews unchanged.');
         }
 
-        selectionInstance.exit();
+        selectionInstance.showRemovalResults(selectedIds, data);
         await loadRecentReviews();
       } catch (error) {
+        if (context !== (window.reviewWorkspace?.contextVersion || 0)) return;
         console.error('Bulk delete PR error:', error);
         if (window.toast) window.toast.error('Bulk delete failed: ' + error.message);
-        selectionInstance.exit();
         await loadRecentReviews();
       }
     });
@@ -2041,7 +2188,8 @@
 
   async function handleBulkDeleteLocal(selectedIds, selectionInstance) {
     var count = selectedIds.size;
-    selectionInstance.showConfirm('Delete ' + count + ' session' + (count === 1 ? '' : 's') + '?', async function () {
+    selectionInstance.showConfirm('Remove local history and drafts for ' + count + ' local review' + (count === 1 ? '' : 's') + '? Files and remote reviews stay unchanged. Active work is not cancelled.', async function () {
+      var context = window.reviewWorkspace?.contextVersion || 0;
       try {
         var response = await fetch('/api/local/sessions/bulk-delete', {
           method: 'POST',
@@ -2049,20 +2197,21 @@
           body: JSON.stringify({ ids: Array.from(selectedIds).map(Number) })
         });
         var data = await response.json();
+        if (context !== (window.reviewWorkspace?.contextVersion || 0)) return;
         if (!response.ok) throw new Error(data.error || 'Bulk delete failed');
 
         if (data.failed > 0) {
-          if (window.toast) window.toast.error(data.failed + ' of ' + count + ' failed to delete');
+          window.toast?.error(`Removed ${data.deleted}; retained ${data.failed}. ${(data.errors || []).map(item => `#${item.id}: ${item.error}`).join(' ')}`);
         } else {
-          if (window.toast) window.toast.success('Deleted ' + data.deleted + ' session' + (data.deleted === 1 ? '' : 's'));
+          window.toast?.success('Removed local history for ' + data.deleted + ' local review' + (data.deleted === 1 ? '' : 's') + '. Files and remote reviews unchanged.');
         }
 
-        selectionInstance.exit();
+        selectionInstance.showRemovalResults(selectedIds, data);
         await loadLocalReviews();
       } catch (error) {
+        if (context !== (window.reviewWorkspace?.contextVersion || 0)) return;
         console.error('Bulk delete local error:', error);
         if (window.toast) window.toast.error('Bulk delete failed: ' + error.message);
-        selectionInstance.exit();
         await loadLocalReviews();
       }
     });
@@ -2075,29 +2224,15 @@
    * @returns {Array<{owner: string, repo: string, number: string, prUrl: string, host: string|undefined}>}
    */
   function getSelectedCollectionRows(selectedIds, tbodyId) {
-    var tbody = document.getElementById(tbodyId);
-    if (!tbody) return [];
-
-    var rows = [];
-    var trs = tbody.querySelectorAll('tr[data-pr-url]');
-    for (var i = 0; i < trs.length; i++) {
-      var tr = trs[i];
-      var prUrl = tr.dataset.prUrl;
-      if (!selectedIds.has(prUrl)) continue;
-      if (tr.dataset.owner && tr.dataset.repo && tr.dataset.number) {
-        rows.push({
-          owner: tr.dataset.owner,
-          repo: tr.dataset.repo,
-          number: tr.dataset.number,
-          prUrl: prUrl,
-          // Known rows carry either the "github" sentinel or an alternate
-          // api_host; unknown rows leave it undefined. The single-row click
-          // path threads the same value so bulk and individual routing agree.
-          host: tr.dataset.host
-        });
-      }
-    }
-    return rows;
+    var selection = [prSelection, ...Object.values(collectionSelections)].find(value => value.config.tbodyId === tbodyId);
+    const rowAttr = selection ? selection.config.rowIdAttr : 'prUrl';
+    const visibleRows = new Map([...document.querySelectorAll(`#${tbodyId} tr`)].filter(row => row.dataset[rowAttr]).map(row => [row.dataset[rowAttr], row.dataset]));
+    return [...selectedIds].map(id => {
+      const row = visibleRows.get(id) || selection?.selectedRows.get(id);
+      return row?.owner && row?.repo && row?.number
+        ? { selectId: id, owner: row.owner, repo: row.repo, number: row.number, prUrl: row.prUrl, host: row.host, analysisReviewId: row.analysisReviewId }
+        : null;
+    }).filter(Boolean);
   }
 
   function buildReviewUrlsFromRows(rows, query) {
@@ -2125,7 +2260,7 @@
   }
 
   function getCommonRepository(rows) {
-    if (rows.length === 0) return null;
+    if (rows.length === 0 || rows.some(row => row.local)) return null;
     var first = rows[0];
     var firstKey = (first.owner + '/' + first.repo).toLowerCase();
     for (var i = 1; i < rows.length; i++) {
@@ -2212,7 +2347,7 @@
       repoInstructions: commonRepo ? (repoSettings?.default_instructions || '') : '',
       lastInstructions: lastInstructions,
       defaultCouncilId: commonRepo ? (repoSettings?.default_council_id || null) : null,
-      hasPr: true,
+      hasPr: !rows.every(row => row.local),
       hasGithubToken: window.__pairReview?.hasGithubToken !== false
     });
 
@@ -2228,18 +2363,6 @@
     return config;
   }
 
-  async function storeBulkAnalysisConfig(config) {
-    var response = await fetch('/api/bulk-analysis-configs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ analysisConfig: config })
-    });
-    var data = await response.json().catch(function () { return {}; });
-    if (!response.ok || !data.id) {
-      throw new Error(data.error || 'Failed to save analysis settings');
-    }
-    return data.id;
-  }
 
   /**
    * Open multiple review URLs via the server-side /api/bulk-open endpoint.
@@ -2265,27 +2388,291 @@
   }
 
   async function handleBulkAnalyze(selectedIds, selectionInstance) {
+    if (selectionInstance.busy) return;
+    var rows = selectionInstance === localSelection
+      ? [...selectedIds].map(id => ({ local: true, reviewId: id, url: '/local/' + encodeURIComponent(id) }))
+      : getSelectedCollectionRows(selectedIds, selectionInstance.config.tbodyId).map(row => ({
+        ...row, url: buildReviewUrlsFromRows([row])[0]
+      }));
+    if (!rows.length) return;
+    if (!window.AnalysisConfigModal || !window.BulkAnalysisLauncher) {
+      window.toast?.error('Analysis settings are unavailable. Reload this page before starting analysis.');
+      return;
+    }
+    var launcher = window.bulkAnalysisLauncher ||= new window.BulkAnalysisLauncher(window.reviewWorkspace);
+    if (launcher.preparing || launcher.configuring) {
+      window.toast?.error('A batch is still being prepared. Follow Bulk analysis progress before starting another.');
+      return;
+    }
+    var context = window.reviewWorkspace?.contextVersion || 0;
+    launcher.configuring = true;
+    selectionInstance.busy = true;
+    selectionInstance._updateInlineActions();
+    try {
+      var config = await showBulkAnalysisConfig(rows);
+      if (!config || context !== (window.reviewWorkspace?.contextVersion || 0)) return;
+      await launcher.start(rows, config);
+      // Keep selection and failure results visible; never silently discard targets.
+    } catch (error) {
+      if (context === (window.reviewWorkspace?.contextVersion || 0)) window.toast?.error('Failed to start bulk analysis: ' + error.message);
+    } finally {
+      launcher.configuring = false;
+      selectionInstance.busy = false;
+      selectionInstance._updateInlineActions();
+    }
+  }
+
+  function handleBulkSubmitReview(selectedIds, selectionInstance) {
     var rows = getSelectedCollectionRows(selectedIds, selectionInstance.config.tbodyId);
     if (rows.length === 0) return;
 
-    if (!window.AnalysisConfigModal) {
-      selectionInstance.exit();
-      bulkOpenUrls(buildReviewUrlsFromRows(rows, '?analyze=true'));
-      return;
+    var modal = document.getElementById('bulk-submit-review-modal');
+    if (!modal) {
+      if (window.reviewWorkspace?.makeDialog) {
+        modal = window.reviewWorkspace.makeDialog('bulk-submit-review-modal', 'Submit review');
+        modal.classList.add('workspace-review');
+      } else {
+        modal = document.createElement('dialog');
+        modal.id = 'bulk-submit-review-modal';
+        modal.className = 'workspace-dialog workspace-review';
+        document.body.appendChild(modal);
+      }
     }
 
-    try {
-      var config = await showBulkAnalysisConfig(rows);
-      if (!config) return;
+    var content = modal.querySelector('.workspace-review-content');
+    if (!content) {
+      content = document.createElement('div');
+      content.className = 'workspace-review-content';
+      modal.appendChild(content);
+    }
+    content.replaceChildren();
 
-      var configId = await storeBulkAnalysisConfig(config);
-      var query = '?analyze=true&analysisConfigId=' + encodeURIComponent(configId);
-      var urls = buildReviewUrlsFromRows(rows, query);
-      selectionInstance.exit();
-      bulkOpenUrls(urls);
-    } catch (error) {
-      console.error('Bulk analyze error:', error);
-      if (window.toast) window.toast.error('Failed to start bulk analysis: ' + error.message);
+    var statusNote = document.createElement('p');
+    statusNote.setAttribute('role', 'status');
+    statusNote.textContent = 'Submit a review across ' + rows.length + ' selected pull request' + (rows.length === 1 ? '' : 's') + '. Any saved inline comments on each PR are included.';
+
+    var errorNote = document.createElement('p');
+    errorNote.className = 'workspace-review-error';
+    errorNote.setAttribute('role', 'alert');
+
+    var fieldset = document.createElement('fieldset');
+    fieldset.className = 'workspace-review-authoring';
+    var legend = document.createElement('legend');
+    legend.textContent = 'Submit review';
+    fieldset.appendChild(legend);
+
+    var decisionLabel = document.createElement('label');
+    decisionLabel.setAttribute('for', 'bulk-review-decision');
+    decisionLabel.textContent = 'Decision ';
+    var decisionSelect = document.createElement('select');
+    decisionSelect.id = 'bulk-review-decision';
+    [
+      ['APPROVE', 'Approve'],
+      ['COMMENT', 'Comment only'],
+      ['REQUEST_CHANGES', 'Request changes']
+    ].forEach(function (pair) {
+      var opt = document.createElement('option');
+      opt.value = pair[0];
+      opt.textContent = pair[1];
+      decisionSelect.appendChild(opt);
+    });
+    decisionLabel.appendChild(decisionSelect);
+
+    var decisionCards = document.createElement('div');
+    decisionCards.className = 'workspace-decision-cards';
+    decisionCards.setAttribute('role', 'group');
+    decisionCards.setAttribute('aria-label', 'Review decision');
+    var decisionCardButtons = new Map();
+    [
+      ['APPROVE', '✓ Approve', 'Approve merging these changes'],
+      ['COMMENT', 'Comment', 'Submit feedback without explicit approval'],
+      ['REQUEST_CHANGES', 'Request changes', 'Changes must be addressed before merge']
+    ].forEach(function (cardDef) {
+      var value = cardDef[0];
+      var titleText = cardDef[1];
+      var descText = cardDef[2];
+      var cardBtn = document.createElement('button');
+      cardBtn.type = 'button';
+      cardBtn.className = 'workspace-decision-card';
+      cardBtn.dataset.decision = value;
+      var strong = document.createElement('strong');
+      strong.textContent = titleText;
+      var span = document.createElement('span');
+      span.textContent = descText;
+      cardBtn.appendChild(strong);
+      cardBtn.appendChild(span);
+      cardBtn.addEventListener('click', function () {
+        if (cardBtn.disabled) return;
+        decisionSelect.value = value;
+        decisionSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      decisionCards.appendChild(cardBtn);
+      decisionCardButtons.set(value, cardBtn);
+    });
+
+    var bodyLabel = document.createElement('label');
+    bodyLabel.setAttribute('for', 'bulk-review-body');
+    bodyLabel.textContent = 'Review body (optional Markdown)';
+    var bodyInput = document.createElement('textarea');
+    bodyInput.id = 'bulk-review-body';
+    bodyInput.rows = 4;
+    bodyInput.setAttribute('autocomplete', 'off');
+    bodyInput.placeholder = 'Optional review summary applied to selected PRs…';
+
+    var keepExistingLabel = document.createElement('label');
+    var keepExistingCb = document.createElement('input');
+    keepExistingCb.type = 'checkbox';
+    keepExistingCb.checked = true;
+    keepExistingLabel.appendChild(keepExistingCb);
+    keepExistingLabel.appendChild(document.createTextNode(' Keep each PR’s existing saved summary when the body above is blank'));
+
+    var prListHeading = document.createElement('h3');
+    prListHeading.textContent = rows.length + ' selected pull request' + (rows.length === 1 ? '' : 's');
+    var prList = document.createElement('ul');
+    prList.className = 'bulk-submit-pr-list';
+    var rowStatusNodes = new Map();
+    rows.forEach(function (row) {
+      var li = document.createElement('li');
+      var titleSpan = document.createElement('strong');
+      titleSpan.textContent = row.owner + '/' + row.repo + ' #' + row.number;
+      var stateSpan = document.createElement('span');
+      stateSpan.className = 'workspace-muted';
+      stateSpan.textContent = ' · ready';
+      li.appendChild(titleSpan);
+      li.appendChild(stateSpan);
+      prList.appendChild(li);
+      rowStatusNodes.set(row.selectId, stateSpan);
+    });
+
+    fieldset.append(decisionCards, decisionLabel, bodyLabel, bodyInput, keepExistingLabel, prListHeading, prList);
+
+    var actions = document.createElement('div');
+    actions.className = 'workspace-review-actions';
+    var submitBtn = document.createElement('button');
+    submitBtn.type = 'button';
+    submitBtn.id = 'bulk-submit-review-confirm';
+    submitBtn.className = 'btn btn-primary workspace-submit-primary';
+    var cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', function () {
+      modal.close();
+    });
+
+    function syncDecisionCards() {
+      var current = decisionSelect.value;
+      decisionCardButtons.forEach(function (btn, val) {
+        var isActive = val === current;
+        btn.classList.toggle('active', isActive);
+        btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+      });
+      if (submitBtn && !submitBtn.disabled) {
+        var labelMap = {
+          APPROVE: 'Submit approval (' + rows.length + ')',
+          COMMENT: 'Submit comment review (' + rows.length + ')',
+          REQUEST_CHANGES: 'Submit change request (' + rows.length + ')'
+        };
+        submitBtn.textContent = labelMap[current] || ('Submit review (' + rows.length + ')');
+      }
+    }
+
+    decisionSelect.addEventListener('change', syncDecisionCards);
+    syncDecisionCards();
+
+    actions.append(submitBtn, cancelBtn);
+    content.append(statusNote, errorNote, fieldset, actions);
+
+    submitBtn.addEventListener('click', async function () {
+      errorNote.textContent = '';
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Submitting…';
+      fieldset.disabled = true;
+      var succeeded = 0;
+      var failed = 0;
+      var decision = decisionSelect.value;
+      var sharedBody = bodyInput.value;
+      var keepExisting = keepExistingCb.checked;
+
+      for (var i = 0; i < rows.length; i++) {
+        var row = rows[i];
+        var statusEl = rowStatusNodes.get(row.selectId);
+        if (statusEl) statusEl.textContent = ' · preparing…';
+        try {
+          var reviewId = row.analysisReviewId ? Number(row.analysisReviewId) : null;
+          if (!reviewId) {
+            var resResp = await fetch('/api/reviews/resolve', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ owner: row.owner, repo: row.repo, number: Number(row.number) })
+            });
+            var resData = await resResp.json();
+            if (!resResp.ok) throw new Error(resData.error || 'Could not resolve review');
+            reviewId = resData.reviewId;
+          }
+
+          var draftResp = await fetch('/api/reviews/' + reviewId + '/draft');
+          var draftData = await draftResp.json();
+          if (!draftResp.ok) throw new Error(draftData.error || 'Could not load draft');
+
+          var finalBody = sharedBody.trim() ? sharedBody : (keepExisting ? (draftData.body || '') : '');
+          var saveResp = await fetch('/api/reviews/' + reviewId + '/draft', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              body: finalBody,
+              event: decision,
+              expected_revision: draftData.revision
+            })
+          });
+          var saveData = await saveResp.json();
+          if (!saveResp.ok) throw new Error(saveData.error || 'Could not save draft');
+
+          var manifestResp = await fetch('/api/reviews/' + reviewId + '/manifest?mode=submit');
+          var manifest = await manifestResp.json();
+          if (!manifestResp.ok) throw new Error(manifest.error || 'Could not prepare submission manifest');
+          if (Array.isArray(manifest.blockers) && manifest.blockers.length > 0) {
+            throw new Error(manifest.blockers.join(' '));
+          }
+
+          if (statusEl) statusEl.textContent = ' · publishing…';
+          var pubResp = await fetch('/api/reviews/' + reviewId + '/submit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ digest: manifest.digest, mode: 'submit' })
+          });
+          var pubData = await pubResp.json();
+          if (!pubResp.ok) throw new Error(pubData.error || 'Submission failed');
+
+          succeeded++;
+          selectionInstance.selectedIds.delete(row.selectId);
+          if (statusEl) {
+            statusEl.textContent = ' · submitted (' + manifest.count + ' inline comment' + (manifest.count === 1 ? '' : 's') + ')';
+          }
+        } catch (err) {
+          failed++;
+          if (statusEl) statusEl.textContent = ' · failed: ' + err.message;
+        }
+      }
+
+      fieldset.disabled = false;
+      submitBtn.disabled = false;
+      syncDecisionCards();
+      statusNote.textContent = 'Submitted ' + succeeded + ' of ' + rows.length + ' review' + (rows.length === 1 ? '' : 's') + (failed ? ' (' + failed + ' failed).' : '.');
+      if (failed === 0) {
+        window.toast?.success('Submitted ' + succeeded + ' review' + (succeeded === 1 ? '' : 's') + '.');
+        selectionInstance.exit();
+        modal.close();
+      } else {
+        window.toast?.error('Submitted ' + succeeded + '; ' + failed + ' failed. See dialog for details.');
+        selectionInstance._updateInlineActions();
+      }
+      await loadRecentReviews();
+    });
+
+    if (window.reviewWorkspace?.open) {
+      window.reviewWorkspace.open(modal);
+    } else {
+      modal.showModal();
     }
   }
 
@@ -2348,6 +2735,18 @@
       var instance = instances[tabId];
       if (instance) instance.toggle();
       return;
+    }
+
+    var selectableRow = event.target.closest('tr[data-review-id], tr[data-session-id]');
+    if (selectableRow && !event.target.closest('a, button, .col-select')) {
+      if (activeSelection && activeSelection.active && selectableRow.closest('.selection-mode')) {
+        var selectableCb = selectableRow.querySelector('.col-select input[type="checkbox"]');
+        if (selectableCb) {
+          selectableCb.checked = !selectableCb.checked;
+          selectableCb.dispatchEvent(new Event('change'));
+        }
+        return;
+      }
     }
 
     // Click on a collection PR row — toggle checkbox in selection mode, else start review
@@ -2419,10 +2818,11 @@
     if (unifiedTabBtn) {
       const tabBar = document.getElementById('unified-tab-bar');
       switchTab(tabBar, unifiedTabBtn, async function (tabId) {
-        // Exit any active selection mode when switching tabs
-        if (activeSelection) activeSelection.exit();
+        // A primary filter can reuse the same table; its selection remains intact.
+        if (activeSelection && activeSelection.config.tabId !== tabId) activeSelection.exit();
         // Persist tab choice
         localStorage.setItem(TAB_STORAGE_KEY, tabId);
+        localStorage.setItem(VIEW_STORAGE_KEY, unifiedTabBtn.dataset.workspaceView || 'all');
         // Lazy-load local reviews on first switch
         if (tabId === 'local-tab' && !localReviewsPagination.loaded) {
           loadLocalReviews();
@@ -2466,12 +2866,20 @@
     await loadConfigAndUpdateUI();
 
     // Restore saved tab from localStorage (default: 'pr-tab')
-    const savedTab = localStorage.getItem(TAB_STORAGE_KEY) || 'pr-tab';
+    const initialParams = new URLSearchParams(window.location.search);
+    const savedTab = (initialParams.has('view') || initialParams.has('reviewUrl') ? 'pr-tab' : initialParams.get('tab') || localStorage.getItem(TAB_STORAGE_KEY)) || 'pr-tab';
+    const savedView = initialParams.get('view') || (!initialParams.has('tab') && !initialParams.has('reviewUrl') ? localStorage.getItem(VIEW_STORAGE_KEY) : 'all');
+    if (initialParams.has('reviewUrl')) {
+      const input = document.querySelector('#start-review-form input[type="url"], #start-review-form input[type="text"]');
+      if (input) { input.value = initialParams.get('reviewUrl'); input.focus(); }
+    }
     const tabBar = document.getElementById('unified-tab-bar');
     if (tabBar) {
-      const targetBtn = tabBar.querySelector('[data-tab="' + savedTab + '"]');
-      if (targetBtn && savedTab !== 'pr-tab') {
-        // Switch to saved tab (pr-tab is already active by default in HTML)
+      const targetBtn = savedTab === 'pr-tab' && savedView === 'drafts'
+        ? tabBar.querySelector('[data-workspace-view="drafts"]')
+        : tabBar.querySelector('[data-tab="' + savedTab + '"]');
+      if (targetBtn && (savedTab !== 'pr-tab' || savedView === 'drafts')) {
+        // Restore both the data source and the primary filter.
         switchTab(tabBar, targetBtn);
       }
     }
@@ -2680,6 +3088,7 @@
     var spinner = document.createElement('span');
     spinner.className = 'index-analysis-spinner';
     spinner.title = 'Analysis in progress';
+    spinner.setAttribute('aria-hidden', 'true');
 
     // PR rows: prepend in .col-title; local rows: prepend in .col-local-name
     var cell = row.querySelector('.col-title') || row.querySelector('.col-local-name');
@@ -2704,52 +3113,23 @@
    * Fetch active analyses and apply/remove spinners to matching rows.
    */
   function fetchAndApplyActiveAnalyses() {
-    fetch('/api/analyses/active')
-      .then(function (res) { return res.json(); })
-      .then(function (data) {
-        if (!data.active) return;
-
-        var activeReviewIds = new Set();
-        data.active.forEach(function (entry) {
-          var rid = entry.reviewId;
-          if (rid == null) return;
-          activeReviewIds.add(rid);
-          var row = findRowByReviewId(rid);
-          if (row) addSpinnerToRow(row, rid);
-        });
-
-        // Remove spinners for analyses that are no longer active
-        activeSpinnerReviewIds.forEach(function (rid) {
-          if (!activeReviewIds.has(rid)) {
-            var row = findRowByReviewId(rid);
-            if (row) removeSpinnerFromRow(row, rid);
-            else activeSpinnerReviewIds.delete(rid);
-          }
-        });
-      })
-      .catch(function () { /* ignore — spinners are best-effort */ });
+    window.reviewWorkspace?.refresh();
   }
 
-  // Subscribe to real-time analysis events via WebSocket
-  if (window.wsClient) {
-    window.wsClient.connect();
-    window.wsClient.subscribe('index:analyses', function (msg) {
-      var reviewId = msg.reviewId;
-      if (reviewId == null) return;
-
-      if (msg.type === 'analysis_started') {
-        var row = findRowByReviewId(reviewId);
-        if (row) addSpinnerToRow(row, reviewId);
-      } else if (msg.type === 'analysis_ended') {
-        var endRow = findRowByReviewId(reviewId);
-        if (endRow) removeSpinnerFromRow(endRow, reviewId);
-        else activeSpinnerReviewIds.delete(reviewId);
-      }
-    });
-
-    // On reconnect, re-fetch active analyses to catch anything missed
-    window.addEventListener('wsReconnected', fetchAndApplyActiveAnalyses);
-  }
+  // Project the shared per-run snapshot rather than clearing a review's spinner
+  // whenever any one of its concurrent analyses ends.
+  window.addEventListener('workspaceActivity', function (event) {
+    const ids = new Set(event.detail.available ? event.detail.runs.filter(run => run.observation === 'live' && ['queued', 'starting', 'running', 'cancellation_requested'].includes(run.status)).map(run => run.reviewId) : []);
+    for (const id of activeSpinnerReviewIds) if (!ids.has(id)) {
+      const row = findRowByReviewId(id);
+      if (row) removeSpinnerFromRow(row, id);
+      else activeSpinnerReviewIds.delete(id);
+    }
+    for (const id of ids) {
+      const row = findRowByReviewId(id);
+      if (row) addSpinnerToRow(row, id);
+    }
+  });
 
   // Expose for use after data loads (loadRecentReviews / loadLocalReviews)
   window.__pairReview = window.__pairReview || {};
@@ -2770,7 +3150,8 @@
       showLocalPathUrlError: showLocalPathUrlError,
       handleLocalPathInput: handleLocalPathInput,
       renderCollectionPrRow: renderCollectionPrRow,
-      renderRecentReviewRow: renderRecentReviewRow
+      renderRecentReviewRow: renderRecentReviewRow,
+      handleBulkSubmitReview: handleBulkSubmitReview
     };
   }
 

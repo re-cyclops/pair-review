@@ -73,52 +73,6 @@ class FileCommentManager {
     return window.CategoryEmoji?.getEmoji(category) || '\u{1F4AC}';
   }
 
-  /**
-   * Get the appropriate API endpoint and request body for file-level comments
-   * @private
-   * @param {string} operation - Operation type: 'create', 'update', 'delete'
-   * @param {Object} options - Options object with commentId, file, body, etc.
-   * @returns {Object} Object with endpoint and requestBody
-   */
-  _getFileCommentEndpoint(operation, options = {}) {
-    const reviewId = this.prManager?.currentPR?.id;
-    const headSha = this.prManager?.currentPR?.head_sha;
-
-    let endpoint;
-    let requestBody = null;
-
-    switch (operation) {
-      case 'create':
-        endpoint = `/api/reviews/${reviewId}/comments`;
-
-        requestBody = {
-          file: options.file,
-          body: options.body,
-          commit_sha: headSha,
-          parent_id: options.parent_id,
-          type: options.type,
-          title: options.title
-        };
-        break;
-
-      case 'update':
-        endpoint = `/api/reviews/${reviewId}/comments/${options.commentId}`;
-
-        requestBody = { body: options.body };
-        break;
-
-      case 'delete':
-        endpoint = `/api/reviews/${reviewId}/comments/${options.commentId}`;
-
-        // No body needed for DELETE
-        break;
-
-      default:
-        throw new Error(`Unknown operation: ${operation}`);
-    }
-
-    return { endpoint, requestBody };
-  }
 
   /**
    * Create the file comments zone element for a file
@@ -153,6 +107,7 @@ class FileCommentManager {
     // Close any existing form in this zone
     const existingForm = container.querySelector('.file-comment-form');
     if (existingForm) {
+      window.reviewDrafts?.close(existingForm.querySelector('textarea'));
       existingForm.remove();
     }
 
@@ -172,12 +127,12 @@ class FileCommentManager {
         data-file="${window.escapeHtmlAttribute(fileName)}"
       ></textarea>
       <div class="file-comment-form-footer">
-        <button class="file-comment-form-btn submit submit-btn" disabled>Save</button>
+        <button class="file-comment-form-btn submit submit-btn" disabled>Done</button>
         <button class="ai-action ai-action-chat btn-chat-from-comment" title="Chat about this file">
           <svg viewBox="0 0 16 16" fill="currentColor" width="16" height="16"><path d="M1.75 1h8.5c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0 1 10.25 10H7.061l-2.574 2.573A1.458 1.458 0 0 1 2 11.543V10h-.25A1.75 1.75 0 0 1 0 8.25v-5.5C0 1.784.784 1 1.75 1ZM1.5 2.75v5.5c0 .138.112.25.25.25h1a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h3.5a.25.25 0 0 0 .25-.25v-5.5a.25.25 0 0 0-.25-.25h-8.5a.25.25 0 0 0-.25.25Zm13 2a.25.25 0 0 0-.25-.25h-.5a.75.75 0 0 1 0-1.5h.5c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0 1 14.25 12H14v1.543a1.458 1.458 0 0 1-2.487 1.03L9.22 12.28a.749.749 0 0 1 .326-1.275.749.749 0 0 1 .734.215l2.22 2.22v-2.19a.75.75 0 0 1 .75-.75h1a.25.25 0 0 0 .25-.25Z"/></svg>
           Chat
         </button>
-        <button class="file-comment-form-btn cancel cancel-btn">Cancel</button>
+        <button class="file-comment-form-btn cancel cancel-btn">Close</button>
       </div>
     `;
 
@@ -187,6 +142,7 @@ class FileCommentManager {
     const textarea = form.querySelector('.file-comment-textarea');
     const submitBtn = form.querySelector('.submit-btn');
     const cancelBtn = form.querySelector('.cancel-btn');
+    window.reviewDrafts?.bind(textarea, { anchor: { file: fileName }, mode: 'file' });
 
     // Focus textarea
     textarea.focus();
@@ -210,7 +166,7 @@ class FileCommentManager {
       if (e.key === 'Escape') {
         this.hideCommentForm(zone);
       } else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && textarea.value.trim()) {
-        this.saveFileComment(zone, fileName, textarea.value.trim());
+        this.saveFileComment(zone, fileName, textarea.value);
       }
     });
 
@@ -220,7 +176,7 @@ class FileCommentManager {
     // Submit button
     submitBtn.addEventListener('click', () => {
       if (textarea.value.trim()) {
-        this.saveFileComment(zone, fileName, textarea.value.trim());
+        this.saveFileComment(zone, fileName, textarea.value);
       }
     });
 
@@ -229,7 +185,7 @@ class FileCommentManager {
     if (chatFromCommentBtn) {
       chatFromCommentBtn.addEventListener('click', () => {
         if (!window.chatPanel) return;
-        const unsavedText = textarea.value.trim();
+        const unsavedText = textarea.value;
         this.hideCommentForm(zone);
         window.chatPanel.open({
           commentContext: {
@@ -256,6 +212,7 @@ class FileCommentManager {
     const form = container.querySelector('.file-comment-form');
 
     if (form) {
+      window.reviewDrafts?.close(form.querySelector('textarea'));
       form.remove();
     }
   }
@@ -277,34 +234,8 @@ class FileCommentManager {
     if (submitBtn) submitBtn.disabled = true;
 
     try {
-      const { endpoint, requestBody } = this._getFileCommentEndpoint('create', {
-        file: fileName,
-        body: body
-      });
-
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(requestBody)
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to save file-level comment');
-      }
-
-      const result = await response.json();
-
-      // Build comment object
-      const commentData = {
-        id: result.commentId,
-        file: fileName,
-        body: body,
-        source: 'user',
-        is_file_level: 1,
-        created_at: new Date().toISOString()
-      };
+      const textarea = container.querySelector('.file-comment-form textarea');
+      const commentData = await window.reviewDrafts.saveTextarea(textarea);
 
       // Display the new comment
       this.displayUserComment(zone, commentData);
@@ -335,7 +266,7 @@ class FileCommentManager {
         this.prManager.updateCommentCount();
       }
 
-      window.chatPanel?.queueUserActionHint(`[User Action: created comment ${result.commentId}]`);
+      window.chatPanel?.queueUserActionHint(`[User Action: created comment ${commentData.id}]`);
 
     } catch (error) {
       console.error('Error saving file-level comment:', error);
@@ -499,6 +430,7 @@ class FileCommentManager {
     card.innerHTML = `
       <div class="ai-suggestion-header">
         <div class="ai-suggestion-header-left">
+          ${window.SuggestionUI?.buildRevisionWarningHtml?.(suggestion.revision) || ''}
           ${suggestion.type === 'praise'
             ? `<span class="praise-badge" title="Nice Work"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25z"/></svg>Nice Work</span>`
             : `<span class="ai-suggestion-badge" data-type="${suggestion.type}" title="AI Suggestion"><svg viewBox="0 0 16 16" fill="currentColor" width="12" height="12"><path d="M9.6 2.279a.426.426 0 0 1 .8 0l.407 1.112a6.386 6.386 0 0 0 3.802 3.802l1.112.407a.426.426 0 0 1 0 .8l-1.112.407a6.386 6.386 0 0 0-3.802 3.802l-.407 1.112a.426.426 0 0 1-.8 0l-.407-1.112a6.386 6.386 0 0 0-3.802-3.802L4.279 8.4a.426.426 0 0 1 0-.8l1.112-.407a6.386 6.386 0 0 0 3.802-3.802L9.6 2.279Zm-4.267 8.837a.178.178 0 0 1 .334 0l.169.464a2.662 2.662 0 0 0 1.584 1.584l.464.169a.178.178 0 0 1 0 .334l-.464.169a2.662 2.662 0 0 0-1.584 1.584l-.169.464a.178.178 0 0 1-.334 0l-.169-.464a2.662 2.662 0 0 0-1.584-1.584l-.464-.169a.178.178 0 0 1 0-.334l.464-.169a2.662 2.662 0 0 0 1.584-1.584l.169-.464ZM2.8.14a.213.213 0 0 1 .4 0l.203.556a3.2 3.2 0 0 0 1.901 1.901l.556.203a.213.213 0 0 1 0 .4l-.556.203a3.2 3.2 0 0 0-1.901 1.901L3.2 5.86a.213.213 0 0 1-.4 0l-.203-.556A3.2 3.2 0 0 0 .696 3.403L.14 3.2a.213.213 0 0 1 0-.4l.556-.203A3.2 3.2 0 0 0 2.597.696L2.8.14Z"/></svg>AI Suggestion</span>`}
@@ -519,6 +451,7 @@ class FileCommentManager {
           ? `<span class="praise-badge" title="Nice Work"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25z"/></svg>Nice Work</span>`
           : `<span class="ai-suggestion-badge collapsed" data-type="${suggestion.type}" title="AI Suggestion"><svg viewBox="0 0 16 16" fill="currentColor" width="10" height="10"><path d="M9.6 2.279a.426.426 0 0 1 .8 0l.407 1.112a6.386 6.386 0 0 0 3.802 3.802l1.112.407a.426.426 0 0 1 0 .8l-1.112.407a6.386 6.386 0 0 0-3.802 3.802l-.407 1.112a.426.426 0 0 1-.8 0l-.407-1.112a6.386 6.386 0 0 0-3.802-3.802L4.279 8.4a.426.426 0 0 1 0-.8l1.112-.407a6.386 6.386 0 0 0 3.802-3.802L9.6 2.279Zm-4.267 8.837a.178.178 0 0 1 .334 0l.169.464a2.662 2.662 0 0 0 1.584 1.584l.464.169a.178.178 0 0 1 0 .334l-.464.169a2.662 2.662 0 0 0-1.584 1.584l-.169.464a.178.178 0 0 1-.334 0l-.169-.464a2.662 2.662 0 0 0-1.584-1.584l-.464-.169a.178.178 0 0 1 0-.334l.464-.169a2.662 2.662 0 0 0 1.584-1.584l.169-.464ZM2.8.14a.213.213 0 0 1 .4 0l.203.556a3.2 3.2 0 0 0 1.901 1.901l.556.203a.213.213 0 0 1 0 .4l-.556.203a3.2 3.2 0 0 0-1.901 1.901L3.2 5.86a.213.213 0 0 1-.4 0l-.203-.556A3.2 3.2 0 0 0 .696 3.403L.14 3.2a.213.213 0 0 1 0-.4l.556-.203A3.2 3.2 0 0 0 2.597.696L2.8.14Z"/></svg>AI Suggestion</span>`}
         <span class="collapsed-title">${this.escapeHtml(suggestion.title || '')}</span>
+        ${window.SuggestionUI?.buildRevisionWarningHtml?.(suggestion.revision) || ''}
         <div class="ai-suggestion-header-right">
           ${showReasoningBtn ? `
           <button class="btn-reasoning-toggle collapsed-reasoning" title="View reasoning" data-suggestion-id="${suggestion.id}" data-reasoning="${reasoningDataAttr}" data-dismissal-reason="${dismissalReasonAttr}">
@@ -776,6 +709,7 @@ class FileCommentManager {
     const existingForm = container.querySelector('.file-comment-form');
     if (existingForm) {
       existingForm.remove();
+      window.reviewDrafts?.close(existingForm.querySelector('textarea'));
     }
 
     // Create form with pre-filled content
@@ -795,8 +729,8 @@ class FileCommentManager {
         data-file="${window.escapeHtmlAttribute(suggestion.file)}"
       >${this.escapeHtml(suggestion.formattedBody || suggestion.body)}</textarea>
       <div class="file-comment-form-footer">
-        <button class="file-comment-form-btn submit submit-btn">Save</button>
-        <button class="file-comment-form-btn cancel cancel-btn">Cancel</button>
+        <button class="file-comment-form-btn submit submit-btn">Include edited draft</button>
+        <button class="file-comment-form-btn cancel cancel-btn">Close</button>
       </div>
     `;
 
@@ -811,9 +745,17 @@ class FileCommentManager {
     const textarea = form.querySelector('.file-comment-textarea');
     const submitBtn = form.querySelector('.submit-btn');
     const cancelBtn = form.querySelector('.cancel-btn');
+    window.reviewDrafts?.bind(textarea, { anchor: { file: suggestion.file }, parentId: suggestion.id, included: false, mode: 'file' });
 
     textarea.focus();
     textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    this.prManager._measureFileHeaderHeight(form);
+    const options = { behavior: 'instant', block: 'start' };
+    if (window.ScrollUtils?.scrollIntoViewStable) {
+      window.ScrollUtils.scrollIntoViewStable(form, options);
+    } else {
+      form.scrollIntoView(options);
+    }
 
     // Attach emoji picker for autocomplete
     if (window.emojiPicker) {
@@ -827,34 +769,31 @@ class FileCommentManager {
       submitBtn.disabled = !textarea.value.trim();
     });
 
-    textarea.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') {
-        form.remove();
-      } else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && textarea.value.trim()) {
-        this.adoptWithEdit(zone, suggestion, textarea.value.trim());
-        form.remove();
-      }
+    const close = () => { window.reviewDrafts?.close(textarea); form.remove(); };
+    const save = async () => {
+      if (!textarea.value.trim() || submitBtn.disabled) return;
+      submitBtn.disabled = true;
+      try { await this.adoptWithEdit(zone, suggestion, textarea); close(); }
+      catch { submitBtn.disabled = false; window.reviewDrafts?.showRecovery(); }
+    };
+    textarea.addEventListener('keydown', event => {
+      if (event.isComposing) return;
+      if (event.key === 'Escape') close();
+      else if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); save(); }
     });
-
-    cancelBtn.addEventListener('click', () => form.remove());
-
-    submitBtn.addEventListener('click', () => {
-      if (textarea.value.trim()) {
-        this.adoptWithEdit(zone, suggestion, textarea.value.trim());
-        form.remove();
-      }
-    });
+    cancelBtn.addEventListener('click', close);
+    submitBtn.addEventListener('click', save);
   }
 
   /**
    * Adopt an AI suggestion with edited body
    * @param {HTMLElement} zone - The file comments zone
    * @param {Object} suggestion - The original suggestion
-   * @param {string} editedBody - The edited comment body
+   * @param {HTMLTextAreaElement} textarea - Revision-tracked draft editor
    */
-  async adoptWithEdit(zone, suggestion, editedBody) {
+  async adoptWithEdit(zone, suggestion, textarea) {
     try {
-      // Send raw edited text plus metadata to the server for formatting
+      const draft = await window.reviewDrafts.saveTextarea(textarea);
       const reviewId = this.prManager?.currentPR?.id;
       const editEndpoint = `/api/reviews/${reviewId}/suggestions/${suggestion.id}/edit`;
 
@@ -863,7 +802,8 @@ class FileCommentManager {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'adopt_edited',
-          editedText: editedBody
+          editedText: draft.body,
+          draft
         })
       });
 
@@ -926,9 +866,7 @@ class FileCommentManager {
 
     } catch (error) {
       console.error('Error adopting suggestion with edit:', error);
-      if (window.toast) {
-        window.toast.showError('Failed to adopt suggestion');
-      }
+      throw error;
     }
   }
 
@@ -937,7 +875,7 @@ class FileCommentManager {
    * @param {HTMLElement} zone - The file comments zone
    * @param {Object} comment - The comment data
    */
-  editFileComment(zone, comment) {
+  editFileComment(zone, comment, { focus = true } = {}) {
     const card = zone.querySelector(`[data-comment-id="${comment.id}"]`);
     if (!card) return;
 
@@ -948,18 +886,19 @@ class FileCommentManager {
     bodyEl.innerHTML = `
       <textarea class="file-comment-textarea" style="min-height: 80px;">${this.escapeHtml(originalMarkdown)}</textarea>
       <div class="comment-edit-actions">
-        <button class="btn btn-sm btn-primary save-edit-btn">Save</button>
-        <button class="btn btn-sm btn-secondary cancel-edit-btn">Cancel</button>
+        <button class="btn btn-sm btn-primary save-edit-btn">Done</button>
+        <button class="btn btn-sm btn-secondary cancel-edit-btn">Close</button>
       </div>
     `;
 
     const textarea = bodyEl.querySelector('.file-comment-textarea');
     const saveBtn = bodyEl.querySelector('.save-edit-btn');
     const cancelBtn = bodyEl.querySelector('.cancel-edit-btn');
+    window.reviewDrafts?.bind(textarea, { comment, mode: 'file' });
 
     card.classList.add('editing-mode');
 
-    textarea.focus();
+    if (focus) textarea.focus();
     textarea.setSelectionRange(textarea.value.length, textarea.value.length);
 
     // Attach emoji picker for autocomplete
@@ -968,6 +907,7 @@ class FileCommentManager {
     }
 
     const restoreView = () => {
+      window.reviewDrafts?.close(textarea);
       card.classList.remove('editing-mode');
       const renderedBody = window.renderMarkdown
         ? window.renderMarkdown(originalMarkdown)
@@ -982,13 +922,15 @@ class FileCommentManager {
       if (e.key === 'Escape') {
         restoreView();
       } else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && textarea.value.trim()) {
-        this.saveEditedComment(zone, comment.id, textarea.value.trim(), bodyEl);
+        e.preventDefault();
+        e.stopPropagation();
+        this.saveEditedComment(zone, comment.id, textarea.value, bodyEl);
       }
     });
 
     saveBtn.addEventListener('click', () => {
       if (textarea.value.trim()) {
-        this.saveEditedComment(zone, comment.id, textarea.value.trim(), bodyEl);
+        this.saveEditedComment(zone, comment.id, textarea.value, bodyEl);
       }
     });
   }
@@ -1002,8 +944,8 @@ class FileCommentManager {
    */
   async saveEditedComment(zone, commentId, newBody, bodyEl) {
     // Prevent duplicate saves from rapid clicks or Cmd+Enter
-    const editForm = bodyEl?.closest('.file-comment-card')?.querySelector('.file-comment-edit-form');
-    const saveBtn = editForm?.querySelector('.submit-btn');
+    const editForm = bodyEl;
+    const saveBtn = editForm?.querySelector('.save-edit-btn');
     if (saveBtn?.dataset.saving === 'true') {
       return;
     }
@@ -1011,18 +953,10 @@ class FileCommentManager {
     if (saveBtn) saveBtn.disabled = true;
 
     try {
-      const { endpoint, requestBody } = this._getFileCommentEndpoint('update', {
-        commentId: commentId,
-        body: newBody
-      });
-
-      const response = await fetch(endpoint, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody)
-      });
-
-      if (!response.ok) throw new Error('Failed to update comment');
+      const textarea = bodyEl.querySelector('textarea');
+      const saved = await window.reviewDrafts.saveTextarea(textarea);
+      newBody = saved.body;
+      window.reviewDrafts.close(textarea);
 
       // Update the display
       const card = bodyEl?.closest('.file-comment-card');
@@ -1035,6 +969,7 @@ class FileCommentManager {
 
     } catch (error) {
       console.error('Error updating comment:', error);
+      window.reviewDrafts?.showRecovery();
       if (window.toast) {
         window.toast.showError('Failed to update comment');
       }
@@ -1053,9 +988,7 @@ class FileCommentManager {
    */
   async deleteFileComment(zone, commentId) {
     try {
-      const { endpoint } = this._getFileCommentEndpoint('delete', {
-        commentId: commentId
-      });
+      const endpoint = `/api/reviews/${this.prManager.currentPR.id}/comments/${commentId}`;
 
       const response = await fetch(endpoint, {
         method: 'DELETE'

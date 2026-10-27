@@ -30,6 +30,7 @@ const logger = require('../utils/logger');
  * @param {Object} [opts]
  * @param {boolean} [opts.shell=false] - True when spawned with `shell: true`.
  * @param {string} [opts.logPrefix] - Log prefix for diagnostics.
+ * @param {'SIGTERM'|'SIGKILL'} [opts.signal='SIGTERM'] - Shutdown escalation for an owned child.
  * @returns {boolean} True if a signal was actually dispatched.
  */
 function killChildSafely(child, opts = {}) {
@@ -37,6 +38,7 @@ function killChildSafely(child, opts = {}) {
   const options = (opts && typeof opts === 'object') ? opts : {};
   const prefix = options.logPrefix || '';
   const isShell = options.shell === true;
+  const signal = options.signal || 'SIGTERM';
 
   try {
     if (!child.pid) {
@@ -46,7 +48,7 @@ function killChildSafely(child, opts = {}) {
 
     if (isShell && process.platform !== 'win32') {
       try {
-        process.kill(-child.pid, 'SIGTERM');
+        process.kill(-child.pid, signal);
         return true;
       } catch (err) {
         if (err && err.code === 'ESRCH') {
@@ -74,7 +76,7 @@ function killChildSafely(child, opts = {}) {
     }
 
     try {
-      child.kill('SIGTERM');
+      child.kill(signal);
       return true;
     } catch (err) {
       logger.warn(`${prefix} child.kill failed: ${err.message}`);

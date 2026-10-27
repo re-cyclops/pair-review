@@ -106,7 +106,7 @@ class PiStyleProvider extends AIProvider {
 
       // Register process for cancellation tracking if analysisId provided
       if (analysisId && registerProcess) {
-        registerProcess(analysisId, child);
+        registerProcess(analysisId, child, signal => killChildSafely(child, { shell: this.useShell, signal }));
         logger.info(`${levelPrefix} Registered process ${pid} for analysis ${analysisId}`);
       }
 
@@ -255,7 +255,8 @@ class PiStyleProvider extends AIProvider {
         const parsed = finalizePiResponseParsing({
           textContent: responseState.textContent,
           rawOutput: responseState.rawOutput,
-          rawOutputTruncated: responseState.rawOutputTruncated
+          rawOutputTruncated: responseState.rawOutputTruncated,
+          actualModels: responseState.actualModels,
         }, level, levelPrefix, this.cliName);
         if (parsed.success) {
           logger.success(`${levelPrefix} Successfully parsed JSON response`);
@@ -388,7 +389,8 @@ class PiStyleProvider extends AIProvider {
       return finalizePiResponseParsing({
         textContent: responseState.textContent,
         rawOutput: responseState.rawOutput,
-        rawOutputTruncated: responseState.rawOutputTruncated
+        rawOutputTruncated: responseState.rawOutputTruncated,
+        actualModels: responseState.actualModels
       }, level, levelPrefix, this.cliName);
 
     } catch (parseError) {

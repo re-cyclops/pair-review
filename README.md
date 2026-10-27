@@ -334,6 +334,12 @@ discovery — only the server on the configured `port` is delegable. During a
 delegated run, `Ctrl-C` best-effort cancels the analysis on the server before the
 CLI exits.
 
+If contact is lost before a terminal result is recorded, the CLI exits non-zero
+and reports an unknown outcome with the run ID. The server may still be running
+that analysis; inspect its activity before starting another run. A terminal
+result already saved in the shared database remains authoritative even when
+the connection is unavailable.
+
 Delegation also skips (and the run stays in-process, with a stderr note) when
 `--use-checkout` or `--yolo` is set: those flags act on the CLI's own process
 (the current checkout, and this process's provider permissions), which a
@@ -526,14 +532,105 @@ pair-review loads configuration from multiple files, merged in order of increasi
 | Priority | File | Purpose |
 |----------|------|---------|
 | 1 (lowest) | Built-in defaults | Sensible defaults for all settings |
-| 2 | `~/.pair-review/config.json` | Global user configuration |
-| 3 | `~/.pair-review/config.local.json` | Personal overrides (gitignored) |
-| 4 | `.pair-review/config.json` | Project-specific configuration (can be checked in) |
-| 5 (highest) | `.pair-review/config.local.json` | Personal project overrides (gitignored) |
+| 2 | `config.managed.json` in the installed package | Optional managed configuration |
+| 3 | `~/.pair-review/config.json` | Global user configuration |
+| 4 | `~/.pair-review/config.local.json` | Personal overrides (gitignored) |
+| 5 | `.pair-review/config.json` | Project-specific configuration (can be checked in) |
+| 6 (highest) | `.pair-review/config.local.json` | Personal project overrides (gitignored) |
 
 Nested objects (like `chat`, `providers`, `chat_providers`, `monorepos`) are deep-merged across layers — you only need to specify the keys you want to override.
 
 **`config.local.json`** files are intended for personal overrides that should not be committed to version control. Add `config.local.json` to your `.gitignore`.
+
+### Instruction sources and protocol receipts
+
+`~/.pair-review/global-instructions.md` remains the global instruction file.
+To reuse policy without copying it, add trusted `instruction_files` entries to
+managed or user configuration. Project configuration cannot supply these paths.
+An entry is a file path, or an object with a `path`, exact Markdown heading names
+in `sections`, and an optional document introduction:
+
+```json
+{
+  "instruction_files": [
+    {
+      "path": "~/policy/review.md",
+      "preamble": true,
+      "sections": ["Voice", "Review comments"]
+    }
+  ]
+}
+```
+
+The loader reads these files once at startup and appends the selected content
+to the existing global instructions. Selected sections include their subsections;
+overlapping ranges appear once, in document order. Repeated configured paths
+are rejected. Missing files or sections fail loading instead of silently
+omitting policy. Running from the user configuration directory does not load it
+again as a project layer.
+
+Analysis and chat prompt builders consume this loaded content, including
+executable analysis and resumed chat sessions. Existing repository and request
+instruction controls remain separate. Keep work-specific policy out of global
+personal configuration. Analysis provider/model defaults do not change the
+separate chat provider/model selection.
+
+The compact protocol panel and `GET /api/protocol` distinguish loaded server
+settings from observed disk changes. Add `?runId=<id>` for an immutable run
+snapshot: instruction/source hashes, prose policy, configured provider/model
+and council selection, and per-run/voice overrides. Sensitive execution fields
+are represented by hashes, not private commands or instruction text. Imported
+or historical runs without a snapshot are explicitly unknown; current defaults
+must not be treated as their inputs.
+
+`restartRequired` means an observed file differs from this server's loaded copy;
+unreadable sources have unknown drift. Neither observation reloads configuration
+nor changes an existing run. Supported in-app settings retain their immediate
+behavior. A configured `default` is not proof of which model served a request,
+and instruction/tool restrictions are not an OS sandbox.
+
+OMP and Pi reviews record serving provider/model identities from successful
+assistant execution events. The inbox, analysis history and run preview show
+those observed models, including fallback models and all observed council
+participants; previews label the requested configuration separately. The recent
+and analysis APIs expose `actualModels: [{provider, model}]` alongside
+`requestedProvider` and `requestedModel`. Evidence persists with the run, not
+today's default. Legacy runs and providers without execution metadata display
+**model not recorded**; an empty `actualModels` array means unknown, not that
+no model ran.
+
+### Checks on selected outgoing prose
+
+Structural prose checks are opt-in, independent of the public comment formatter.
+For example, `plain` avoids category/emoji decoration but does not enforce voice:
+
+```json
+{
+  "review_prose": {
+    "profile": "Review writing",
+    "rules": {
+      "long-dashes": "advisory",
+      "emojis": "advisory",
+      "bold-prose": "advisory",
+      "bracket-prefix": "advisory",
+      "terminal-period": "advisory"
+    }
+  }
+}
+```
+
+Each configured rule accepts `advisory` or `blocking`; omitted rules are disabled.
+The final preview checks only the selected body and comments. It shows each
+diagnostic's rule, configuration key and source layer. Markdown parsing excludes
+code, suggestion blocks, quoted blocks and literal URLs from prose checks.
+Blocking diagnostics prevent publication; advisory diagnostics leave the human
+decision available.
+
+The exact publication manifest includes the policy digest and diagnostics.
+Editing text or changing the applicable policy invalidates confirmation and
+requires a fresh preview. No check rewrites text or calls another model. Tone,
+grammar, factual correctness and technical uncertainty still require judgment;
+repository policy and technical truth take precedence over house preferences.
 
 ### Global Settings Page
 
@@ -541,7 +638,7 @@ Most global settings can also be viewed and edited in the app: open the gear ico
 
 - **Effective value + source**: every setting shows its current effective value and where it came from — `in-app`, `env`, one of the config files, or `default`. A `default` badge means the setting was never explicitly set anywhere.
 - **Persistence**: in-app edits are stored in pair-review's local database (`~/.pair-review/database.db`), never written back to your config files.
-- **Precedence**: in-app settings > environment variables > `.pair-review/config.local.json` (project) > `.pair-review/config.json` (project) > `~/.pair-review/config.local.json` > `~/.pair-review/config.json` > built-in defaults. Repo-scoped settings and explicit per-run CLI flags still take precedence over global settings.
+- **Precedence**: in-app settings > environment variables > `.pair-review/config.local.json` (project) > `.pair-review/config.json` (project) > `~/.pair-review/config.local.json` > `~/.pair-review/config.json` > package `config.managed.json` > built-in defaults. Repo-scoped settings and explicit per-run CLI flags still take precedence over global settings.
 - **Reset**: a per-setting Reset button removes the in-app override, falling back to whatever the config files or defaults provide.
 - **Immediate vs. restart**: most settings take effect immediately; a few (marked in the UI, e.g. retention windows and debug flags) apply on next start. Bootstrap values such as `port`, `db_name`, and tokens are shown read-only with their source.
 - **Default for Analysis**: under **AI Defaults**, the **Default for Analysis** control is a single choice — either your Default Provider/Model pair (the rows below it) *or* a saved Review Council, picked from the same rich dropdown used on the repository settings page (it shows each council's name and Standard/Advanced type). When a council is selected, a composition preview beneath the dropdown shows its reviewers/models, levels, and consolidation — just like the repository settings page — while the base option shows a short hint that analysis uses the Provider/Model rows. A global default council is used wherever a repository has not chosen its own default council, and it outranks the global provider/model default. Precedence for analysis: explicit `--council`/`--provider`/`--model` per run › repo default council › **global default council** › repo default provider/model › global default provider/model. Note that single-model paths — hunk summaries, tours, and the MCP `start_analysis` tool — deliberately ignore councils, so a global default council does **not** change those (this matches how repo default councils behave).
@@ -786,6 +883,277 @@ The CLI command used for a provider follows this precedence (highest to lowest):
 
 ## Features
 
+### Review inbox and revision clarity
+
+The inbox separates **Pull request**, **First requested**, **AI review**, and
+**Review state**. At narrow widths, the same information becomes labelled rows.
+Selection, filters, saved drafts, and bulk analysis remain available. Search and
+filter controls share a consistent baseline; matching/loaded counts sit beside
+the active tab's selection controls. **Refresh status** updates visible PR
+evidence, and **Sort by next action** explicitly reapplies priority ordering.
+
+**First requested** shows the earliest recorded request to your GitHub account,
+including its date, time, time zone, and requester when available. Removing and
+re-requesting your review does not reset it. If complete history has no direct
+request, a matching current team's request is shown explicitly as team history,
+not as proof of your historical team membership. Incomplete or unavailable
+history includes an explanation rather than the PR's creation time. If a running
+server predates request-history support, rows show **Server update needed** and
+one notice explains the recovery: finish active analyses, restart pair-review,
+then reload the page. Reloading alone updates frontend assets, not server code.
+
+**Review PR** is an action, not a claim that someone requested changes.
+Actual changes-requested decisions name their reviewers separately from requests
+for your review, your own decision, CI, and AI findings.
+
+The **AI review** column shows launch progress, results, and the observed model.
+Older runs without execution evidence remain **model not recorded**. On PR and
+Local review pages, the **AI findings** button shows the actionable finding count
+and opens the AI list; selecting a finding navigates to its code. No review,
+zero findings, a running review, and unavailable results have distinct states.
+On phones, findings use the main pane; choosing a current finding returns to its
+code, and closing the list restores the diff.
+Clicking **Edit** on an AI suggestion brings its editor into view below the sticky
+headers and focuses the text field, without animated scrolling.
+
+A stale snapshot explains the viewed and latest revisions and offers
+**Update to latest commits**. Updating retains saved drafts and analysis history;
+an open unsaved editor pauses replacement. Existing safe automatic refresh still
+applies when there is no session work to preserve. Old AI findings are labelled
+historical and open their saved code in a read-only view, never as annotations
+on unrelated current lines. Legacy runs without saved code explain that limit.
+
+### Keyboard navigation and display
+
+Open the shared command palette with `Cmd+K` on macOS or `Ctrl+K` elsewhere.
+It is available in the inbox, PR and local reviews, and settings. Opening it
+from an editor or another dialog preserves that editor's text; `Escape`
+returns focus to the previous control.
+
+Press `?` for the full shortcut list. Shortcut chips live inside the buttons
+they act on and stay hidden until you hold `Cmd`, `Ctrl`, or `Alt`. The review flow is keyboard-first:
+outdated external comments. In the review dialog, `Cmd+Enter` (macOS) or
+`Ctrl+Enter` submits, `Cmd+Shift+Enter` prepares the exact final preview
+without publishing, `Cmd+S` saves every draft locally, `Alt+1` / `Alt+2` /
+`Alt+3` choose Approve / Comment / Request changes, and `Alt+↑` / `Alt+↓`
+move between the summary and each draft editor. The dialog opens with the
+summary focused, editors grow with their text, and preparing a preview
+scrolls it into view. An armed exact final
+preview still publishes only from its **Publish** button; the submit chord
+moves focus to it instead of firing it. In a comment editor,
+`Cmd+Enter` saves the comment and `Escape` cancels the edit. Empty comment
+drafts are optional: clear the text and the draft is marked **Empty —
+skipped**, excluded from the submission, and reported in the final preview;
+it never blocks saving or publishing. Outdated external comments (the code
+they reference changed after they were written) carry an amber **Outdated**
+badge and an explanatory note; the review panel counts them and can hide
+them (`o`).
+
+Use `Tab` and `Shift+Tab` to navigate analysis configuration, and `Space` to
+change its level and remember-setting checkboxes. Diff and sound menus focus
+their first enabled control when opened and return focus to their trigger on
+`Escape`. Hidden panels and closed menus do not retain keyboard focus.
+Unchanged-line expansion controls support both `Enter` and `Space`.
+
+The shared workspace respects reduced motion and supports light/dark themes
+and browser zoom. Dialog contents scroll within the viewport; the underlying
+page does not need horizontal scrolling at 200% zoom.
+
+### Bulk analysis from the inbox
+
+Select PR or Local reviews, choose **Analyze**, and confirm a single model,
+saved council, council template, or advanced configuration. The inbox prepares
+missing PR checkouts and starts each analysis directly; opening browser tabs is
+not required, including when the server uses `PAIR_REVIEW_NO_OPEN=1`.
+
+The **Bulk analysis** summary and each selected row show preparation, server
+acceptance, live analysis stages, and terminal results. Expand **Target details
+and failures** for per-review errors or use **Open Activity** for run details.
+Keep the inbox open while preparation and submission are pending. Accepted runs
+continue on the server, and their activity is restored after reloading.
+
+Failures do not discard successful launches or trigger automatic retries.
+An unknown launch outcome requires inspecting Activity before retrying: the
+server may already have accepted the request. Already-active targets are not
+submitted again. Stale or unverifiable Local diffs must be opened first to
+refresh the diff or explicitly choose **Analyze Anyway**.
+
+### Durable activity and read-only review evidence
+
+`GET /api/analyses/activity` returns a connected-instance snapshot using the
+existing analysis-run IDs. Subscribe to `index:analyses` and reconcile the
+snapshot after subscription acknowledgement or reconnection. Events have a
+monotonic per-run sequence. The receipt records entry point, revision,
+configured provider/model, current stage and terminal outcome. A configured
+default is not a claim about which model the provider actually served.
+The shared workspace rejects events from a previous instance or database and
+keeps newer streamed state when a delayed snapshot arrives, including when
+event and snapshot timestamps are equal.
+
+The server and MCP `get_server_info` expose instance identity and a database
+digest, not the database path. Persisted runs owned by another process are
+unobserved, not live. Imported results retain saved result counts without
+claiming observed execution.
+Cancellation returns `202` with `cancellation_requested`; owned process
+termination is acknowledged separately. Completion can report partial results.
+Record a result as seen with `POST /api/analyses/:id/seen` and its exact
+`sequence`; stale acknowledgements return `409`.
+
+Graceful server shutdown refuses new analyses, terminates its registered
+provider processes, and records cancellation only after their close
+acknowledgements. Closing a stdio MCP client's input initiates that shutdown
+for its child server; it does not stop another instance sharing the database.
+Disconnecting an HTTP MCP or delegated client is not cancellation.
+
+Terminal results remain unread until explicitly marked seen, including after
+navigation or reconnection. Browser completion notifications are optional:
+enable them from the activity panel to request permission. A notification
+attempt is claimed once per run in the shared database; reconnecting tabs do
+not claim it again. The in-app result remains available without permission or
+successful desktop delivery.
+
+`GET /api/pr/:owner/:repo/:number/snapshot` reads approvals, requests, policy,
+threads, and head/test-merge checks through the existing host binding. It does
+not prepare a worktree. Missing permissions and truncated pagination remain
+explicitly unavailable or partial. Approval count, personal responsibility,
+checks and merge conflicts are independent facts, not a merge-ready verdict.
+Check totals and required-check evidence use the exact head or test-merge
+revision. Results reported for another revision stay visible with that label,
+but do not count as current checks or drive the failing-check shortcut.
+Incomplete check evidence remains visible in uncertainty and CI-attention
+filters rather than being treated as a passing result.
+Enrichment is coalesced, concurrency-bounded, cached by host/account/PR, and
+backed off after failures. `?refresh=true` requests fresh evidence subject to
+that backoff. `GET /api/reviews/recent` pages cached review metadata without
+GitHub calls or worktree setup.
+
+HTTP and WebSocket listeners bind to loopback. For a remote instance, use an
+authenticated tunnel and its browser-reachable URL; a server-local URL alone
+does not establish that the browser is observing the same process.
+
+### Removing local history and checkouts
+
+Removal is not cancellation and never changes a remote review:
+
+- **Remove local history** in the PR inbox deletes that review's saved drafts,
+  results and local submission receipts. It also attempts to remove an
+  unshared checkout. Shared and pooled checkouts are retained.
+- Removing a **local review** deletes its local history and drafts, not its
+  working files.
+- **Remove checkout** in repository settings removes the checkout and its
+  registry entry, leaving review history and drafts intact.
+
+Active or unconfirmed analysis, active chat, an unresolved submission, and
+background work owned by the server prevent history removal. Cancel analysis
+explicitly and wait for termination acknowledgement; close chat separately.
+Checkout removal also refuses dirty/untracked files, shared directories and
+pool preparation in progress. A Git failure retains the checkout and registry.
+If Git fails after the history transaction committed, the response warns that
+history was removed but the checkout remains.
+
+Bulk removal keeps blocked reviews selected, including those hidden by filters.
+The inbox retains a named result for each attempted review after the table
+refreshes; only successfully removed reviews leave the selection. Changing a
+filter does not discard those results. Cancelling selection clears them.
+
+**Clear approved** includes approved reviews with saved comments, review bodies
+or decisions. Its confirmation lists the affected PRs and draft counts; Cancel
+preserves them. After confirmation, the control shows progress and prevents
+duplicate requests. Cleanup runs in batches of at most 50, removes only successful
+items, and leaves blocked reviews visible with named errors or checkout warnings.
+It operates on loaded reviews whose approval evidence has been observed; it does
+not fetch every historical review or change GitHub approvals.
+
+A server cannot close or resume an active chat whose executor it does not own.
+Closing remains active until the provider acknowledges exit; a failed close
+retains ownership for an explicit retry. Restart does not silently close
+unobserved chats. For interrupted-owner recovery, verify that the provider and
+its children have stopped, back up the database, then settle only that verified
+`chat_sessions` row. Do not rewrite active rows just to permit history removal.
+
+Schema 62 serializes checkout removal with analysis/import creation, chat
+activation and pool claims across processes using the same database. This is
+a checkout reservation, not authority to cancel another executor. Back up the
+database with a SQLite backup before upgrading; do not run an older binary
+against an upgraded shared database.
+
+An interrupted removal can leave a `worktree_locks` reservation. Its age or an
+absent server heartbeat does not prove that its Git subprocesses exited, so
+restart does not expire it. For manual recovery, first verify that every owned
+application, standalone executor and Git child using that checkout has stopped.
+Back up the configured database, inspect the checkout and its Git worktree
+registration, then inspect `path`, `holder_id` and `locked_at` in
+`worktree_locks`. Clear only the verified matching path/holder reservation
+with a SQLite client. Do not clear all reservations or rewrite analysis
+receipts merely to make a checkout appear idle.
+
+### Saved drafts and exact publication
+
+Inline, file-level and review-body drafts are saved with revision checks.
+Multiple editors remain independent across refreshes and navigation. A
+conflicting save preserves both versions for explicit resolution; it does not
+silently overwrite another tab. Unacknowledged browser text remains recoverable
+until the server acknowledges it.
+
+Inclusion is separate from dismissal and deletion. The review dialog lists
+every saved draft, including comments outside the rendered files. Its selected
+count, exact Markdown preview and publication payload come from one server
+manifest. Changes to text, selection, target, account, head or anchors invalidate
+confirmation. Publication adds no hidden attribution, location prefix or footer.
+Local-only authoring does not need GitHub; remote publication requires an
+explicit PR association and a clean, branch-inclusive checkout at the PR head.
+
+Submission attempts and per-comment receipts survive reloads and restarts.
+Accepted comments are not replayed. An ambiguous write is not retried merely
+because a subsequent read finds nothing; use the recorded receipt and host
+link to inspect the outcome. Unrelated pending reviews are neither submitted
+nor deleted. The app checks an owned pending review's contents after its final
+identity check and before submission.
+
+Quick submission locks conflicting actions during preflight and publication.
+Once the host acknowledges success, the dialog closes without waiting for
+background comment refreshes. Failed preflight restores the action and brings
+the error into view.
+
+If publication succeeds but local draft cleanup fails, the submitted receipt
+remains authoritative. The dialog shows the warning and focuses **Finish local
+cleanup (no host write)**; repeat approval stays disabled until cleanup succeeds.
+Recovery does not require host credentials and preserves newer or excluded drafts.
+
+Each GitHub HTTP request has a 60-second deadline, including its response body.
+A timeout during a write remains an uncertain outcome—not permission to send
+another approval. Inspect or reconcile its receipt instead of blindly retrying.
+
+Host reads and submission are not atomic. Do not edit that pending review from
+another host client while publishing: an edit after the final content read can
+still race with submission. The final preview displays this limitation.
+
+### Reviewed revisions and finding freshness
+
+Use **Mark revision reviewed…** to record a human-reviewed baseline. Opening a
+review, viewing a file, and completing AI analysis record separate facts; none
+approves or publishes a review. The progress strip distinguishes file visits,
+content-bound viewed marks, triaged findings, selected comments, and prior
+submission receipts.
+
+Within the same review scope, viewed marks survive unchanged diff/context
+content and merge across tabs. Changed content invalidates the affected marks. Legacy viewed history
+lacks revision evidence and is not treated as proof that current content was
+reviewed. `GET /api/reviews/:id/progress` returns the current state; mutations
+require its content-bound token and reject a changed review context.
+
+**Changes since reviewed…** compares the recorded baseline using the existing
+checkout. It leaves the full current diff available and falls back to that
+diff when ancestry, scope, local changes, renamed/deleted paths, or missing
+history prevent a reliable comparison. The baseline is additional AI context,
+not a smaller analysis scope, and is frozen in each run's protocol receipt.
+
+Findings from an older or unknown revision are labelled without rewriting
+their text or anchors. Draft publication still requires current, verified
+anchors. The analysis-history selector owns the displayed run across refreshes;
+late responses and deferred renders cannot replace its newer findings.
+
+
 ### Three-Level AI Analysis
 
 pair-review's AI analysis system examines your code changes at increasing levels of context:
@@ -811,6 +1179,41 @@ There are three ways to configure which models run your analysis, each building 
 **Advanced** — For each enabled analysis level, pick different provider+model combinations. Level 1 might use a fast model while Level 3 uses a thorough one. Supports the same per-model options as Review Council (timeout, instructions, tier). Consolidation model is selected separately. Results consolidate first within each level (if multiple reviewers), then across levels.
 
 The key difference from Review Council is consolidation order: Advanced consolidates within each level first, then across levels, so there are no per-reviewer rollups.
+
+#### Built-in four-model councils
+
+In either PR or Local mode, open **Analyze → Council → Start from a template**:
+
+| Template | Enabled review levels | Tradeoff |
+| --- | --- | --- |
+| Four-model focused review | Changes and file context (1–2) | Less model usage than full review |
+| Four-model full review | Changes, file and codebase context (1–3) | Broader coverage and more model usage |
+
+Both templates use these four OMP reviewers at `high` reasoning effort with the
+Thorough prompt tier:
+
+- `zai/glm-5.3-flash:high`
+- `google-antigravity/gemini-3.8-flash:high`
+- `muse-code/muse-wonder-full-1.0:high`
+- `openai-codex/gpt-6.1-sol:high`
+
+Muse Wonder Full also consolidates the results. These are explicit model
+selectors, independent of shared OMP aliases and routing defaults.
+
+Change each reviewer's model, prompt tier, timeout or instructions; toggle review
+levels; or change the consolidator. **Analyze with Council** applies the current
+configuration without requiring a save. **Save** creates a named, reusable copy
+of a template; it never overwrites the template or an unrelated saved council.
+Select that copy from **Saved council** next time. **Save As** makes another copy.
+Saved councils can also be selected as repository/global defaults or applied
+through the CLI's `--list-councils` and `--council <handle>` options.
+
+Templates are not inserted into the saved-council database automatically. A
+configured model/provider missing from the current menu remains explicit rather
+than silently changing to a default; an unavailable provider is labeled as such.
+Model availability and OMP authentication still determine whether execution can
+succeed.
+
 
 **Example use cases:**
 
@@ -1107,7 +1510,7 @@ npx @in-the-loop-labs/pair-review --mcp
 
 | Tool | Description | Availability |
 |------|-------------|--------------|
-| `get_server_info` | Get pair-review server info including web UI URL and version | stdio only |
+| `get_server_info` | Get the server-local web UI URL, version, instance identity and database digest; use the reachable tunnel URL for a remote instance | stdio + HTTP |
 | `get_analysis_prompt` | Get rendered analysis prompts for a review level and tier | stdio + HTTP |
 | `get_user_comments` | Get human-curated review comments (authored or adopted), grouped by file | stdio + HTTP |
 | `get_ai_analysis_runs` | List all AI analysis runs for a review | stdio + HTTP |
@@ -1185,6 +1588,23 @@ pnpm run test:e2e:headed
 # Start development server
 pnpm run dev
 ```
+
+### Isolated workspace fixture
+
+Run `node tests/utils/workspace-server.js` to exercise the real application with a temporary home, database, repository and worktrees. Only the host transport and provider executable are synthetic. The application listens on `127.0.0.1:7399`; its fixture controls and host request counters use port `7400`. No real reviews are published.
+
+For larger inbox and diff comparisons:
+
+```bash
+WORKSPACE_TEST_REVIEW_COUNT=200 \
+WORKSPACE_TEST_HISTORY_COUNT=250 \
+WORKSPACE_TEST_FILE_COUNT=64 \
+WORKSPACE_TEST_LINES=600 \
+WORKSPACE_TEST_NOW=2026-01-03T00:00:00Z \
+node tests/utils/workspace-server.js
+```
+
+The fixture shares two worktrees across the reviews instead of creating one checkout per PR. The first four PRs have the requested review history; checks include historical attempts and current failing/pending results. Set `WORKSPACE_TEST_PORT` to choose another application port; the control port is always the next port. `WORKSPACE_TEST_APP_ROOT` selects another checkout for baseline comparisons. The startup record identifies the temporary home; stop the process before deleting that fixture.
 
 ### Architecture
 

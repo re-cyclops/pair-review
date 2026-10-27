@@ -26,6 +26,12 @@ async function waitForDiffToRender(page, timeout = 10000) {
   }, null, { timeout });
 }
 
+async function openReviewAuthoring(page) {
+  await waitForDiffToRender(page);
+  await page.getByRole('button', { name: /^Submit review/ }).click();
+  await page.locator('#review-body-modal').waitFor({ state: 'visible' });
+}
+
 /**
  * Hover the Nth line-number cell in the diff to reveal the gutter buttons.
  * @param {import('@playwright/test').Page} page
@@ -340,12 +346,10 @@ async function seedAISuggestions(page, {
     { timeout: statusTimeout }
   );
 
-  // Reload suggestions and wait for them to appear in the DOM
-  await page.evaluate(async () => {
-    if (window.prManager?.loadAISuggestions) {
-      await window.prManager.loadAISuggestions();
-    }
-  });
+  // Start the interaction test from the persisted result, not a manual render
+  // racing a queued completion event from the seeding request.
+  await page.reload();
+  await waitForDiffToRender(page);
 
   // Wait for at least one AI suggestion to render
   await page.waitForSelector(suggestionSelector, { timeout: 5000 });
@@ -360,6 +364,7 @@ async function seedAISuggestions(page, {
 
 module.exports = {
   waitForDiffToRender,
+  openReviewAuthoring,
   hoverDiffLine,
   openCommentFormOnLine,
   dragResizeHandle,

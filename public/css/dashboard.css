@@ -1,0 +1,1591 @@
+/* ==========================================================================
+   pair-review 5.3.4 — dashboard.css (style owner: ReviewVisuals)
+   Deliberate override layer loaded AFTER the original inline styles in
+   index.html. Direction: compact review desk — system sans, graphite ink,
+   cool neutral ground, restrained blue primary, hairline flat surfaces.
+   No gradients, no resting shadows, no glass, no ornamental imagery.
+   Themes: token remaps for :root (light) and [data-theme="dark"]; the app's
+   theme helper resolves system preference onto data-theme.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. Design tokens — cool neutral / graphite / blue remap of the page vars.
+      Scoped to this page only (per-stylesheet cascade), fixes the baseline
+      amber-on-light contrast failure by routing --ai-* to the blue accent.
+   -------------------------------------------------------------------------- */
+:root {
+    color-scheme: light;
+
+    /* Cool neutral ground + graphite ink (all >= 4.5:1 on their grounds) */
+    --color-bg-page: #f3f5f8;
+    --color-bg-primary: #ffffff;
+    --color-bg-secondary: #f6f8fb;
+    --color-bg-tertiary: #eceff4;
+
+    --color-text-primary: #1c2430;
+    --color-text-secondary: #46536a;
+    --color-text-tertiary: #5c6a7e;
+
+    --color-border-primary: #c6cfd9;
+    --color-border-secondary: #dde3ea;
+
+    /* Restrained blue primary */
+    --color-accent-primary: #0969da;
+    --color-accent-hover: #0757b8;
+    --color-accent-subtle: rgba(9, 105, 218, 0.07);
+
+    --color-danger: #c93a37;
+    --color-danger-hover: #b12522;
+
+    /* Legacy amber identity routed to the blue accent on this dashboard */
+    --ai-primary: var(--color-accent-primary);
+    --ai-secondary: var(--color-accent-hover);
+    --ai-subtle: rgba(9, 105, 218, 0.07);
+    --ai-glow: rgba(9, 105, 218, 0.12);
+    --ai-border: rgba(9, 105, 218, 0.4);
+
+    /* Desk-layer tokens */
+    --desk-hover-soft: rgba(28, 36, 48, 0.05);
+    --desk-row-hover: rgba(28, 36, 48, 0.035);
+    --desk-danger-soft: rgba(201, 58, 55, 0.08);
+    --desk-selection-border: rgba(9, 105, 218, 0.45);
+    --desk-ring: rgba(9, 105, 218, 0.18);
+    --desk-ring-solid: #0969da;
+    --desk-scrim: rgba(15, 22, 31, 0.55);
+    --desk-warning: #8a5a00;
+    --desk-on-solid: #ffffff;
+
+    --header-height: 52px;
+}
+
+[data-theme="dark"] {
+    color-scheme: dark;
+
+    --color-bg-page: #0b0f14;
+    --color-bg-primary: #10161d;
+    --color-bg-secondary: #151d26;
+    --color-bg-tertiary: #1b242f;
+
+    --color-text-primary: #dbe4ee;
+    --color-text-secondary: #9aa8b8;
+    --color-text-tertiary: #7f8da0;
+
+    --color-border-primary: #2c3946;
+    --color-border-secondary: #202a35;
+
+    --color-accent-primary: #58a6ff;
+    --color-accent-hover: #79b8ff;
+    --color-accent-subtle: rgba(88, 166, 255, 0.09);
+
+    --color-danger: #f16a60;
+    --color-danger-hover: #ff8178;
+
+    --ai-primary: var(--color-accent-primary);
+    --ai-secondary: var(--color-accent-hover);
+    --ai-subtle: rgba(88, 166, 255, 0.1);
+    --ai-glow: rgba(88, 166, 255, 0.16);
+    --ai-border: rgba(88, 166, 255, 0.45);
+
+    --desk-hover-soft: rgba(219, 228, 238, 0.06);
+    --desk-row-hover: rgba(219, 228, 238, 0.045);
+    --desk-danger-soft: rgba(241, 106, 96, 0.12);
+    --desk-selection-border: rgba(88, 166, 255, 0.5);
+    --desk-ring: rgba(88, 166, 255, 0.22);
+    --desk-ring-solid: #58a6ff;
+    --desk-scrim: rgba(2, 6, 11, 0.68);
+    --desk-warning: #d9a53f;
+    --desk-on-solid: #10161d;
+}
+
+/* --------------------------------------------------------------------------
+   2. Base, focus, motion primitives
+   -------------------------------------------------------------------------- */
+body {
+    background-color: var(--color-bg-page);
+    letter-spacing: 0.005em;
+}
+
+::selection {
+    background: var(--desk-ring);
+}
+
+/* Visible keyboard focus everywhere; pointer clicks stay quiet */
+.app :is(a, button, input, select, textarea, [role="tab"], [tabindex]):focus-visible,
+.help-modal :is(a, button, input):focus-visible {
+    outline: 2px solid var(--desk-ring-solid);
+    outline-offset: 2px;
+}
+
+/* Standard hidden-attribute guard for elements this sheet gives display to */
+[hidden] {
+    display: none !important;
+}
+
+@keyframes desk-spin {
+    to { transform: rotate(360deg); }
+}
+
+@keyframes desk-rise {
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+/* Gentle shared control feedback */
+.app button,
+.app a.btn-icon,
+.app .btn-github-link,
+.app .btn-repo-settings,
+.app summary,
+.tab-btn,
+.help-modal button,
+.workspace-dialog button {
+    touch-action: manipulation;
+    transition: background-color 150ms cubic-bezier(0.32, 0.72, 0, 1),
+        border-color 150ms cubic-bezier(0.32, 0.72, 0, 1),
+        color 150ms cubic-bezier(0.32, 0.72, 0, 1),
+        transform 120ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.app button:active:not(:disabled),
+.tab-btn:active:not(:disabled) {
+    transform: scale(0.98);
+}
+
+.spinner {
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--color-border-primary);
+    border-top-color: var(--color-accent-primary);
+    border-radius: 50%;
+    animation: desk-spin 0.7s linear infinite;
+    flex: 0 0 auto;
+}
+
+/* --------------------------------------------------------------------------
+   3. Page shell + workspace intro
+   -------------------------------------------------------------------------- */
+.main-content {
+    align-items: center;
+    padding: 24px 20px 64px;
+}
+
+.welcome-section {
+    align-items: stretch;
+    max-width: 1120px;
+    text-align: left;
+}
+
+.workspace-intro {
+    margin: 6px 0 18px;
+}
+
+.workspace-title {
+    font-size: 32px;
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: -0.015em;
+    color: var(--color-text-primary);
+}
+
+.workspace-subtitle {
+    margin-top: 4px;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--color-text-secondary);
+}
+
+/* --------------------------------------------------------------------------
+   4. Header
+   -------------------------------------------------------------------------- */
+.header {
+    padding: 0 16px;
+    border-bottom: 0;
+    background: var(--color-bg-primary);
+}
+
+.header-left,
+.header-right {
+    gap: 6px;
+}
+
+.logo-text {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--color-text-primary);
+}
+
+.logo-accent {
+    color: var(--color-accent-primary);
+}
+
+.app-version,
+#app-version {
+    margin-left: 2px;
+    font-size: 13px;
+    font-weight: 500;
+    opacity: 1;
+    color: var(--color-text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+.btn-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--color-text-secondary);
+}
+
+.btn-icon:hover {
+    background: var(--desk-hover-soft);
+    color: var(--color-text-primary);
+}
+
+/* --------------------------------------------------------------------------
+   5. Queue navigation (tabs)
+   -------------------------------------------------------------------------- */
+.recent-reviews-section {
+    width: 100%;
+}
+
+.tab-bar {
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 14px;
+}
+
+/* Inline styles/IDs outrank the class rules above; zero at ID specificity */
+#recent-reviews-header.section-header,
+#unified-tab-bar.tab-bar {
+    border-bottom: 0;
+}
+
+.tab-btn {
+    flex: 0 0 auto;
+    min-height: 40px;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    color: var(--color-text-secondary);
+    background: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 6px;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+
+.tab-btn:hover {
+    color: var(--color-text-primary);
+    background: var(--desk-hover-soft);
+}
+
+.tab-btn.active {
+    color: var(--color-text-primary);
+    font-weight: 600;
+    background: transparent;
+    border-bottom-color: var(--color-accent-primary);
+}
+
+.tab-divider {
+    align-self: center;
+    width: 1px;
+    height: 18px;
+    margin: 0 6px;
+    background: var(--color-border-primary);
+}
+
+/* Pane entrance — gentle rise, retimes on every switch */
+.tab-pane.active {
+    animation: desk-rise 0.18s ease-out;
+}
+
+.tab-pane-header {
+    gap: 10px;
+}
+
+.fetched-at-label {
+    font-size: 12px;
+    color: var(--color-text-tertiary);
+    font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------------------
+   6. Dashboard tools — local filter of the loaded table
+   -------------------------------------------------------------------------- */
+.dashboard-tools {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 2px 0 14px;
+}
+
+.dashboard-tools label {
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    color: var(--color-text-secondary);
+}
+
+.dashboard-search-input-wrap {
+    flex: 1 1 280px;
+    min-width: 0;
+    max-width: 400px;
+}
+
+#dashboard-search {
+    flex: 1 1 280px;
+    min-width: 280px;
+    width: 100%;
+    height: 34px;
+    padding: 0 12px;
+    font: inherit;
+    font-size: 13px;
+    color: var(--color-text-primary);
+    background: var(--color-bg-primary);
+    border: 1px solid var(--color-border-primary);
+    border-radius: 7px;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+#dashboard-search::placeholder {
+    color: var(--color-text-tertiary);
+}
+
+#dashboard-search:focus,
+.start-review-input:focus,
+.team-filter-input:focus {
+    border-color: var(--color-accent-primary);
+    box-shadow: none;
+}
+
+#dashboard-search-status,
+.workspace-inbox-tools + [role="status"],
+.workspace-row-state {
+    font-variant-numeric: tabular-nums;
+}
+
+#dashboard-search-status {
+    margin-left: auto;
+    min-height: 1.2em;
+    font-size: 13px;
+    color: var(--color-text-secondary);
+}
+
+/* --------------------------------------------------------------------------
+   7. Action wells — start review forms (PR + local)
+   -------------------------------------------------------------------------- */
+.start-review-section {
+    width: 100%;
+    max-width: none;
+    margin: 0 0 18px;
+    padding: 14px 16px 16px;
+    background: var(--color-bg-primary);
+    border: 1px solid var(--color-border-secondary);
+    border-radius: 10px;
+}
+
+.start-review-label {
+    display: block;
+    margin: 0 0 6px;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    color: var(--color-text-primary);
+}
+
+.start-review-form {
+    gap: 8px;
+    flex-direction: row;
+}
+
+.start-review-input {
+    flex: 1 1 220px;
+    height: 40px;
+    min-height: 40px;
+    padding: 0 12px;
+    font-size: 14px;
+    color: var(--color-text-primary);
+    background: var(--color-bg-primary);
+    border: 1px solid var(--color-border-primary);
+    border-radius: 7px;
+    box-shadow: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.start-review-input::placeholder {
+    color: var(--color-text-tertiary);
+}
+
+.start-review-btn {
+    min-height: 38px;
+    padding: 0 16px;
+    font-size: 13.5px;
+    font-weight: 600;
+    border-radius: 7px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.start-review-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+}
+
+.start-review-btn:active:not(:disabled) {
+    transform: scale(0.98);
+}
+
+.start-review-btn:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
+.start-review-btn-primary {
+    color: var(--desk-on-solid);
+    background: var(--color-accent-primary);
+}
+
+.start-review-btn-primary:hover:not(:disabled) {
+    background: var(--color-accent-hover);
+    color: var(--desk-on-solid);
+}
+
+.start-review-btn-analyze {
+    color: var(--color-accent-primary);
+    background: var(--color-accent-subtle);
+    border-color: var(--ai-border);
+}
+
+.start-review-btn-analyze:hover:not(:disabled) {
+    color: var(--color-accent-hover);
+    border-color: var(--color-accent-primary);
+    background: var(--color-accent-subtle);
+}
+
+.btn-browse {
+    color: var(--color-text-secondary);
+    background: transparent;
+    border-color: var(--color-border-primary);
+}
+
+.btn-browse:hover:not(:disabled) {
+    color: var(--color-text-primary);
+    background: var(--desk-hover-soft);
+    border-color: var(--color-border-primary);
+}
+
+.start-review-hint {
+    margin-top: 8px;
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--color-text-secondary);
+}
+
+/* Status: loading + errors */
+.start-review-loading {
+    gap: 10px;
+    margin-top: 10px;
+    font-size: 13px;
+    color: var(--color-text-tertiary);
+}
+
+.start-review-loading .spinner {
+    width: 14px;
+    height: 14px;
+}
+
+.start-review-error {
+    margin-top: 10px;
+    padding: 9px 12px;
+    font-size: 13px;
+    line-height: 1.45;
+    border-radius: 7px;
+    border: 1px solid var(--color-danger);
+    background: var(--desk-danger-soft);
+    color: var(--color-danger);
+}
+
+.start-review-error.info {
+    border-color: var(--ai-border);
+    background: var(--color-accent-subtle);
+    color: var(--color-accent-primary);
+}
+
+/* --------------------------------------------------------------------------
+   8. Select mode header + bulk selection toolbar
+   -------------------------------------------------------------------------- */
+.select-mode-header {
+    justify-content: flex-end;
+    align-items: center;
+    gap: 8px;
+    min-height: 42px;
+    padding: 2px 0 12px;
+    font-variant-numeric: tabular-nums;
+}
+
+.select-mode-header.visible {
+    display: flex;
+    flex-wrap: wrap;
+}
+
+.btn-select-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 34px;
+    padding: 0 14px;
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    color: var(--color-text-secondary);
+    background: var(--color-bg-primary);
+    border: 1px solid var(--color-border-primary);
+    border-radius: 8px;
+    box-shadow: 0 1px 2px rgba(15, 22, 31, 0.04);
+    cursor: pointer;
+    touch-action: manipulation;
+    font-variant-numeric: tabular-nums;
+    transition: background-color 150ms cubic-bezier(0.32, 0.72, 0, 1),
+        border-color 150ms cubic-bezier(0.32, 0.72, 0, 1),
+        color 150ms cubic-bezier(0.32, 0.72, 0, 1),
+        transform 120ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.btn-select-toggle:hover {
+    color: var(--color-text-primary);
+    background: var(--color-bg-secondary);
+    border-color: var(--color-text-tertiary);
+}
+
+.btn-select-toggle:active:not(:disabled) {
+    transform: scale(0.98);
+}
+
+.btn-select-toggle.active {
+    color: var(--desk-on-solid);
+    background: var(--color-accent-primary);
+    border-color: var(--color-accent-primary);
+}
+
+.bulk-inline-actions {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 5px 8px 5px 12px;
+    background: var(--color-bg-primary);
+    border: 1px solid var(--color-border-primary);
+    border-radius: 10px;
+    box-shadow: 0 4px 14px rgba(15, 22, 31, 0.06), 0 1px 2px rgba(15, 22, 31, 0.04);
+    font-variant-numeric: tabular-nums;
+    transition: background-color 150ms cubic-bezier(0.32, 0.72, 0, 1),
+        border-color 150ms cubic-bezier(0.32, 0.72, 0, 1),
+        color 150ms cubic-bezier(0.32, 0.72, 0, 1),
+        transform 120ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+[data-theme="dark"] .bulk-inline-actions {
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+.bulk-action-count {
+    padding: 0 6px 0 2px;
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--color-text-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+.bulk-action-buttons {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.bulk-inline-actions button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 32px;
+    padding: 0 13px;
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    cursor: pointer;
+    white-space: nowrap;
+    touch-action: manipulation;
+    font-variant-numeric: tabular-nums;
+    transition: background-color 150ms cubic-bezier(0.32, 0.72, 0, 1),
+        border-color 150ms cubic-bezier(0.32, 0.72, 0, 1),
+        color 150ms cubic-bezier(0.32, 0.72, 0, 1),
+        transform 120ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.bulk-inline-actions button:active:not(:disabled) {
+    transform: scale(0.98);
+}
+
+/* Primary accent CTA: Submit review */
+.btn-bulk-submit {
+    color: var(--desk-on-solid);
+    background: var(--color-accent-primary);
+    border-color: var(--color-accent-primary);
+}
+
+.btn-bulk-submit:hover:not(:disabled) {
+    color: var(--desk-on-solid);
+    background: var(--color-accent-hover);
+    border-color: var(--color-accent-hover);
+}
+
+/* Crisp secondary actions: Analyze + Open */
+.btn-bulk-analyze {
+    color: var(--color-accent-primary);
+    background: var(--color-accent-subtle);
+    border-color: var(--ai-border);
+}
+
+.btn-bulk-analyze:hover:not(:disabled) {
+    color: var(--color-accent-hover);
+    background: var(--ai-glow);
+    border-color: var(--color-accent-primary);
+}
+
+.btn-bulk-open {
+    color: var(--color-text-primary);
+    background: var(--color-bg-secondary);
+    border-color: var(--color-border-primary);
+}
+
+.btn-bulk-open:hover:not(:disabled) {
+    color: var(--color-text-primary);
+    background: var(--color-bg-tertiary);
+    border-color: var(--color-text-tertiary);
+}
+
+/* Subtle danger action: Remove local history */
+.btn-bulk-delete {
+    color: var(--color-danger);
+    background: var(--desk-danger-soft);
+    border-color: rgba(201, 58, 55, 0.28);
+}
+
+[data-theme="dark"] .btn-bulk-delete {
+    border-color: rgba(241, 106, 96, 0.32);
+}
+
+.btn-bulk-delete:hover:not(:disabled) {
+    color: var(--desk-on-solid);
+    background: var(--color-danger);
+    border-color: var(--color-danger);
+}
+
+.bulk-confirm-buttons .btn-bulk-delete {
+    color: var(--desk-on-solid);
+    background: var(--color-danger);
+    border-color: var(--color-danger);
+}
+
+.bulk-confirm-buttons .btn-bulk-delete:hover:not(:disabled) {
+    color: var(--desk-on-solid);
+    background: var(--color-danger-hover);
+    border-color: var(--color-danger-hover);
+}
+
+.bulk-inline-actions button:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+.btn-bulk-cancel {
+    color: var(--color-text-secondary);
+    background: transparent;
+    border-color: var(--color-border-primary);
+}
+
+.btn-bulk-cancel:hover:not(:disabled) {
+    color: var(--color-text-primary);
+    background: var(--desk-hover-soft);
+}
+
+/* Confirmation state inside the toolbar */
+.bulk-inline-actions.confirming {
+    padding: 6px 10px;
+    border-color: var(--color-danger);
+    background: var(--desk-danger-soft);
+}
+
+.bulk-confirm-buttons {
+    display: inline-flex;
+    gap: 6px;
+}
+
+/* Bulk submit review modal decision cards & PR list */
+#bulk-submit-review-modal {
+    font-variant-numeric: tabular-nums;
+}
+
+#bulk-submit-review-modal .workspace-decision-card {
+    touch-action: manipulation;
+    transition: background-color 150ms cubic-bezier(0.32, 0.72, 0, 1),
+        border-color 150ms cubic-bezier(0.32, 0.72, 0, 1),
+        color 150ms cubic-bezier(0.32, 0.72, 0, 1),
+        transform 120ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+#bulk-submit-review-modal .workspace-decision-card:active:not(:disabled) {
+    transform: scale(0.98);
+}
+
+#bulk-submit-review-modal .bulk-submit-pr-list {
+    margin: 0;
+    padding: 8px 12px 8px 28px;
+    background: var(--color-bg-secondary);
+    border: 1px solid var(--color-border-secondary);
+    border-radius: 8px;
+    font-variant-numeric: tabular-nums;
+}
+
+#bulk-submit-review-modal .bulk-submit-pr-list li {
+    margin: 4px 0;
+    font-size: 13px;
+}
+
+/* --------------------------------------------------------------------------
+   9. Review tables — saved reviews and collection rows
+   -------------------------------------------------------------------------- */
+#recent-reviews-container,
+#review-requests-container,
+#team-reviews-container,
+#my-prs-container,
+#local-reviews-container {
+    overflow-x: auto;
+    scrollbar-width: thin;
+    -webkit-overflow-scrolling: touch;
+}
+
+.recent-reviews-table {
+    border: 1px solid var(--color-border-secondary);
+    border-radius: 10px;
+    background: var(--color-bg-primary);
+}
+
+.recent-reviews-table thead {
+    background: var(--color-bg-secondary);
+}
+
+.recent-reviews-table th {
+    padding: 9px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    border-bottom: 1px solid var(--color-border-secondary);
+}
+
+.recent-reviews-table td {
+    padding: 10px 12px;
+    font-size: 13.5px;
+    color: var(--color-text-primary);
+    border-bottom: 1px solid var(--color-border-secondary);
+}
+
+.recent-reviews-table tbody tr {
+    transition: background-color 0.12s ease;
+}
+
+.recent-reviews-table tbody tr:hover {
+    background: var(--desk-row-hover);
+}
+
+.recent-reviews-table tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+th.col-select,
+td.col-select {
+    width: 36px;
+    min-width: 36px;
+    padding: 8px 10px;
+    text-align: center;
+}
+
+.recent-reviews-table input[type="checkbox"] {
+    width: 15px;
+    height: 15px;
+    margin: 0;
+    accent-color: var(--color-accent-primary);
+    cursor: pointer;
+}
+
+/* Real data cells */
+.recent-reviews-table .col-title {
+    font-weight: 500;
+    max-width: none;
+    overflow: visible;
+    white-space: normal;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+}
+
+/* sans enforced at table-scoped specificity; td-level mono cannot inherit through */
+.recent-reviews-table .col-pr,
+.recent-reviews-table .collection-pr-number,
+.recent-reviews-table .col-local-name,
+.recent-reviews-table .col-local-path,
+.recent-reviews-table .col-time {
+    font-family: var(--font-sans);
+}
+
+.recent-reviews-table .col-pr {
+    font-variant-numeric: tabular-nums;
+}
+
+.recent-reviews-table .col-pr a {
+    font-family: var(--font-sans);
+    color: var(--color-accent-primary);
+    text-decoration: none;
+    font-variant-numeric: tabular-nums;
+}
+
+.col-pr a:hover {
+    text-decoration: underline;
+}
+
+.recent-reviews-table .collection-pr-number {
+    font-family: var(--font-sans);
+    font-weight: 500;
+    color: var(--color-text-tertiary);
+    font-variant-numeric: tabular-nums;
+}
+
+.col-repo {
+    color: var(--color-text-secondary);
+    overflow-wrap: anywhere;
+}
+
+.col-author {
+    color: var(--color-text-secondary);
+    font-size: 13px;
+}
+
+.col-time {
+    white-space: nowrap;
+    font-size: 13px;
+    color: var(--color-text-tertiary);
+    font-variant-numeric: tabular-nums;
+}
+
+.col-local-name {
+    font-weight: 500;
+    overflow-wrap: anywhere;
+}
+
+.col-local-name > a {
+    color: var(--color-text-primary);
+    text-decoration: none;
+}
+
+.col-local-name > a:hover {
+    color: var(--color-accent-primary);
+    text-decoration: underline;
+}
+
+.col-local-sha {
+    font-family: var(--font-sans);
+    font-size: 13px;
+    color: var(--color-text-tertiary);
+    font-variant-numeric: tabular-nums;
+}
+
+.col-local-path {
+    color: var(--color-text-secondary);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+}
+
+.col-actions {
+    text-align: right;
+    white-space: nowrap;
+}
+
+/* Row-level icon actions */
+.btn-github-link,
+.btn-repo-settings,
+.btn-delete-review,
+.btn-delete-session {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 6px;
+    color: var(--color-text-secondary);
+    vertical-align: middle;
+}
+
+.btn-github-link:hover,
+.btn-repo-settings:hover {
+    color: var(--color-text-primary);
+    background: var(--desk-hover-soft);
+    transform: translateY(-1px);
+}
+
+.btn-delete-review:hover,
+.btn-delete-session:hover {
+    color: var(--color-danger);
+    background: var(--desk-danger-soft);
+}
+
+/* Collection rows are clickable; selected rows read clearly in both themes */
+.collection-pr-row {
+    cursor: pointer;
+}
+
+.recent-reviews-table tr.bulk-selected td {
+    background: var(--color-accent-subtle);
+}
+
+.selection-mode .recent-reviews-table {
+    border-color: var(--desk-selection-border);
+}
+
+/* --------------------------------------------------------------------------
+   10. Loading, empty, pagination, delete confirmation
+   -------------------------------------------------------------------------- */
+.recent-reviews-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    min-height: 120px;
+    font-size: 13.5px;
+    color: var(--color-text-tertiary);
+}
+
+.recent-reviews-empty {
+    padding: 36px 20px;
+    font-size: 13.5px;
+    line-height: 1.55;
+    text-align: center;
+    color: var(--color-text-secondary);
+    background: var(--color-bg-primary);
+    border: 1px solid var(--color-border-secondary);
+    border-radius: 10px;
+    animation: desk-rise 0.2s ease-out;
+}
+
+.recent-reviews-empty p {
+    max-width: 52ch;
+    margin: 0 auto;
+}
+
+.recent-reviews-empty code {
+    padding: 1px 5px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--color-text-primary);
+    background: var(--color-bg-tertiary);
+    border: 1px solid var(--color-border-secondary);
+    border-radius: 4px;
+}
+
+.show-more-container {
+    display: flex;
+    justify-content: center;
+    padding: 14px 0 2px;
+}
+
+.btn-show-more {
+    min-height: 38px;
+    padding: 0 20px;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    background: var(--color-bg-primary);
+    border: 1px solid var(--color-border-primary);
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.btn-show-more:hover:not(:disabled) {
+    background: var(--color-bg-secondary);
+    transform: translateY(-1px);
+}
+
+.btn-show-more:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+.btn-show-more .spinner {
+    width: 14px;
+    height: 14px;
+}
+
+/* Inline delete confirmation replaces a row's cells */
+.delete-confirm-row td {
+    background: var(--desk-danger-soft);
+}
+
+.delete-confirm-inner {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    font-size: 13px;
+    color: var(--color-text-primary);
+}
+
+.btn-confirm-yes,
+.btn-confirm-no {
+    min-height: 32px;
+    padding: 0 14px;
+    font-size: 12.5px;
+    font-weight: 600;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.btn-confirm-yes {
+    color: var(--desk-on-solid);
+    background: var(--color-danger);
+    border: 1px solid transparent;
+}
+
+.btn-confirm-yes:hover {
+    background: var(--color-danger-hover);
+    color: var(--desk-on-solid);
+}
+
+.btn-confirm-no {
+    color: var(--color-text-secondary);
+    background: transparent;
+    border: 1px solid var(--color-border-primary);
+}
+
+.btn-confirm-no:hover {
+    color: var(--color-text-primary);
+    background: var(--desk-hover-soft);
+}
+
+/* Analysis-in-progress marker on a row title */
+.index-analysis-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-right: 6px;
+    vertical-align: -1px;
+    border: 2px solid var(--color-border-primary);
+    border-top-color: var(--color-accent-primary);
+    border-radius: 50%;
+    animation: desk-spin 0.7s linear infinite;
+}
+
+/* --------------------------------------------------------------------------
+   11. Pane headers: refresh + team filter
+   -------------------------------------------------------------------------- */
+.btn-refresh {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+}
+
+.btn-refresh:hover {
+    color: var(--color-text-primary);
+    background: var(--desk-hover-soft);
+}
+
+.btn-refresh.refreshing svg {
+    animation: desk-spin 0.8s linear infinite;
+}
+
+.team-filter-group {
+    gap: 10px;
+}
+
+.team-filter {
+    gap: 6px;
+}
+
+.team-filter-input {
+    width: 130px;
+    max-width: 40vw;
+    height: 34px;
+    padding: 0 10px;
+    font-size: 13px;
+    color: var(--color-text-primary);
+    background: var(--color-bg-primary);
+    border: 1px solid var(--color-border-primary);
+    border-radius: 7px;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.team-filter-input::placeholder {
+    color: var(--color-text-tertiary);
+}
+
+.team-filter-input.invalid {
+    border-color: var(--color-danger);
+    background: var(--desk-danger-soft);
+}
+
+.team-filter-apply,
+.team-filter-clear {
+    min-height: 34px;
+    padding: 0 12px;
+    font-size: 12.5px;
+    font-weight: 600;
+    border-radius: 7px;
+    cursor: pointer;
+}
+
+.team-filter-apply {
+    color: var(--color-accent-primary);
+    background: var(--color-accent-subtle);
+    border: 1px solid var(--ai-border);
+}
+
+.team-filter-apply:hover {
+    color: var(--color-accent-hover);
+    border-color: var(--color-accent-primary);
+}
+
+.team-filter-clear {
+    color: var(--color-text-secondary);
+    background: transparent;
+    border: 1px solid var(--color-border-primary);
+}
+
+.team-filter-clear:hover {
+    color: var(--color-text-primary);
+    background: var(--desk-hover-soft);
+}
+
+.team-filter-hint {
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--desk-warning);
+}
+
+/* --------------------------------------------------------------------------
+   12. Help modal
+   -------------------------------------------------------------------------- */
+.help-modal-overlay {
+    padding: 24px 16px;
+    overflow-y: auto;
+    background: var(--desk-scrim);
+    /* visibility must flip instantly so index.js focus() on close button
+       succeeds the moment .visible lands; only opacity/transform animate */
+    transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.help-modal-overlay.visible {
+    display: flex;
+    visibility: visible;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.help-modal {
+    width: min(720px, 100%);
+    margin: auto;
+    border: 1px solid var(--color-border-primary);
+    border-radius: 12px;
+    background: var(--color-bg-primary);
+    animation: desk-rise 0.18s ease-out;
+}
+
+.help-modal-header {
+    padding: 14px 20px;
+    border-bottom: 0;
+}
+
+.help-modal-title {
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--color-text-primary);
+}
+
+.help-modal-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+}
+
+.help-modal-close:hover {
+    color: var(--color-text-primary);
+    background: var(--desk-hover-soft);
+}
+
+.help-modal-content {
+    padding: 14px 20px 24px;
+    font-size: 13.5px;
+    line-height: 1.6;
+    color: var(--color-text-primary);
+}
+
+.help-modal-content h3 {
+    margin: 18px 0 6px;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+}
+
+.help-modal-content p {
+    margin: 0 0 8px;
+}
+
+.help-modal-content pre {
+    margin: 8px 0;
+    padding: 10px 12px;
+    overflow-x: auto;
+    background: var(--color-bg-secondary);
+    border: 1px solid var(--color-border-secondary);
+    border-radius: 8px;
+}
+
+.help-modal-content code {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+}
+
+.help-modal-content ul {
+    margin: 4px 0 10px;
+    padding-left: 18px;
+    color: var(--color-text-secondary);
+}
+
+.help-modal-content li {
+    margin: 2px 0;
+}
+
+.help-modal-content a {
+    color: var(--color-accent-primary);
+}
+
+/* --------------------------------------------------------------------------
+   13. Responsive — 1440 / 768 / 390
+   -------------------------------------------------------------------------- */
+@media (max-width: 1024px) {
+    .welcome-section {
+        max-width: 100%;
+    }
+}
+
+@media (max-width: 768px) {
+    .main-content {
+        padding: 18px 16px 48px;
+    }
+
+    .header {
+        padding: 0 12px;
+    }
+
+    .workspace-title {
+        font-size: 26px;
+    }
+
+    .tab-pane-header {
+        flex-wrap: wrap;
+    }
+
+    #dashboard-search-status {
+        flex-basis: 100%;
+        margin-left: 0;
+    }
+
+    .select-mode-header {
+        justify-content: flex-start;
+    }
+
+    /* Input takes the full row; Open/Analyze/Browse split the row below */
+    .start-review-form {
+        flex-wrap: wrap;
+    }
+
+    .start-review-input {
+        flex: 1 1 100%;
+        min-height: 44px;
+    }
+
+    .start-review-btn {
+        flex: 1 1 0;
+        min-width: 0;
+        min-height: 44px;
+    }
+}
+
+/* Phone: real reflow. Forms stack; tables reflow to readable rows.
+   Stacked layout keys off data-label attributes on <td> (interaction owner
+   adds them); tables without them keep a min-width inside the named
+   overflow-x scroll region above, so the viewport itself never overflows. */
+@media (max-width: 640px) {
+    /* 16px input type size prevents iOS focus zoom */
+    .start-review-input,
+    .team-filter-input,
+    #dashboard-search {
+        font-size: 16px;
+    }
+
+    #dashboard-search {
+        height: 40px;
+    }
+
+    .start-review-form {
+        flex-wrap: wrap;
+    }
+
+    .start-review-input {
+        flex: 1 1 100%;
+    }
+
+    .start-review-btn {
+        flex: 1 1 auto;
+        min-height: 44px;
+    }
+
+    /* Stacked review rows */
+    .recent-reviews-table:has(tbody td[data-label]) {
+        display: block;
+        background: transparent;
+        border: 0;
+        border-radius: 0;
+        overflow: visible;
+    }
+
+    .recent-reviews-table:has(tbody td[data-label]) thead {
+        display: block;
+        background: transparent;
+    }
+
+    .recent-reviews-table:has(tbody td[data-label]) thead tr {
+        display: flex;
+        padding: 0 0 8px;
+    }
+
+    .recent-reviews-table:has(tbody td[data-label]) thead th:not(.col-select) {
+        display: none;
+    }
+
+    .recent-reviews-table:has(tbody td[data-label]) thead th.col-select {
+        width: auto;
+        padding: 4px 8px;
+        border-bottom: 0;
+    }
+
+    .recent-reviews-table:has(tbody td[data-label]) tbody {
+        display: block;
+    }
+
+    .recent-reviews-table:has(tbody td[data-label]) tbody tr {
+        position: relative;
+        display: block;
+        margin: 0 0 8px;
+        padding: 12px 12px 12px 44px;
+        background: var(--color-bg-primary);
+        border: 1px solid var(--color-border-secondary);
+        border-radius: 10px;
+    }
+
+    .recent-reviews-table:has(tbody td[data-label]) tbody td {
+        display: block;
+        padding: 0;
+        border-bottom: 0;
+        font-size: 13px;
+    }
+
+    .recent-reviews-table:has(tbody td[data-label]) tbody td[data-label]::before {
+        content: attr(data-label);
+        display: block;
+        margin-bottom: 2px;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--color-text-secondary);
+    }
+
+    .recent-reviews-table:has(tbody td[data-label]) tbody td + td {
+        margin-top: 8px;
+    }
+
+    .recent-reviews-table:has(tbody td[data-label]) tbody td.col-select {
+        position: absolute;
+        top: 14px;
+        left: 12px;
+        width: auto;
+        padding: 0;
+    }
+
+    .recent-reviews-table:has(tbody td[data-label]) tbody td.col-title {
+        font-size: 14px;
+        font-weight: 600;
+    }
+
+    .recent-reviews-table:has(tbody td[data-label]) tbody td.col-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 6px;
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid var(--color-border-secondary);
+    }
+
+    /* Fallback when no data-labels: scroll inside the named container */
+    .recent-reviews-table:not(:has(tbody td[data-label])) {
+        min-width: 640px;
+    }
+
+    .dashboard-tools {
+        gap: 8px;
+    }
+
+    .dashboard-search-input-wrap {
+        flex-basis: 100%;
+        max-width: none;
+    }
+
+    #dashboard-search {
+        flex: 1 1 100%;
+        min-width: 0;
+        height: 40px;
+    }
+
+    .help-modal-overlay {
+        padding: 16px 12px;
+    }
+
+    .help-modal-header,
+    .help-modal-content {
+        padding-left: 16px;
+        padding-right: 16px;
+    }
+}
+
+/* Touch targets: thumb-sized controls on coarse pointers */
+@media (pointer: coarse) {
+    .tab-btn {
+        min-height: 44px;
+    }
+
+    .btn-icon,
+    .btn-refresh {
+        width: 40px;
+        height: 40px;
+    }
+
+    .btn-github-link,
+    .btn-repo-settings,
+    .btn-delete-review,
+    .btn-delete-session {
+        width: 36px;
+        height: 36px;
+    }
+
+    .recent-reviews-table input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+    }
+
+    .btn-select-toggle,
+    .bulk-inline-actions button,
+    .team-filter-apply,
+    .team-filter-clear,
+    .btn-confirm-yes,
+    .btn-confirm-no {
+        min-height: 44px;
+    }
+
+    .btn-show-more {
+        min-height: 44px;
+    }
+}
+
+/* --------------------------------------------------------------------------
+   14. Reduced motion + high contrast
+   -------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+
+    .tab-pane.active,
+    .recent-reviews-empty,
+    .help-modal {
+        animation: none;
+    }
+
+    .start-review-btn:hover:not(:disabled),
+    .start-review-btn:active:not(:disabled),
+    .btn-select-toggle:active:not(:disabled),
+    .bulk-inline-actions button:active:not(:disabled),
+    #bulk-submit-review-modal .workspace-decision-card:active:not(:disabled),
+    .app button:active:not(:disabled),
+    .tab-btn:active:not(:disabled),
+    .btn-show-more:hover:not(:disabled),
+    .btn-github-link:hover,
+    .btn-repo-settings:hover {
+        transform: none;
+    }
+}
+
+@media (prefers-contrast: more) {
+    :root {
+        --color-border-primary: #8b95a3;
+        --color-border-secondary: #a9b3c0;
+    }
+
+    [data-theme="dark"] {
+        --color-border-primary: #55637a;
+        --color-border-secondary: #45536a;
+    }
+
+    .recent-reviews-table td,
+    .recent-reviews-table tbody tr:last-child td {
+        border-bottom-color: var(--color-border-primary);
+    }
+}
+
+/* Preserve the select-all control above stacked, labelled inbox rows. */
+@media (max-width: 768px) {
+    .review-inbox-page .recent-reviews-table:has(.col-select) thead { display: block; }
+    .review-inbox-page .recent-reviews-table thead th:not(.col-select) { display: none; }
+    .review-inbox-page .recent-reviews-table thead th.col-select { width: auto; }
+    .review-inbox-page .recent-reviews-table tbody td.col-select { width: auto; }
+}

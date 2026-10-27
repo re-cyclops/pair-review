@@ -334,7 +334,7 @@ class AntigravityProvider extends AIProvider {
       logger.info(`${levelPrefix} Spawned Antigravity CLI process: PID ${pid}`);
 
       if (analysisId && registerProcess) {
-        registerProcess(analysisId, agy);
+        registerProcess(analysisId, agy, signal => killChildSafely(agy, { shell: this.useShell, signal }));
         logger.info(`${levelPrefix} Registered process ${pid} for analysis ${analysisId}`);
       }
 

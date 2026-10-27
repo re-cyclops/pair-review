@@ -1,14 +1,17 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { createTestDatabase, closeTestDatabase } from '../utils/schema';
 
 const { WorktreeLockManager } = require('../../src/git/worktree-lock');
 
 describe('WorktreeLockManager', () => {
-  let lockManager;
+  let lockManager, db;
 
   beforeEach(() => {
-    lockManager = new WorktreeLockManager();
+    db = createTestDatabase();
+    lockManager = new WorktreeLockManager(db);
   });
+  afterEach(() => closeTestDatabase(db));
 
   describe('acquire/release lifecycle', () => {
     it('should acquire a lock and report it as locked', () => {

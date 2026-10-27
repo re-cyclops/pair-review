@@ -563,7 +563,7 @@ describe('AnalysisHistoryManager', () => {
   });
 
   describe('updateSelectedLabel()', () => {
-    it('should update the label with timestamp, provider, and model', () => {
+    it('shows observed model identity instead of requested configuration', () => {
       const manager = new AnalysisHistoryManager({
         reviewId: 1,
         mode: 'pr',
@@ -575,16 +575,17 @@ describe('AnalysisHistoryManager', () => {
       const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
       manager.selectedRun = {
         id: 1,
-        provider: 'claude',
-        model: 'claude-opus-4',
+        provider: 'omp',
+        model: 'default',
+        actualModels: [{ provider: 'google-antigravity', model: 'Gemini-3.8-Flash' }],
         completed_at: twoHoursAgo
       };
 
       manager.updateSelectedLabel();
 
-      // Check that the label was updated with the expected format
-      // Format: <timestamp> · <provider> · <model> (provider is lowercase)
-      expect(manager.historyLabel.textContent).toMatch(/2 hours ago · claude · claude-opus-4/);
+      expect(manager.historyLabel.textContent).toContain('google-antigravity/Gemini-3.8-Flash');
+      expect(manager.historyLabel.textContent).not.toContain('omp/default');
+      expect(manager.historyLabel.title).toContain('Requested: omp/default');
     });
 
     it('should return early when historyLabel is null', () => {
@@ -647,11 +648,10 @@ describe('AnalysisHistoryManager', () => {
 
       manager.updateSelectedLabel();
 
-      // Provider is lowercase per formatProviderName()
-      expect(manager.historyLabel.textContent).toMatch(/3 hours ago · antigravity · gemini-3.1-pro-low/);
+      expect(manager.historyLabel.textContent).toContain('3 hours ago');
     });
 
-    it('should handle unknown provider and model', () => {
+    it('does not invent attribution for legacy runs without model evidence', () => {
       const manager = new AnalysisHistoryManager({
         reviewId: 1,
         mode: 'pr',
@@ -668,8 +668,100 @@ describe('AnalysisHistoryManager', () => {
 
       manager.updateSelectedLabel();
 
-      // Provider defaults to 'unknown' (lowercase), model to 'Unknown' (capitalized)
-      expect(manager.historyLabel.textContent).toMatch(/1 hour ago · unknown · Unknown/);
+      expect(manager.historyLabel.textContent).toContain('model not recorded');
+    });
+  });
+
+  describe('observed model consumers', () => {
+    const setup = (run) => {
+      const manager = new AnalysisHistoryManager({ reviewId: 1, mode: 'pr', onSelectionChange: vi.fn() });
+      manager.init();
+      manager.runs = [run];
+      manager.selectedRun = run;
+      manager.selectedRunId = run.id;
+      return manager;
+    };
+
+    it.each(['pr', 'local'])('renders multiple case-sensitive actual identities in %s history and preview', mode => {
+      const run = { id: 'observed', provider: 'omp', model: 'default', status: 'completed',
+        actualModels: [{ provider: 'google', model: 'Gemini-Exact' }, { provider: 'openai', model: 'Sol-Exact' }] };
+      const manager = setup(run);
+      manager.mode = mode;
+      manager.renderDropdown(manager.runs);
+      manager.updatePreviewPanel(run.id);
+      for (const identity of ['google/Gemini-Exact', 'openai/Sol-Exact']) {
+        expect(manager.listElement.innerHTML).toContain(identity);
+        expect(manager.previewPanel.innerHTML).toContain(identity);
+      }
+      expect(manager.previewPanel.innerHTML).toContain('Requested configuration');
+      expect(manager.previewPanel.innerHTML).toContain('omp/default');
+      expect(manager.listElement.innerHTML).toContain('Requested: omp/default');
+    });
+
+    it.each([undefined, [], null])('keeps legacy evidence unknown without treating requested IDs as served (%s)', actualModels => {
+      const run = { id: 'legacy', provider: 'omp', model: 'default', status: 'completed', actualModels };
+      const manager = setup(run);
+      manager.renderDropdown(manager.runs);
+      manager.updatePreviewPanel(run.id);
+      expect(manager.listElement.innerHTML).toContain('model not recorded');
+      expect(manager.previewPanel.innerHTML).toContain('model not recorded');
+      expect(manager.previewPanel.innerHTML).toContain('Requested model');
+      expect(manager.previewPanel.innerHTML).toContain('default');
+    });
+
+    it('uses observed identity in toolbar while exposing requested configuration only in tooltip', () => {
+      const manager = setup({ id: 'toolbar', provider: 'omp', model: 'default',
+        actualModels: [{ provider: 'google-antigravity', model: 'Gemini-Exact' }] });
+      const pill = createMockElement({ setAttribute: vi.fn() });
+      mockDocument._setElement('toolbar-ai-status', pill);
+      mockDocument._setElement('analyze-btn', createMockElement({ parentElement: createMockElement() }));
+      manager.syncToolbarStatus();
+      expect(pill.textContent).toContain('google-antigravity/Gemini-Exact');
+      expect(pill.textContent).not.toContain('omp/default');
+      expect(pill.title).toContain('Requested: omp/default');
+    });
+
+    it('keeps actual identity after asynchronously resolving the requested council name', async () => {
+      const run = { id: 'council', provider: 'council', model: 'my-council',
+        actualModels: [{ provider: 'google', model: 'Gemini-Exact' }] };
+      const manager = setup(run);
+      manager.historyLabel.isConnected = true;
+      let complete;
+      manager.resolveCouncilName = vi.fn(() => new Promise(resolve => { complete = resolve; }));
+      manager.updateSelectedLabel();
+      complete('My Council');
+      await Promise.resolve();
+      expect(manager.historyLabel.textContent).toContain('google/Gemini-Exact');
+      expect(manager.historyLabel.textContent).toContain('My Council');
+      expect(manager.historyLabel.title).toContain('Requested: council/my-council');
+    });
+
+    it('does not overwrite a newly selected actual model with an older council lookup', async () => {
+      const manager = setup({ id: 'old', provider: 'council', model: 'my-council',
+        actualModels: [{ provider: 'google', model: 'Old-Model' }] });
+      manager.historyLabel.isConnected = true;
+      let complete;
+      manager.resolveCouncilName = vi.fn(() => new Promise(resolve => { complete = resolve; }));
+      manager.updateSelectedLabel();
+      manager.selectedRun = { id: 'new', provider: 'omp', model: 'default',
+        actualModels: [{ provider: 'openai', model: 'New-Model' }] };
+      manager.updateSelectedLabel();
+      complete('Old Council');
+      await Promise.resolve();
+      expect(manager.historyLabel.textContent).toContain('openai/New-Model');
+      expect(manager.historyLabel.textContent).not.toContain('Old-Model');
+      expect(manager.historyLabel.textContent).not.toContain('Old Council');
+    });
+
+    it('escapes observed and requested identities in generated markup', () => {
+      const run = { id: 'escaped', provider: 'omp', model: '<requested>',
+        actualModels: [{ provider: 'external', model: '<served>' }] };
+      const manager = setup(run);
+      manager.renderDropdown(manager.runs);
+      manager.updatePreviewPanel(run.id);
+      expect(manager.listElement.innerHTML).not.toContain('<served>');
+      expect(manager.previewPanel.innerHTML).not.toContain('<requested>');
+      expect(manager.previewPanel.innerHTML).toContain('&lt;served&gt;');
     });
   });
 

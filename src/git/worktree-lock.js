@@ -1,88 +1,60 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
-/**
- * In-memory worktree lock manager.
- *
- * Prevents concurrent git operations on the same worktree during
- * stack analysis. Non-blocking — callers check and fail fast.
- */
+const fs = require('node:fs');
+const path = require('node:path');
 
-const logger = require('../utils/logger');
-
-class WorktreeLockManager {
-  constructor() {
-    /** @type {Map<string, { holderId: string, lockedAt: Date }>} */
-    this._locks = new Map();
-  }
-
-  /**
-   * Acquire a lock on a worktree path.
-   *
-   * @param {string} worktreePath - Absolute path to the worktree
-   * @param {string} holderId - Unique identifier for the lock holder (e.g. stackAnalysisId)
-   * @returns {boolean} true if acquired (or re-acquired by same holder), false if held by another
-   */
-  acquire(worktreePath, holderId) {
-    const existing = this._locks.get(worktreePath);
-
-    if (existing) {
-      if (existing.holderId === holderId) {
-        // Re-acquire by same holder — update timestamp
-        existing.lockedAt = new Date();
-        logger.debug(`Worktree lock re-acquired: ${worktreePath} by ${holderId}`);
-        return true;
-      }
-      logger.debug(`Worktree lock denied: ${worktreePath} held by ${existing.holderId}, requested by ${holderId}`);
-      return false;
-    }
-
-    this._locks.set(worktreePath, { holderId, lockedAt: new Date() });
-    logger.info(`Worktree lock acquired: ${worktreePath} by ${holderId}`);
-    return true;
-  }
-
-  /**
-   * Release a lock on a worktree path.
-   *
-   * @param {string} worktreePath - Absolute path to the worktree
-   * @param {string} holderId - Must match the holder that acquired the lock
-   * @returns {boolean} true if released, false if not held or held by a different holder
-   */
-  release(worktreePath, holderId) {
-    const existing = this._locks.get(worktreePath);
-
-    if (!existing) {
-      logger.debug(`Worktree lock release: no lock found for ${worktreePath}`);
-      return false;
-    }
-
-    if (existing.holderId !== holderId) {
-      logger.debug(`Worktree lock release denied: ${worktreePath} held by ${existing.holderId}, release requested by ${holderId}`);
-      return false;
-    }
-
-    this._locks.delete(worktreePath);
-    logger.info(`Worktree lock released: ${worktreePath} by ${holderId}`);
-    return true;
-  }
-
-  /**
-   * Check whether a worktree is currently locked.
-   *
-   * @param {string} worktreePath - Absolute path to the worktree
-   * @returns {{ locked: boolean, holderId?: string }}
-   */
-  isLocked(worktreePath) {
-    const existing = this._locks.get(worktreePath);
-
-    if (!existing) {
-      return { locked: false };
-    }
-
-    return { locked: true, holderId: existing.holderId };
+// Resolve existing ancestors too: the same checkout key must survive removal
+// of its leaf directory (including /var -> /private/var on macOS).
+function canonicalPath(value) {
+  const absolute = path.resolve(value);
+  try { return fs.realpathSync(absolute); } catch {
+    const parent = path.dirname(absolute);
+    return parent === absolute ? absolute : path.join(canonicalPath(parent), path.basename(absolute));
   }
 }
 
-// Singleton instance for application-wide use
-const worktreeLock = new WorktreeLockManager();
+function containsPath(parent, child) {
+  const relative = path.relative(parent, child);
+  return relative === '' || relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
 
-module.exports = { worktreeLock, WorktreeLockManager };
+/**
+ * Checkout reservations shared by processes using the same database.
+ *
+ * A reservation has no timeout: owner disappearance does not acknowledge its
+ * Git subprocesses. Only its holder releases it after the operation settles.
+ */
+class WorktreeLockManager {
+  constructor(db) {
+    this.db = db;
+  }
+
+  _findLock(worktreePath, { repository, prNumber } = {}) {
+    const checkout = worktreePath ? canonicalPath(worktreePath) : null;
+    return this.db.prepare('SELECT * FROM worktree_locks').all().find(lock =>
+      checkout && (containsPath(lock.path, checkout) || containsPath(checkout, lock.path))
+      || repository && prNumber != null && lock.repository?.toLowerCase() === repository.toLowerCase() && lock.pr_number === prNumber);
+  }
+
+  acquire(worktreePath, holderId, identity = {}) {
+    const checkout = canonicalPath(worktreePath);
+    return this.db.transaction(() => {
+      const existing = this._findLock(checkout, identity);
+      if (existing) return existing.path === checkout && existing.holder_id === holderId;
+      this.db.prepare(`INSERT INTO worktree_locks (path, holder_id, repository, pr_number, locked_at)
+        VALUES (?, ?, ?, ?, ?)`).run(checkout, holderId, identity.repository ?? null, identity.prNumber ?? null, new Date().toISOString());
+      return true;
+    }).immediate();
+  }
+
+  release(worktreePath, holderId) {
+    return this.db.prepare('DELETE FROM worktree_locks WHERE path = ? AND holder_id = ?')
+      .run(canonicalPath(worktreePath), holderId).changes === 1;
+  }
+
+  isLocked(worktreePath, identity) {
+    const existing = this._findLock(worktreePath, identity);
+    return existing ? { locked: true, holderId: existing.holder_id } : { locked: false };
+  }
+}
+
+module.exports = { WorktreeLockManager, canonicalPath };

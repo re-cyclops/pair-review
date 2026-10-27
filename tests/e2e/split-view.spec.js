@@ -18,11 +18,11 @@
  * because the E2E harness only mocks the PR analyses endpoint to seed
  * suggestions into the DB (see NOTE in the AI describe block).
  *
- * The per-worker test server (tests/e2e/test-server.js) seeds the same mock
+ * The isolated test server (tests/e2e/test-server.js) seeds the same mock
  * two-file diff for review 1 (PR) and review 2 (Local).
  */
 
-import { test, expect } from './fixtures.js';
+import { publicationTest as test, expect } from './fixtures.js';
 import {
   waitForDiffToRender,
   waitForDiffType,
@@ -56,37 +56,21 @@ async function seedComment(page, reviewId, { file = FILE, line = 3, side = 'RIGH
   }, { reviewId, file, line, side, body });
 }
 
-/** Delete every comment on a review so the shared worker DB stays clean. */
-async function cleanupComments(page, reviewId) {
-  await page.evaluate(async (rid) => {
-    try {
-      const resp = await fetch(`/api/reviews/${rid}/comments?includeDismissed=true`);
-      const data = await resp.json();
-      for (const c of (data.comments || [])) {
-        await fetch(`/api/reviews/${rid}/comments/${c.id}`, { method: 'DELETE' });
-      }
-    } catch { /* best-effort */ }
-  }, reviewId);
-}
-
-/**
- * Delete AI-seeded suggestions on a review so the shared worker DB stays clean.
- * The comment DELETE routes only touch user comments; AI rows (source='ai') need
- * the dedicated E2E cleanup hook served by tests/e2e/test-server.js.
- */
-async function cleanupAISuggestions(page, reviewId) {
-  await page.evaluate(async (rid) => {
-    // fetch does NOT throw on 404 — only on network errors — so we must
-    // inspect resp.ok ourselves, otherwise a missing route silently no-ops.
-    const resp = await fetch(`/api/reviews/${rid}/ai-suggestions`, { method: 'DELETE' });
-    if (!resp.ok) throw new Error(`AI cleanup failed: ${resp.status}`);
-  }, reviewId);
-}
-
 for (const mode of MODES) {
   test.describe(`Split diff view (${mode.name})`, () => {
-    test.afterEach(async ({ page }) => {
-      await cleanupComments(page, mode.reviewId);
+    test('diff options support keyboard selection and restore focus without exposing closed controls', async ({ page }) => {
+      await page.goto(mode.path);
+      await waitForDiffToRender(page);
+      const options = page.locator('#diff-options-btn');
+      await options.press('Enter');
+      const dialog = page.getByRole('dialog', { name: 'Diff options' });
+      await expect.poll(() => dialog.evaluate(element => element.contains(document.activeElement))).toBe(true);
+      await dialog.getByRole('button', { name: 'Split', exact: true }).press('Space');
+      await waitForDiffType(page, 'split');
+      await page.keyboard.press('Escape');
+      await expect(options).toBeFocused();
+      await dialog.getByRole('button', { name: 'Unified', exact: true }).focus();
+      await expect(options).toBeFocused();
     });
 
     test('defaults to unified and toggles to split via the gear dropdown', async ({ page }) => {
@@ -236,10 +220,6 @@ for (const mode of MODES) {
 test.describe('Split diff view — full-width annotation cards (PR mode)', () => {
   const PR_PATH = '/pr/test-owner/test-repo/1';
 
-  test.afterEach(async ({ page }) => {
-    await cleanupComments(page, 1);
-  });
-
   /**
    * Resolve the shadow annotation cell hosting the light-DOM card containing
    * `text`, plus the geometry needed to prove it spans both columns.
@@ -304,10 +284,6 @@ test.describe('Split diff view — full-width annotation cards (PR mode)', () =>
  */
 test.describe('Annotation prose measure on wide displays (PR mode)', () => {
   const PR_PATH = '/pr/test-owner/test-repo/1';
-
-  test.afterEach(async ({ page }) => {
-    await cleanupComments(page, 1);
-  });
 
   test('caps comment prose width while the card spans the row (unified and split)', async ({ page }) => {
     await page.setViewportSize({ width: 1920, height: 1000 });
@@ -499,10 +475,6 @@ test.describe('Split diff view — one-sided files (PR mode)', () => {
       };
     }, { f: file, t: text });
   }
-
-  test.afterEach(async ({ page }) => {
-    await cleanupComments(page, 1);
-  });
 
   test('renders an entirely-added file in the RIGHT half in split', async ({ page }) => {
     await mockOneSidedDiff(page);
@@ -736,12 +708,6 @@ test.describe('Split diff view — one-sided files (PR mode)', () => {
  */
 test.describe('Split diff view — AI suggestions (PR mode)', () => {
   const PR_PATH = '/pr/test-owner/test-repo/1';
-
-  // Symmetric teardown: this block seeds AI rows into review 1 via the analyses
-  // route. Without cleanup they leak into later tests that revisit review 1.
-  test.afterEach(async ({ page }) => {
-    await cleanupAISuggestions(page, 1);
-  });
 
   test('renders an AI suggestion in the additions column in split', async ({ page }) => {
     await page.goto(PR_PATH);

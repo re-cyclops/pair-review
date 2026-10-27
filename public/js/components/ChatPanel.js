@@ -4359,8 +4359,7 @@ class ChatPanel {
    * Get the ID of the latest completed (successful) analysis run.
    * Looks at the cached runs in analysisHistoryManager (sorted by date DESC)
    * and returns the first one with status 'completed'.
-   * Falls back to the selected run ID or prManager.selectedRunId for
-   * backward compatibility when the runs array is not available.
+   * Falls back to the history selection when the runs array is not available.
    * @returns {string|null}
    */
   _getLatestCompletedRunId() {
@@ -4382,8 +4381,6 @@ class ChatPanel {
       if (id) return String(id);
     }
 
-    // Fall back to prManager.selectedRunId
-    if (mgr.selectedRunId) return String(mgr.selectedRunId);
     return null;
   }
 

@@ -122,8 +122,8 @@ class PierreBridge {
 
   getThemeConfig() {
     return {
-      dark: 'github-dark',
-      light: 'github-light',
+      dark: 'github-dark-high-contrast',
+      light: 'github-light-high-contrast',
     };
   }
 
@@ -610,6 +610,23 @@ class PierreBridge {
         const fileState = this.files.get(fileName);
         if (fileState) {
           fileState.shadowHost = node;
+        }
+        for (const button of node.shadowRoot?.querySelectorAll('[data-expand-button], [data-unmodified-lines]') || []) {
+          const direction = button.hasAttribute('data-expand-up') ? 'preceding' : button.hasAttribute('data-expand-down') ? 'following' : 'surrounding';
+          button.setAttribute('role', 'button');
+          button.setAttribute('aria-label', `Expand ${direction} unchanged lines in ${fileName}`);
+          button.tabIndex = 0;
+          button.onkeydown = (event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            event.stopPropagation();
+            button.click();
+            requestAnimationFrame(() => {
+              if (!button.isConnected) {
+                this.files.get(fileName)?.container.closest('.d2h-file-wrapper')?.querySelector('.file-collapse-toggle')?.focus();
+              }
+            });
+          };
         }
         this._syncSplitAnnotationLayout(fileName);
       },
@@ -1899,6 +1916,8 @@ class PierreBridge {
    * @private
    */
   _renderCommentAnnotation(comment, id) {
+    const preserved = window.reviewDrafts?.preservedComment(comment);
+    if (preserved) return preserved;
     const escapeHtml = window.prManager?.escapeHtml?.bind(window.prManager) || ((s) => s);
 
     const lineInfo = comment.line_end && comment.line_end !== comment.line_start
@@ -2118,6 +2137,10 @@ class PierreBridge {
       textarea.value = data.initialValue;
     }
     container.appendChild(textarea);
+    window.reviewDrafts?.bind(textarea, {
+      anchor: { file: fileName, line_start: data.lineStart, line_end: data.lineEnd || data.lineStart, side: data.side || 'RIGHT', diff_position: data.diffPosition ?? null },
+      included: !data.customSubmit, parentId: data.parentId
+    });
 
     // Actions — order matches legacy: Save, Chat, Cancel
     const actions = document.createElement('div');
@@ -2125,7 +2148,7 @@ class PierreBridge {
 
     const saveBtn = document.createElement('button');
     saveBtn.className = 'btn btn-sm btn-primary save-comment-btn';
-    saveBtn.textContent = 'Save';
+    saveBtn.textContent = data.customSubmit ? 'Include edited draft' : 'Done';
     // Sync disabled state with initial textarea content — when `initialValue`
     // is set programmatically above, the `input` event does not fire, so we
     // must compute this here rather than relying on the listener.
@@ -2163,7 +2186,7 @@ class PierreBridge {
       window.chatPanel.open({
         commentContext: {
           type: 'line',
-          body: textarea.value.trim() || null,
+          body: textarea.value || null,
           file: fileName || '',
           line_start: parseInt(textarea.dataset.line) || null,
           line_end: parseInt(textarea.dataset.lineEnd) || parseInt(textarea.dataset.line) || null,
@@ -2176,7 +2199,7 @@ class PierreBridge {
 
     const cancelBtn = document.createElement('button');
     cancelBtn.className = 'btn btn-sm btn-secondary cancel-comment-btn';
-    cancelBtn.textContent = 'Cancel';
+    cancelBtn.textContent = 'Close';
     cancelBtn.addEventListener('click', () => {
       if (this.options.onCommentFormCancel) {
         this.options.onCommentFormCancel(fileName, id, data);
@@ -2459,6 +2482,12 @@ class PierreBridge {
         background-color: transparent;
         box-shadow: inset 3px 0 0 transparent;
       }
+    }
+    [data-expand-button], [data-unmodified-lines] { min-height: 24px; }
+    [data-unmodified-lines] { display: inline-flex; align-items: center; }
+    [data-expand-button]:focus-visible, [data-unmodified-lines]:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: -2px; }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
     }
   `;
 

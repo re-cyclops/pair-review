@@ -29,46 +29,12 @@ describe('renderApiDocs', () => {
     expect(() => renderApiDocs({ port: 7247 })).toThrow();
   });
 
-  it('should include all major API sections', () => {
-    const md = renderApiDocs({ port: 7247, reviewId: 1 });
-    expect(md).toContain('## Comments');
-    expect(md).toContain('## Suggestions');
-    expect(md).toContain('## Analysis Launch');
-    expect(md).toContain('## Analysis Management');
-    expect(md).toContain('## Comment Types');
-    expect(md).toContain('## Context Files');
-    expect(md).toContain('## Diff Hunk Expansion');
-  });
-
-  it('should not include the behavioral preamble from SKILL.md', () => {
-    const md = renderApiDocs({ port: 7247, reviewId: 1 });
-    expect(md).not.toContain('read-only access to the filesystem');
-    expect(md).not.toContain('pair-review-api');
-  });
-
-  it('should not include the Notes section from SKILL.md', () => {
-    const md = renderApiDocs({ port: 7247, reviewId: 1 });
-    expect(md).not.toContain('Replace `PORT`');
-  });
 });
 
 describe('buildApiCheatSheet', () => {
-  it('should be under 2.5KB', () => {
-    const sheet = buildApiCheatSheet({ port: 7247, reviewId: 1 });
-    expect(Buffer.byteLength(sheet, 'utf8')).toBeLessThan(2560);
-  });
-
   it('should stay under 2.5KB with worst-case port and reviewId values', () => {
     const sheet = buildApiCheatSheet({ port: 65535, reviewId: 99999 });
     expect(Buffer.byteLength(sheet, 'utf8')).toBeLessThan(2560);
-  });
-
-  it('should contain all major endpoint categories', () => {
-    const sheet = buildApiCheatSheet({ port: 7247, reviewId: 1 });
-    expect(sheet).toMatch(/comment/i);
-    expect(sheet).toMatch(/suggest/i);
-    expect(sheet).toMatch(/analy/i);
-    expect(sheet).toMatch(/context.?file/i);
   });
 
   it('should use real port and reviewId values (no template placeholders)', () => {

@@ -4256,7 +4256,6 @@ describe('ChatPanel', () => {
   describe('_getLatestCompletedRunId', () => {
     it('should return the latest completed run from analysisHistoryManager.runs', () => {
       global.window.prManager = {
-        selectedRunId: 'fallback-id',
         analysisHistoryManager: {
           runs: [
             { id: 'run-3', status: 'completed' },
@@ -4277,7 +4276,6 @@ describe('ChatPanel', () => {
 
     it('should skip non-completed runs and return the first completed one', () => {
       global.window.prManager = {
-        selectedRunId: null,
         analysisHistoryManager: {
           runs: [
             { id: 'run-4', status: 'failed' },
@@ -4298,7 +4296,6 @@ describe('ChatPanel', () => {
 
     it('should fall back to getSelectedRunId when no completed runs in array', () => {
       global.window.prManager = {
-        selectedRunId: 'fallback-id',
         analysisHistoryManager: {
           runs: [
             { id: 'run-1', status: 'failed' },
@@ -4316,23 +4313,10 @@ describe('ChatPanel', () => {
 
     it('should fall back to getSelectedRunId when runs array is empty', () => {
       global.window.prManager = {
-        selectedRunId: 'fallback-id',
         analysisHistoryManager: {
           runs: [],
           getSelectedRunId: () => 'selected-id',
         },
-      };
-
-      const result = chatPanel._getLatestCompletedRunId();
-
-      expect(result).toBe('selected-id');
-
-      global.window.prManager = null;
-    });
-
-    it('should fall back to prManager.selectedRunId when no analysisHistoryManager', () => {
-      global.window.prManager = {
-        selectedRunId: 'selected-id',
       };
 
       const result = chatPanel._getLatestCompletedRunId();
@@ -4352,7 +4336,6 @@ describe('ChatPanel', () => {
 
     it('should return null when prManager has no run IDs and no completed runs', () => {
       global.window.prManager = {
-        selectedRunId: null,
         analysisHistoryManager: {
           runs: [],
           getSelectedRunId: () => null,
@@ -4368,7 +4351,6 @@ describe('ChatPanel', () => {
 
     it('should convert numeric run IDs to strings', () => {
       global.window.prManager = {
-        selectedRunId: null,
         analysisHistoryManager: {
           runs: [
             { id: 42, status: 'completed' },
@@ -4384,21 +4366,8 @@ describe('ChatPanel', () => {
       global.window.prManager = null;
     });
 
-    it('should convert numeric fallback selectedRunId to string', () => {
-      global.window.prManager = {
-        selectedRunId: 42,
-      };
-
-      const result = chatPanel._getLatestCompletedRunId();
-
-      expect(result).toBe('42');
-
-      global.window.prManager = null;
-    });
-
     it('should fall back to getSelectedRunId when runs property is missing', () => {
       global.window.prManager = {
-        selectedRunId: 'fallback-id',
         analysisHistoryManager: {
           getSelectedRunId: () => 'manager-id',
         },

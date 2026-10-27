@@ -1,11 +1,8 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
 const { Octokit } = require('@octokit/rest');
 const logger = require('../utils/logger');
-const { DEFAULT_SHA_ABBREV_LENGTH } = require('../git/sha-abbrev');
-const { GitHubApiError, isComplexityError } = require('./errors');
+const { GitHubApiError } = require('./errors');
 const pendingReviewOps = require('./operations/pending-review');
-const reviewLifecycleOps = require('./operations/review-lifecycle');
-const pendingReviewCommentsOps = require('./operations/pending-review-comments');
 
 // Defaults used when `GitHubClient` is constructed from a bare token
 // string (i.e. without a resolved binding). These mirror the
@@ -167,10 +164,21 @@ class GitHubClient {
         ...options.headers,
         authorization: withAuthorizationPrefix(this.token)
       };
+      // Octokit's fetch boundary has no deadline by default. Bound every
+      // dispatch (REST and GraphQL), without retrying uncertain host writes.
+      options.request = {
+        ...options.request,
+        signal: options.request?.signal
+          ? AbortSignal.any([options.request.signal, AbortSignal.timeout(60000)])
+          : AbortSignal.timeout(60000)
+      };
     });
 
     // (2) Refresh-on-401, with concurrency-safe coalescing.
     octokit.hook.wrap('request', async (request, options) => {
+      // The inner before hook replaces this with a composed deadline signal.
+      // A permitted auth retry needs a fresh deadline, not that old signal.
+      const callerSignal = options.request?.signal;
       try {
         return await request(options);
       } catch (error) {
@@ -183,6 +191,11 @@ class GitHubClient {
         // No refresh capability (bare-token / literal / env source), or this
         // request was already retried once → propagate without looping.
         if (typeof this.refresh !== 'function' || options.request?._pairReviewRetried) {
+          throw error;
+        }
+        const readOnly = ['GET', 'HEAD'].includes(options.method) ||
+          typeof options.query === 'string' && /^\s*(?:query\b|\{)/.test(options.query);
+        if (!readOnly) {
           throw error;
         }
 
@@ -228,7 +241,7 @@ class GitHubClient {
         return await this.octokit.request({
           ...options,
           headers: staleHeaders,
-          request: { ...staleRequest, _pairReviewRetried: true }
+          request: { ...staleRequest, signal: callerSignal, _pairReviewRetried: true }
         });
       }
     });
@@ -258,7 +271,7 @@ class GitHubClient {
         node_id: data.node_id,  // GraphQL node ID for PR (e.g., "PR_kwDOM...")
         title: data.title,
         body: data.body || '',
-        author: data.user.login,
+        author: data.user?.login || null,
         state: data.state,
         merged: data.merged || false,
         base_branch: data.base.ref,
@@ -287,6 +300,14 @@ class GitHubClient {
     } catch (error) {
       await this.handleApiError(error, owner, repo, pullNumber);
     }
+  }
+
+  async fetchPullRequestDiff(owner, repo, pullNumber) {
+    const { data } = await this.octokit.rest.pulls.get({
+      owner, repo, pull_number: pullNumber, mediaType: { format: 'diff' }
+    });
+    if (typeof data !== 'string') throw new Error('The host did not return a complete review diff');
+    return data;
   }
 
   /**
@@ -477,165 +498,6 @@ class GitHubClient {
   }
 
 
-  /**
-   * Submit a review to GitHub with inline comments
-   * @param {string} owner - Repository owner
-   * @param {string} repo - Repository name
-   * @param {number} pullNumber - Pull request number
-   * @param {string} event - Review event (APPROVE, REQUEST_CHANGES, COMMENT, or DRAFT)
-   * @param {string} body - Overall review body/summary
-   * @param {Array} comments - Array of inline comments with path, line, body
-   * @param {string} diffContent - The PR diff for position calculation
-   * @returns {Promise<Object>} Review submission result with GitHub URL
-   */
-  async createReview(owner, repo, pullNumber, event, body, comments = [], diffContent = '') {
-    try {
-      const reviewType = event === 'DRAFT' ? 'draft review' : 'review';
-      console.log(`Creating ${reviewType} for PR #${pullNumber} in ${owner}/${repo}`);
-
-      const validEvents = ['APPROVE', 'REQUEST_CHANGES', 'COMMENT', 'DRAFT'];
-      if (!validEvents.includes(event)) {
-        throw new Error(`Invalid review event: ${event}. Must be one of: ${validEvents.join(', ')}`);
-      }
-
-      const formattedComments = [];
-
-      const binaryExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.svg',
-                               '.pdf', '.zip', '.tar', '.gz', '.exe', '.dll', '.so',
-                               '.dylib', '.bin', '.dat', '.db', '.sqlite'];
-
-      for (const comment of comments) {
-        if (!comment.path || !comment.body) {
-          throw new Error('Each comment must have a path and body');
-        }
-
-        const isBinary = binaryExtensions.some(ext => comment.path.toLowerCase().endsWith(ext));
-        if (isBinary) {
-          console.warn(`Skipping comment on binary file: ${comment.path} (GitHub doesn't support comments on binary files)`);
-          continue;
-        }
-
-        const side = comment.side || 'RIGHT';
-        const commitId = comment.commit_id;
-
-        if (!commitId) {
-          console.error(`Missing commit_id for comment on ${comment.path}:${comment.line} - comment will likely fail`);
-        }
-
-        const isRange = comment.start_line && comment.start_line !== comment.line;
-        if (isRange) {
-          console.log(`Formatting range comment for ${comment.path}:${comment.start_line}-${comment.line} (side: ${side})`);
-        } else {
-          console.log(`Formatting comment for ${comment.path}:${comment.line} (side: ${side})`);
-        }
-
-        const formatted = {
-          path: comment.path,
-          line: comment.line,
-          side: side,
-          body: comment.body
-        };
-
-        if (isRange) {
-          formatted.start_line = comment.start_line;
-          formatted.start_side = comment.start_side || side;
-        }
-
-        formattedComments.push(formatted);
-      }
-
-      console.log(`Formatted ${formattedComments.length} comments for ${reviewType}`);
-
-      if (comments.length > 0 && formattedComments.length === 0) {
-        console.warn('All comments were on binary files and were skipped');
-        if (!body || body.trim() === '') {
-          const errorMessage = event === 'DRAFT' ?
-            'Cannot create draft review: all comments are on binary files (GitHub does not support comments on binary files) and no review summary was provided' :
-            'Cannot submit review: all comments are on binary files (GitHub does not support comments on binary files) and no review summary was provided';
-          throw new Error(errorMessage);
-        }
-      }
-
-      const commitId = comments.length > 0 ? comments[0].commit_id : null;
-      if (commitId) {
-        console.log(`Using commit_id for review: ${commitId.substring(0, DEFAULT_SHA_ABBREV_LENGTH)}`);
-      } else {
-        console.warn('No commit_id available - review may fail for lines outside diff');
-      }
-
-      const payload = {
-        owner,
-        repo,
-        pull_number: pullNumber,
-        body: body || '',
-        comments: formattedComments
-      };
-
-      if (commitId) {
-        payload.commit_id = commitId;
-      }
-
-      if (event !== 'DRAFT') {
-        payload.event = event;
-      }
-
-      console.log(`Submitting review to GitHub with payload:`, JSON.stringify({
-        ...payload,
-        comments: payload.comments.length + ' comments'
-      }, null, 2));
-
-      const { data } = await this.octokit.rest.pulls.createReview(payload);
-
-      const successMessage = event === 'DRAFT' ?
-        `Draft review created successfully: ${data.html_url} (Review ID: ${data.id})` :
-        `Review submitted successfully: ${data.html_url}`;
-      console.log(successMessage);
-
-      return {
-        id: data.id,
-        html_url: data.html_url,
-        state: data.state,
-        submitted_at: data.submitted_at,
-        comments_count: formattedComments.length
-      };
-
-    } catch (error) {
-      await this.handleReviewError(error, owner, repo, pullNumber);
-    }
-  }
-
-  /**
-   * Add comments to a pending review in batches.
-   *
-   * Thin delegation to the `pending_review_comments` operation dispatcher
-   * — see `src/github/operations/pending-review-comments.js`. Returns
-   * the same shape as before: `{ successCount, failed, failedDetails }`.
-   *
-   * `prContext` ({ owner, repo, prNumber }) is required for the `"host"`
-   * dispatch path, which uses a path-shaped REST endpoint. It is ignored
-   * on the `"graphql"` path. Callers that may run against alt-hosts must
-   * pass it; callers known to only run against github.com may omit it.
-   *
-   * @param {string} prNodeId - GraphQL node ID for the PR
-   * @param {string} reviewId - Review identifier (GraphQL node ID on the
-   *   graphql path; host REST id on the host path)
-   * @param {Array} comments
-   * @param {number} [batchSize=10]
-   * @param {Object} [prContext] - `{ owner, repo, prNumber }`. Required
-   *   when `features.pending_review_comments === "host"`.
-   * @returns {Promise<{successCount: number, failed: boolean, failedDetails: string[]}>}
-   */
-  async addCommentsInBatches(prNodeId, reviewId, comments, batchSize = 10, prContext = null) {
-    return pendingReviewCommentsOps.addCommentsInBatches(
-      this.octokit,
-      this.features,
-      prNodeId,
-      reviewId,
-      comments,
-      batchSize,
-      prContext
-    );
-  }
 
   /**
    * Get the pending (draft) review for the authenticated user on a PR.
@@ -667,466 +529,6 @@ class GitHubClient {
     return pendingReviewOps.getReviewById(this.octokit, this.features, nodeId, prContext);
   }
 
-  /**
-   * Delete a pending review (used for cleanup on failure).
-   *
-   * Thin delegation to the `review_lifecycle` dispatcher.
-   *
-   * @param {string} reviewId - GraphQL node ID for the review
-   * @param {Object} [prContext] - `{ owner, repo, prNumber, reviewId? }`, required for REST mode
-   * @returns {Promise<boolean>}
-   */
-  async deletePendingReview(reviewId, prContext) {
-    return reviewLifecycleOps.deletePullRequestReview(
-      this.octokit,
-      this.features,
-      reviewId,
-      prContext
-    );
-  }
-
-  /**
-   * Submit a review using GraphQL API
-   * This supports both line-level comments (within diff hunks) and file-level comments
-   * (for expanded context lines outside diff hunks).
-   *
-   * Orchestration is unchanged from the pre-refactor implementation; the
-   * three GraphQL primitives (create pending review, add comments,
-   * submit) are now dispatched through `review_lifecycle` and
-   * `pending_review_comments` operations.
-   *
-   * @param {string} prNodeId - GraphQL node ID for the PR
-   * @param {string} event - APPROVE, REQUEST_CHANGES, COMMENT
-   * @param {string} body
-   * @param {Array} comments
-   * @param {string|null} [existingReviewId=null]
-   * @param {Object|null} [prContext=null] - `{ owner, repo, prNumber }`,
-   *   required when `features.pending_review_comments === "host"`.
-   * @returns {Promise<Object>}
-   */
-  async createReviewGraphQL(prNodeId, event, body, comments = [], existingReviewId = null, prContext = null) {
-    // Transport label for user-facing log/error strings. This method name
-    // is historical (callers depend on it), but the actual transport may be
-    // the alt-host REST/extension path rather than GraphQL. Keep the
-    // messages accurate to what really ran.
-    const transport = this.apiHost ? 'alt-host' : 'GraphQL';
-    try {
-      console.log(`Creating review (${transport}) for PR ${prNodeId} with ${comments.length} comments`);
-
-      const validEvents = ['APPROVE', 'REQUEST_CHANGES', 'COMMENT'];
-      if (!validEvents.includes(event)) {
-        throw new Error(`Invalid review event: ${event}. Must be one of: ${validEvents.join(', ')}`);
-      }
-
-      // When running on the REST review-lifecycle path, callers can
-      // pass only a numeric review id via `prContext.reviewId` (no node
-      // id is available without an extra round-trip). Treat that as an
-      // existing-review signal so we don't accidentally create a second
-      // pending review on top of the user's existing draft.
-      const existingRestReviewId = this.features.review_lifecycle === 'rest' ? prContext?.reviewId : null;
-      const effectiveExistingReviewId = existingReviewId ?? existingRestReviewId;
-      const usedExistingReview = effectiveExistingReviewId !== undefined && effectiveExistingReviewId !== null;
-
-      let reviewId;
-      let reviewDatabaseId = null;
-      if (usedExistingReview) {
-        console.log(`Step 1: Using existing pending review: ${effectiveExistingReviewId}`);
-        reviewId = effectiveExistingReviewId;
-        // Caller is expected to pass the numeric id on `prContext.reviewId`
-        // (e.g. `existingDraft.databaseId`). Capture it so we can propagate
-        // it explicitly to subsequent calls in this orchestration.
-        if (prContext && (typeof prContext.reviewId === 'number' || typeof prContext.reviewId === 'string')) {
-          const numeric = Number(prContext.reviewId);
-          if (Number.isFinite(numeric)) reviewDatabaseId = numeric;
-        }
-      } else {
-        console.log('Step 1: Creating pending review...');
-        const created = await reviewLifecycleOps.addPullRequestReview(
-          this.octokit,
-          this.features,
-          prNodeId,
-          prContext
-        );
-        reviewId = created.id;
-        reviewDatabaseId = (typeof created.databaseId === 'number') ? created.databaseId : null;
-        console.log(`Created pending review: ${reviewId}${reviewDatabaseId !== null ? ` (databaseId=${reviewDatabaseId})` : ''}`);
-      }
-
-      // Build a downstream prContext that carries the numeric review id
-      // so REST/host paths (which need a numeric REST id) can resolve it
-      // without needing the caller to remember to pass it.
-      const downstreamPrContext = prContext
-        ? { ...prContext, reviewId: reviewDatabaseId !== null ? reviewDatabaseId : prContext.reviewId }
-        : (reviewDatabaseId !== null ? { reviewId: reviewDatabaseId } : null);
-
-      let successfulComments = 0;
-      if (comments.length > 0) {
-        console.log(`Step 2: Adding ${comments.length} comments in batches...`);
-        let batchResult;
-        try {
-          batchResult = await this.addCommentsInBatches(prNodeId, reviewId, comments, 10, downstreamPrContext);
-        } catch (commentError) {
-          // The comment-batch path threw before returning a result shape.
-          // This happens on the host pending-review-comments path (which
-          // throws on request failure) and on unsupported-mode rejection
-          // in the dispatcher. The original code only cleaned up when
-          // `batchResult.failed` was returned, leaving a pending review
-          // behind on these throws when we created it ourselves.
-          console.error(`CRITICAL: comment batch threw before completion: ${commentError.message}`);
-          if (!usedExistingReview) {
-            const cleaned = await this.deletePendingReview(reviewId, downstreamPrContext);
-            if (!cleaned) {
-              console.warn('Warning: Failed to clean up pending review - manual cleanup may be required');
-            }
-          } else {
-            console.warn('Skipping cleanup of pre-existing pending review - comments may be partially added');
-          }
-          const wrapped = new Error(
-            `Failed to add comments to GitHub: comment batch threw before completion: ${commentError.message}`
-          );
-          wrapped.cause = commentError;
-          if (commentError.stack) wrapped.stack = commentError.stack;
-          throw wrapped;
-        }
-        successfulComments = batchResult.successCount;
-
-        if (batchResult.failed) {
-          const failedCount = comments.length - successfulComments;
-          const details = batchResult.failedDetails || [];
-          console.error(`CRITICAL: ${failedCount} of ${comments.length} comments failed to add to GitHub`);
-          if (!usedExistingReview) {
-            const cleaned = await this.deletePendingReview(reviewId, downstreamPrContext);
-            if (!cleaned) {
-              console.warn('Warning: Failed to clean up pending review - manual cleanup may be required');
-            }
-          } else {
-            console.warn('Skipping cleanup of pre-existing pending review - comments may be partially added');
-          }
-          const detailSuffix = details.length > 0 ? ` Failures:\n${details.join('\n')}` : '';
-          throw new Error(`Failed to add ${failedCount} of ${comments.length} comments to GitHub.${detailSuffix}`);
-        }
-      }
-
-      console.log(`Step 3: Submitting review with event ${event}...`);
-      const result = await reviewLifecycleOps.submitPullRequestReview(
-        this.octokit,
-        this.features,
-        reviewId,
-        event,
-        body,
-        downstreamPrContext
-      );
-
-      console.log(`Review submitted successfully: ${result.url}`);
-
-      return {
-        id: result.id,
-        databaseId: result.databaseId,
-        html_url: result.url,
-        state: result.state,
-        comments_count: successfulComments
-      };
-
-    } catch (error) {
-      console.error(`Review error (${transport}):`, error);
-
-      // The `error.errors` branch is a GraphQL-shaped error envelope. It is
-      // harmless on the REST/host path (which won't populate it); we still
-      // label the message with the actual transport for accuracy.
-      if (error.errors) {
-        const messages = error.errors.map(e => e.message).join(', ');
-        throw new Error(`GitHub ${transport} error: ${messages}`);
-      }
-
-      throw new Error(`Failed to submit review (${transport}): ${error.message}`);
-    }
-  }
-
-  /**
-   * Create a draft (pending) review using GraphQL API
-   * This creates a review and adds comments but does NOT submit it.
-   * The review remains as PENDING on GitHub for later submission.
-   *
-   * @param {string} prNodeId
-   * @param {string} body
-   * @param {Array} comments
-   * @param {string|null} [existingReviewId=null]
-   * @param {Object|null} [prContext=null] - `{ owner, repo, prNumber }`,
-   *   required when `features.pending_review_comments === "host"`.
-   * @returns {Promise<Object>}
-   */
-  async createDraftReviewGraphQL(prNodeId, body, comments = [], existingReviewId = null, prContext = null) {
-    // Transport label for user-facing log/error strings. The method name is
-    // historical; the real transport may be the alt-host REST/extension
-    // path rather than GraphQL. See createReviewGraphQL for the rationale.
-    const transport = this.apiHost ? 'alt-host' : 'GraphQL';
-    try {
-      console.log(`Creating draft review (${transport}) for PR ${prNodeId} with ${comments.length} comments`);
-
-      // See createReviewGraphQL for the rationale: on the REST
-      // review-lifecycle path the caller may have only a numeric review
-      // id and no node id, so treat `prContext.reviewId` as an
-      // existing-review signal in that mode.
-      const existingRestReviewId = this.features.review_lifecycle === 'rest' ? prContext?.reviewId : null;
-      const effectiveExistingReviewId = existingReviewId ?? existingRestReviewId;
-      const usedExistingReview = effectiveExistingReviewId !== undefined && effectiveExistingReviewId !== null;
-
-      let reviewId;
-      let reviewDatabaseId = null;
-      let reviewUrl;
-      // Note: the body parameter is not updated for existing pending reviews because
-      // GitHub only uses the body at submission time (via submitPullRequestReview),
-      // not during the pending/draft phase.
-      if (usedExistingReview) {
-        console.log(`Step 1: Using existing pending review: ${effectiveExistingReviewId}`);
-        reviewId = effectiveExistingReviewId;
-        // URL and databaseId not available from existing review ID alone.
-        // Caller is expected to pass the numeric id on `prContext.reviewId`
-        // (e.g. `existingDraft.databaseId`). Capture it for propagation.
-        if (prContext && (typeof prContext.reviewId === 'number' || typeof prContext.reviewId === 'string')) {
-          const numeric = Number(prContext.reviewId);
-          if (Number.isFinite(numeric)) reviewDatabaseId = numeric;
-        }
-        reviewUrl = null;
-      } else {
-        console.log('Step 1: Creating pending review...');
-        const created = await reviewLifecycleOps.addPullRequestReviewWithBody(
-          this.octokit,
-          this.features,
-          prNodeId,
-          body,
-          prContext
-        );
-        reviewId = created.id;
-        reviewDatabaseId = (typeof created.databaseId === 'number') ? created.databaseId : null;
-        reviewUrl = created.url;
-        console.log(`Created pending review: ${reviewId}${reviewDatabaseId !== null ? ` (databaseId=${reviewDatabaseId})` : ''}`);
-      }
-
-      // Build a downstream prContext carrying the numeric review id so
-      // REST/host paths can address the review without re-resolving it.
-      const downstreamPrContext = prContext
-        ? { ...prContext, reviewId: reviewDatabaseId !== null ? reviewDatabaseId : prContext.reviewId }
-        : (reviewDatabaseId !== null ? { reviewId: reviewDatabaseId } : null);
-
-      let successfulComments = 0;
-      if (comments.length > 0) {
-        console.log(`Step 2: Adding ${comments.length} comments in batches...`);
-        let batchResult;
-        try {
-          batchResult = await this.addCommentsInBatches(prNodeId, reviewId, comments, 10, downstreamPrContext);
-        } catch (commentError) {
-          // The comment-batch path threw before returning a result shape.
-          // This happens on the host pending-review-comments path (which
-          // throws on request failure) and on unsupported-mode rejection
-          // in the dispatcher. The original code only cleaned up when
-          // `batchResult.failed` was returned, leaving a pending review
-          // behind on these throws when we created it ourselves.
-          console.error(`CRITICAL: comment batch threw before completion: ${commentError.message}`);
-          if (!usedExistingReview) {
-            const cleaned = await this.deletePendingReview(reviewId, downstreamPrContext);
-            if (!cleaned) {
-              console.warn('Warning: Failed to clean up pending review - manual cleanup may be required');
-            }
-          } else {
-            console.warn('Skipping cleanup of pre-existing pending review - comments may be partially added');
-          }
-          const wrapped = new Error(
-            `Failed to add comments to draft review: comment batch threw before completion: ${commentError.message}`
-          );
-          wrapped.cause = commentError;
-          if (commentError.stack) wrapped.stack = commentError.stack;
-          throw wrapped;
-        }
-        successfulComments = batchResult.successCount;
-
-        if (batchResult.failed) {
-          const failedCount = comments.length - successfulComments;
-          const details = batchResult.failedDetails || [];
-          const detailSuffix = details.length > 0 ? ` Failures:\n${details.join('\n')}` : '';
-          console.error(`CRITICAL: ${failedCount} of ${comments.length} comments failed to add to draft review`);
-          if (!usedExistingReview) {
-            const cleaned = await this.deletePendingReview(reviewId, downstreamPrContext);
-            if (!cleaned) {
-              console.warn('Warning: Failed to clean up pending review - manual cleanup may be required');
-            }
-            throw new Error(
-              `Failed to add ${failedCount} of ${comments.length} comments to draft review. ` +
-              `The draft review has been deleted.${detailSuffix}`
-            );
-          } else {
-            console.warn('Skipping cleanup of pre-existing pending review - comments may be partially added');
-            throw new Error(`Failed to add ${failedCount} of ${comments.length} comments to existing draft review. ${successfulComments} comments were added to the GitHub draft.${detailSuffix}`);
-          }
-        }
-      }
-
-      // Note: We do NOT submit the review - it stays as PENDING (draft)
-      console.log(`Draft review created successfully (pending): ${reviewUrl || reviewId}`);
-
-      return {
-        id: reviewId,
-        databaseId: reviewDatabaseId,
-        html_url: reviewUrl,
-        state: 'PENDING',
-        comments_count: successfulComments
-      };
-
-    } catch (error) {
-      console.error(`Draft review error (${transport}):`, error);
-
-      // The `error.errors` branch is a GraphQL-shaped error envelope,
-      // harmless on the REST/host path. Label with the actual transport.
-      if (error.errors) {
-        const messages = error.errors.map(e => e.message).join(', ');
-        throw new Error(`GitHub ${transport} error: ${messages}`);
-      }
-
-      throw new Error(`Failed to create draft review (${transport}): ${error.message}`);
-    }
-  }
-
-  /**
-   * Calculate diff position for a given file path and line number
-   * Position is counted from the first @@ hunk header, where position 1 = first line after @@
-   * @param {string} diffContent - The unified diff content
-   * @param {string} filePath - File path to find in diff
-   * @param {number} lineNumber - Line number in the new file
-   * @returns {number} Diff position or -1 if not found
-   */
-  calculateDiffPosition(diffContent, filePath, lineNumber) {
-    if (!diffContent || !filePath || lineNumber === undefined) {
-      console.warn('calculateDiffPosition: Missing required parameters', {
-        filePath,
-        lineNumber,
-        hasDiffContent: !!diffContent
-      });
-      return -1;
-    }
-
-    const lines = diffContent.split('\n');
-    let inFile = false;
-    let currentFile = '';
-    let position = 0;
-    let newLineNumber = 0;
-    let foundHunk = false;
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-
-      if (line.startsWith('diff --git')) {
-        const match = line.match(/diff --git a\/(.+) b\/(.+)/);
-        if (match) {
-          currentFile = match[2];
-          inFile = currentFile === filePath;
-          position = 0;
-          newLineNumber = 0;
-          foundHunk = false;
-        }
-        continue;
-      }
-
-      if (!inFile) continue;
-
-      if (line.startsWith('@@')) {
-        const match = line.match(/@@ -\d+,?\d* \+(\d+),?\d* @@/);
-        if (match) {
-          newLineNumber = parseInt(match[1]) - 1;
-
-          if (!foundHunk) {
-            position = 0;
-            foundHunk = true;
-          } else {
-            position++;
-          }
-        }
-        continue;
-      }
-
-      if (!foundHunk) continue;
-
-      const isDiffContentLine = line.startsWith('+') || line.startsWith('-') || line.startsWith(' ') || (line === '' && foundHunk);
-
-      if (!isDiffContentLine) continue;
-
-      position++;
-
-      if (line.startsWith('+')) {
-        newLineNumber++;
-        if (newLineNumber === lineNumber) {
-          return position;
-        }
-      } else if (line.startsWith(' ') || (line === '' && foundHunk)) {
-        newLineNumber++;
-        if (newLineNumber === lineNumber) {
-          return position;
-        }
-      }
-    }
-
-    console.warn('calculateDiffPosition: Position not found', {
-      filePath,
-      lineNumber,
-      inFile,
-      foundHunk,
-      finalNewLineNumber: newLineNumber
-    });
-    return -1;
-  }
-
-  /**
-   * Handle errors specific to review submission
-   * @param {Error} error - The API error
-   * @param {string} owner - Repository owner
-   * @param {string} repo - Repository name
-   * @param {number} pullNumber - Pull request number
-   * @throws {Error} Reformatted error with user-friendly message
-   */
-  async handleReviewError(error, owner, repo, pullNumber) {
-    console.error('GitHub review submission error:', error);
-
-    if (error.status === 401) {
-      throw new GitHubApiError('GitHub authentication failed. Your token may be invalid or expired. Check ~/.pair-review/config.json', 401);
-    }
-
-    if (error.status === 403) {
-      throw new GitHubApiError(`Insufficient permissions to review PR #${pullNumber} in ${owner}/${repo}. Your GitHub token may need additional scopes.`, 403);
-    }
-
-    if (error.status === 404) {
-      throw new GitHubApiError(`Pull request #${pullNumber} not found in repository ${owner}/${repo}`, 404);
-    }
-
-    if (error.status === 422) {
-      console.error('GitHub 422 validation error response:', JSON.stringify(error.response?.data, null, 2));
-      const message = error.response?.data?.message || 'Validation error';
-      const errors = error.response?.data?.errors;
-
-      if (errors && Array.isArray(errors)) {
-        const errorMessages = errors.map(e => e.message || e.code || e);
-        const errorDetails = errorMessages.join(', ');
-
-        if (errorMessages.some(msg => msg.includes('pending review'))) {
-          throw new Error(`You already have a pending (draft) review on this PR. Please submit or dismiss it on GitHub before creating a new draft review.`);
-        }
-
-        throw new Error(`GitHub API validation error: ${message}. Details: ${errorDetails}`);
-      }
-      throw new Error(`GitHub API validation error: ${message}`);
-    }
-
-    if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED') {
-      throw new GitHubApiError(`Network error during review submission: ${error.message}. Please check your internet connection.`, 503);
-    }
-
-    if (error.status === 403 && error.response?.headers?.['x-ratelimit-remaining'] === '0') {
-      const resetTime = parseInt(error.response.headers['x-ratelimit-reset']) * 1000;
-      const waitTime = Math.max(resetTime - Date.now(), 1000);
-      throw new Error(`GitHub API rate limit exceeded. Review submission failed. Please wait ${Math.ceil(waitTime / 1000)} seconds and try again.`);
-    }
-
-    throw new Error(`Failed to submit review: ${error.message}`);
-  }
 
   /**
    * Search GitHub pull requests using the search API.
@@ -1201,6 +603,7 @@ class GitHubClient {
   async getAuthenticatedUser() {
     const { data } = await this.octokit.rest.users.getAuthenticated();
     return {
+      id: data.id ?? null,
       login: data.login,
       name: data.name,
       avatar_url: data.avatar_url
@@ -1277,7 +680,6 @@ class GitHubClient {
 module.exports = {
   GitHubClient,
   GitHubApiError,
-  isComplexityError,
   // Exported so tests can assert that the bare-token defaults stay in
   // sync with the canonical `GRAPHQL_DEFAULT_AREAS` set in `src/config.js`.
   DEFAULT_FEATURES,

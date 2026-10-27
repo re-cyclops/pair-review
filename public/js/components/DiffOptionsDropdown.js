@@ -291,6 +291,12 @@ class DiffOptionsDropdown {
   _renderPopover() {
     const popover = document.createElement('div');
     popover.className = 'diff-options-popover';
+    popover.id = 'diff-options-popover';
+    popover.setAttribute('role', 'dialog');
+    popover.setAttribute('aria-label', 'Diff options');
+    popover.inert = true;
+    this._btn.setAttribute('aria-controls', popover.id);
+    this._btn.setAttribute('aria-expanded', 'false');
     // Start hidden (opacity 0, shifted up)
     popover.style.opacity = '0';
     popover.style.transform = 'translateY(-4px)';
@@ -460,7 +466,7 @@ class DiffOptionsDropdown {
       const active = mode === this._diffView;
       btn.style.background = active ? 'var(--ai-primary, #8b5cf6)' : 'transparent';
       btn.style.color = active
-        ? 'var(--color-text-on-emphasis, #ffffff)'
+        ? 'var(--workspace-on-accent, var(--color-text-on-emphasis, #ffffff))'
         : 'var(--color-text-secondary, #656d76)';
       btn.style.fontWeight = active ? '600' : 'normal';
       btn.setAttribute('aria-pressed', active ? 'true' : 'false');
@@ -600,7 +606,12 @@ class DiffOptionsDropdown {
     this._scopeStops = [];
 
     LS.STOPS.forEach((stop, i) => {
-      const stopEl = document.createElement('div');
+      const stopEl = document.createElement('button');
+      stopEl.type = 'button';
+      stopEl.style.border = '0';
+      stopEl.style.background = 'transparent';
+      stopEl.style.padding = '0';
+      stopEl.style.font = 'inherit';
       stopEl.style.display = 'flex';
       stopEl.style.flexDirection = 'column';
       stopEl.style.alignItems = 'center';
@@ -609,7 +620,7 @@ class DiffOptionsDropdown {
       stopEl.style.flex = '1';
       stopEl.dataset.stop = stop;
 
-      const dot = document.createElement('div');
+      const dot = document.createElement('span');
       dot.style.width = '14px';
       dot.style.height = '14px';
       dot.style.borderRadius = '50%';
@@ -621,7 +632,7 @@ class DiffOptionsDropdown {
       dot.style.zIndex = '1';
       dot.style.marginBottom = '6px';
 
-      const labelEl = document.createElement('div');
+      const labelEl = document.createElement('span');
       labelEl.textContent = stop.charAt(0).toUpperCase() + stop.slice(1);
       labelEl.style.fontSize = '11px';
       labelEl.style.lineHeight = '1.2';
@@ -633,7 +644,8 @@ class DiffOptionsDropdown {
       stopEl.appendChild(labelEl);
 
       // Custom tooltip element (positioned above the dot, hidden by default)
-      const tooltipEl = document.createElement('div');
+      const tooltipEl = document.createElement('span');
+      tooltipEl.setAttribute('aria-hidden', 'true');
       tooltipEl.style.position = 'absolute';
       tooltipEl.style.bottom = '100%';
       tooltipEl.style.left = '50%';
@@ -773,6 +785,9 @@ class DiffOptionsDropdown {
       const included = LS.scopeIncludes(this._scopeStart, this._scopeEnd, stop);
       const isBranch = stop === 'branch';
       const disabled = isBranch && !this._branchAvailable;
+      containerEl.disabled = disabled;
+      containerEl.setAttribute('aria-pressed', String(included));
+      containerEl.setAttribute('aria-label', `${stop.charAt(0).toUpperCase() + stop.slice(1)}${stop === 'unstaged' ? ' (always included)' : ''}`);
 
       // Determine if clicking this stop would do anything (for cursor hint).
       // 'unstaged' is mandatory and cannot be toggled off, so it is never a
@@ -852,9 +867,12 @@ class DiffOptionsDropdown {
     this._popoverEl.style.transform = 'translateX(-50%) translateY(-4px)';
 
     // Make visible
+    this._popoverEl.inert = false;
+    this._btn.setAttribute('aria-expanded', 'true');
     this._popoverEl.style.opacity = '1';
     this._popoverEl.style.pointerEvents = 'auto';
     this._visible = true;
+    this._popoverEl.querySelector('input:not(:disabled), button:not(:disabled), [tabindex="0"]')?.focus();
 
     // Animate into final position
     requestAnimationFrame(() => {
@@ -874,6 +892,8 @@ class DiffOptionsDropdown {
     // Escape to dismiss
     this._escapeHandler = (e) => {
       if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
         this._hide();
       }
     };
@@ -882,6 +902,10 @@ class DiffOptionsDropdown {
 
   _hide() {
     if (!this._popoverEl) return;
+    const restoreFocus = this._popoverEl.contains(document.activeElement);
+    this._popoverEl.inert = true;
+    this._btn?.setAttribute('aria-expanded', 'false');
+    if (restoreFocus) this._btn?.focus();
 
     this._popoverEl.style.opacity = '0';
     this._popoverEl.style.transform = 'translateX(-50%) translateY(-4px)';

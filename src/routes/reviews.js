@@ -9,7 +9,7 @@
 
 const express = require('express');
 const { query, queryOne, run, withTransaction, CommentRepository, ReviewRepository, AnalysisRunRepository, HunkSummaryRepository, TourRepository } = require('../database');
-const { calculateStats, getStatsQuery } = require('../utils/stats-calculator');
+const { calculateStats, getStatsQuery, getDraftStateQuery } = require('../utils/stats-calculator');
 const { activeAnalyses, reviewToAnalysisId } = require('./shared');
 const logger = require('../utils/logger');
 const { broadcastReviewEvent } = require('../events/review-events');
@@ -26,8 +26,194 @@ const { resolveOriginalFileContentSpecs } = require('../utils/diff-file-content'
 const validateReviewId = require('./middleware/validate-review-id');
 const { reviewScope, scopeIncludes, includesBranch } = require('../local-scope');
 const { findMergeBase } = require('../local-review');
+const submission = require('../review-submission');
+const { GitHubClient } = require('../github/client');
+const { PRArgumentParser } = require('../github/parser');
+const { resolveReviewBinding } = require('../utils/host-resolution');
+const reviewProgress = require('../review-progress');
+const { actualModelsForRun } = require('../ai/model-evidence');
 
 const router = express.Router();
+
+// Cached metadata only: opening the inbox or command palette never prepares a worktree.
+router.get('/api/reviews/recent', (req, res) => {
+  const db = req.app.get('db');
+  const decode = value => safeParseJson(Buffer.from(String(value), 'base64url').toString());
+  const valid = cursor => cursor && Number.isFinite(cursor.at) && Number.isInteger(cursor.id);
+  const before = req.query.before ? decode(req.query.before) : { at: Number.MAX_SAFE_INTEGER, id: Number.MAX_SAFE_INTEGER };
+  const through = req.query.through && req.query.through !== 'end' ? decode(req.query.through) : null;
+  if (!valid(before) || req.query.through && req.query.through !== 'end' && !valid(through)) return res.status(400).json({ error: 'Invalid review cursor' });
+  const limit = Math.min(200, Math.max(1, Math.floor(Number(req.query.limit) || 200)));
+  const rows = db.prepare(`SELECT r.id, r.repository, r.pr_number, r.review_type, r.name, r.status, r.submitted_at, r.updated_at, r.local_head_sha,
+      json_extract(r.review_data, '$.event') AS submitted_event,
+      p.title, p.host, p.pr_data, MAX(COALESCE(julianday(p.last_accessed_at), 0), julianday(r.updated_at)) AS touched,
+      d.draft_count, d.has_summary, json_extract(r.review_progress, '$.reviewed.head') AS last_reviewed_head,
+      (SELECT COUNT(*) FROM analysis_runs a WHERE a.review_id = r.id AND a.parent_run_id IS NULL) AS ai_run_count,
+      (SELECT json_object('id', a.id, 'status', a.status, 'provider', a.provider, 'model', a.model, 'totalSuggestions', a.total_suggestions, 'completedAt', a.completed_at, 'startedAt', a.started_at, 'headSha', a.head_sha, 'levelOutcomes', json(a.level_outcomes)) FROM analysis_runs a WHERE a.review_id = r.id AND a.parent_run_id IS NULL ORDER BY julianday(a.started_at) DESC, a.rowid DESC LIMIT 1) AS latest_ai_run,
+      (SELECT activity_state FROM analysis_runs a WHERE a.review_id = r.id AND a.parent_run_id IS NULL ORDER BY julianday(a.started_at) DESC, a.rowid DESC LIMIT 1) AS activity
+    FROM reviews r LEFT JOIN pr_metadata p ON p.repository = r.repository COLLATE NOCASE AND p.pr_number = r.pr_number
+    JOIN (${getDraftStateQuery()}) d ON d.review_id = r.id
+    WHERE touched < ? OR (touched = ? AND r.id < ?) ORDER BY touched DESC, r.id DESC LIMIT ?`).all(before.at, before.at, before.id, limit + 1);
+  const hasMore = rows.length > limit;
+  const reviews = rows.slice(0, limit).map(row => {
+    const pr = safeParseJson(row.pr_data) || {};
+    const local = row.review_type === 'local';
+    const latestRun = safeParseJson(row.latest_ai_run);
+    const activityState = safeParseJson(row.activity);
+    return { id: row.id, reviewType: row.review_type, repository: local ? path.basename(row.repository) : row.repository,
+      number: row.pr_number, title: row.title || row.name || path.basename(row.repository),
+      headSha: local ? row.local_head_sha : pr.head_sha || null, host: row.host || null,
+      status: row.status || null, submittedAt: row.submitted_at || null, submittedEvent: row.submitted_event || null,
+      draftCount: row.draft_count, hasDraftSummary: Boolean(row.has_summary),
+      lastReviewedHead: row.last_reviewed_head || null,
+      aiRunCount: Number(row.ai_run_count || 0),
+      latestAiRun: latestRun ? { ...latestRun,
+        status: activityState?.status === 'partial' && latestRun.status === 'completed' ? 'partial' : latestRun.status,
+        stage: activityState?.stage || null,
+        requestedProvider: latestRun.provider, requestedModel: latestRun.model,
+        actualModels: actualModelsForRun({ activity_state: row.activity }) } : null,
+      updatedAt: row.updated_at, activity: activityState,
+      url: local ? `/local/${row.id}` : `/pr/${row.repository.split('/').map(encodeURIComponent).join('/')}/${row.pr_number}${row.host ? `?host=${encodeURIComponent(row.host)}` : ''}` };
+  });
+  const last = rows[Math.min(rows.length, limit) - 1];
+  // A refresh can walk to the previously loaded boundary, even if its last
+  // record was deleted or moved to the front. Each response remains bounded.
+  const covered = !hasMore || !!(through && last && (last.touched < through.at || last.touched === through.at && last.id <= through.id));
+  res.json({ reviews, hasMore, covered, next: hasMore ? Buffer.from(JSON.stringify({ at: last.touched, id: last.id })).toString('base64url') : null });
+});
+
+router.post('/api/reviews/resolve', async (req, res) => {
+  try {
+    const { owner, repo, number } = req.body || {};
+    const prNumber = Number(number);
+    if (!owner || !repo || !Number.isInteger(prNumber) || prNumber < 1) {
+      return res.status(400).json({ error: 'Valid owner, repo, and PR number required' });
+    }
+    const db = req.app.get('db');
+    const reviewRepo = new ReviewRepository(db);
+    const repository = normalizeRepository(owner, repo);
+    const { review } = await reviewRepo.getOrCreate({ prNumber, repository });
+    res.json({ reviewId: review.id, repository, prNumber });
+  } catch (error) {
+    submissionError(res, error);
+  }
+});
+
+router.get('/api/reviews/:reviewId/progress', validateReviewId, async (req, res) => {
+  try { res.json(await reviewProgress.getProgress(req.app.get('db'), req.reviewId)); }
+  catch (error) { submissionError(res, error); }
+});
+
+router.put('/api/reviews/:reviewId/progress', validateReviewId, async (req, res) => {
+  try {
+    res.json(await reviewProgress.updateProgress(req.app.get('db'), req.reviewId, req.body));
+    broadcastReviewEvent(req.reviewId, { type: 'review:progress_changed' }, { sourceClientId: req.get('X-Client-ID') });
+  } catch (error) { submissionError(res, error); }
+});
+
+router.get('/api/reviews/:reviewId/changes-since-reviewed', validateReviewId, async (req, res) => {
+  try { res.json(await reviewProgress.compareReviewed(req.app.get('db'), req.reviewId, req.query.token)); }
+  catch (error) { submissionError(res, error); }
+});
+
+async function submissionContext(req, recorded = null) {
+  const db = req.app.get('db');
+  const config = req.app.get('config') || {};
+  const review = req.review;
+  const associated = recorded || (review.review_type === 'local' ? safeParseJson(review.associated_pr) : null);
+  if (review.review_type === 'local' && !associated) return { db, config, reviewId: review.id };
+  const repository = associated?.repository || review.repository;
+  const [owner, repo] = repository.split('/');
+  const prNumber = associated?.number || review.pr_number;
+  const resolved = await resolveReviewBinding({ db, config, repository, prNumber,
+    recordedTarget: associated ? { host: associated.host === 'github.com' ? null : associated.host, recordedUrl: associated.url } : undefined,
+    fallbackToken: req.app.get('githubToken') });
+  return { db, config, reviewId: review.id, target: { owner, repo, prNumber },
+    client: resolved ? new GitHubClient(resolved.binding) : null };
+}
+
+function submissionError(res, error) {
+  const code = error.statusCode || error.status;
+  res.status(Number.isInteger(code) && code >= 400 && code <= 599 ? code : 503)
+    .json({ error: error.message, manifest: error.manifest, receipt: error.receipt });
+}
+
+router.get('/api/reviews/:reviewId/manifest', validateReviewId, async (req, res) => {
+  try {
+    const localOnly = req.query.local === 'true';
+    const context = localOnly ? { db: req.app.get('db'), config: req.app.get('config') || {}, reviewId: req.reviewId, localOnly } : await submissionContext(req);
+    res.json(await submission.buildSubmissionManifest({ ...context, mode: req.query.mode || 'submit' }));
+  } catch (error) { submissionError(res, error); }
+});
+
+router.post('/api/reviews/:reviewId/submit', validateReviewId, async (req, res) => {
+  try {
+    const context = await submissionContext(req);
+    const result = await submission.publishSubmission({ ...context, mode: req.body.mode || 'submit' }, req.body.digest);
+    res.status(['submitted', 'draft_saved'].includes(result.state) ? 200 : 409).json({ receipt: result });
+    broadcastReviewEvent(req.reviewId, { type: 'review:comments_changed' });
+  } catch (error) { submissionError(res, error); }
+});
+
+router.get('/api/reviews/:reviewId/submissions', validateReviewId, (req, res) => {
+  res.json({ receipts: submission.listReceipts(req.app.get('db'), req.reviewId) });
+});
+
+router.post('/api/reviews/:reviewId/submissions/:attemptId/reconcile', validateReviewId, async (req, res) => {
+  try {
+    const db = req.app.get('db');
+    const existing = submission.receipt(db, req.params.attemptId);
+    if (!existing || existing.reviewId !== req.reviewId) return res.status(404).json({ error: 'Submission receipt not found' });
+    let client;
+    if (existing.state !== 'submitted') {
+      const context = await submissionContext(req, existing.manifest.target);
+      if (!context.client) return res.status(401).json({ error: 'Authentication is unavailable; the receipt is preserved' });
+      client = context.client;
+    }
+    const result = await submission.reconcileSubmission({ db, client, attemptId: existing.id });
+    res.json({ receipt: result });
+    broadcastReviewEvent(req.reviewId, { type: 'review:comments_changed' });
+  } catch (error) { submissionError(res, error); }
+});
+
+router.put('/api/reviews/:reviewId/association', validateReviewId, async (req, res) => {
+  try {
+    if (req.review.review_type !== 'local') return res.status(400).json({ error: 'Only local reviews need a PR association' });
+    const db = req.app.get('db');
+    if (submission.listReceipts(db, req.reviewId).some(item => !['submitted', 'superseded'].includes(item.state))) return res.status(409).json({ error: 'Resolve this review’s submission receipt before changing its target' });
+    if (!Number.isInteger(req.body.expected_revision)) return res.status(428).json({ error: 'Expected draft revision required' });
+    let association = null;
+    if (req.body.url !== null) {
+      let url;
+      try { url = new URL(req.body.url); } catch { return res.status(400).json({ error: 'Use a valid pull-request URL' }); }
+      if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) return res.status(400).json({ error: 'Use a supported HTTP(S) pull-request URL without credentials' });
+      const parsed = new PRArgumentParser(req.app.get('config') || {}).parsePRUrl(url.href);
+      if (!parsed) return res.status(400).json({ error: 'Unsupported pull-request URL' });
+      association = { repository: `${parsed.owner}/${parsed.repo}`, number: parsed.number, host: parsed.host ?? null, url: url.href };
+      const context = await submissionContext(req, association);
+      if (!context.client) return res.status(401).json({ error: 'Authentication unavailable for the selected host' });
+      const pr = await context.client.fetchPullRequest(parsed.owner, parsed.repo, parsed.number);
+      association = { ...association, host: context.client.binding.host || null, url: pr.html_url };
+    }
+    const changed = db.prepare(`UPDATE reviews SET associated_pr = ?, draft_revision = draft_revision + 1, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND draft_revision = ? AND NOT EXISTS (
+        SELECT 1 FROM submission_attempts WHERE review_id = reviews.id AND state NOT IN ('submitted', 'superseded'))`)
+      .run(association ? JSON.stringify(association) : null, req.reviewId, req.body.expected_revision);
+    if (!changed.changes) return res.status(409).json({ error: 'The review changed while its target was being checked. Reload before associating it.' });
+    res.json({ association, draft: db.prepare('SELECT id, draft_body AS body, draft_event AS event, draft_revision AS revision FROM reviews WHERE id = ?').get(req.reviewId) });
+    broadcastReviewEvent(req.reviewId, { type: 'review:comments_changed' });
+  } catch (error) { submissionError(res, error); }
+});
+
+router.put('/api/reviews/:reviewId/comments/:id/anchor', validateReviewId, async (req, res) => {
+  try {
+    const context = await submissionContext(req);
+    const comment = await submission.reanchorDraft(context, { ...req.body, commentId: Number(req.params.id) });
+    res.json({ comment });
+    broadcastReviewEvent(req.reviewId, { type: 'review:comments_changed' }, { sourceClientId: req.get('X-Client-Id') });
+  } catch (error) { submissionError(res, error); }
+});
+
 
 /**
  * Resolve the worktree path and base_sha for a PR-mode review.
@@ -102,17 +288,23 @@ router.get('/api/reviews/:reviewId/comments', validateReviewId, async (req, res)
  */
 router.post('/api/reviews/:reviewId/comments', validateReviewId, async (req, res) => {
   try {
-    const { file, line_start, line_end, diff_position, side, commit_sha, body, parent_id, type, title } = req.body;
+    const { file, line_start, line_end, diff_position, side, commit_sha, body, parent_id, type, title, draft_key, included } = req.body;
 
-    if (!file || !body) {
+    if (typeof file !== 'string' || !file || typeof body !== 'string') {
       return res.status(400).json({
         error: 'Missing required fields: file, body'
       });
     }
 
-    // Validate body is not just whitespace
-    const trimmedBody = body.trim();
-    if (trimmedBody.length === 0) {
+    if (draft_key !== undefined && (typeof draft_key !== 'string' || !draft_key || draft_key.length > 128)) {
+      return res.status(400).json({ error: 'Invalid draft identity' });
+    }
+    if (included !== undefined && typeof included !== 'boolean') return res.status(400).json({ error: 'Inclusion must be a boolean' });
+    if (line_start != null && (!Number.isInteger(line_start) || line_start < 1) ||
+        line_end != null && (!Number.isInteger(line_end) || line_end < (line_start || 1))) {
+      return res.status(400).json({ error: 'Comment line range is invalid' });
+    }
+    if (!body.trim()) {
       return res.status(400).json({
         error: 'Comment body cannot be empty or whitespace only'
       });
@@ -133,7 +325,9 @@ router.post('/api/reviews/:reviewId/comments', validateReviewId, async (req, res
         diff_position,
         side,
         commit_sha,
-        body: trimmedBody,
+        body,
+        draft_key,
+        included,
         parent_id,
         type,
         title
@@ -143,7 +337,9 @@ router.post('/api/reviews/:reviewId/comments', validateReviewId, async (req, res
       commentId = await commentRepo.createFileComment({
         review_id: req.reviewId,
         file,
-        body: trimmedBody,
+        body,
+        draft_key,
+        included,
         commit_sha,
         type,
         title,
@@ -154,6 +350,7 @@ router.post('/api/reviews/:reviewId/comments', validateReviewId, async (req, res
     res.json({
       success: true,
       commentId,
+      comment: await commentRepo.getComment(commentId, 'user'),
       message: line_start ? 'Comment saved successfully' : 'File-level comment saved successfully'
     });
     broadcastReviewEvent(req.reviewId, { type: 'review:comments_changed' }, { sourceClientId: req.get('X-Client-Id') });
@@ -168,6 +365,7 @@ router.post('/api/reviews/:reviewId/comments', validateReviewId, async (req, res
       logger.warn(`[AutoContext] Failed: ${err.message}`);
     }
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, code: error.code, current: error.current });
     logger.error('Error creating comment:', error);
     res.status(500).json({
       error: error.message || 'Failed to create comment'
@@ -211,12 +409,17 @@ router.get('/api/reviews/:reviewId/comments/:id', validateReviewId, async (req, 
 router.put('/api/reviews/:reviewId/comments/:id', validateReviewId, async (req, res) => {
   try {
     const { id } = req.params;
-    const { body } = req.body;
+    const { body, included, expected_revision, draft_key } = req.body;
 
-    if (!body || !body.trim()) {
+    // An empty body is allowed only for an explicitly excluded draft: empty
+    // comments are optional and are skipped at submission.
+    if (body !== undefined && (typeof body !== 'string' || (!body.trim() && included !== false))) {
       return res.status(400).json({
-        error: 'Comment body cannot be empty'
+        error: 'Comment body cannot be empty unless the draft is excluded'
       });
+    }
+    if ((body === undefined && included === undefined) || (included !== undefined && typeof included !== 'boolean')) {
+      return res.status(400).json({ error: 'Provide comment text or a boolean inclusion choice' });
     }
 
     const db = req.app.get('db');
@@ -231,14 +434,16 @@ router.put('/api/reviews/:reviewId/comments/:id', validateReviewId, async (req, 
     }
 
     const commentRepo = new CommentRepository(db);
-    await commentRepo.updateComment(id, body);
+    const updated = await commentRepo.updateComment(id, { body, included, expected_revision, draft_key });
 
     res.json({
       success: true,
+      comment: updated,
       message: 'Comment updated successfully'
     });
     broadcastReviewEvent(req.reviewId, { type: 'review:comments_changed' }, { sourceClientId: req.get('X-Client-Id') });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, code: error.code, current: error.current });
     logger.error('Error updating comment:', error);
 
     if (error.message && error.message.includes('not found')) {
@@ -249,6 +454,47 @@ router.put('/api/reviews/:reviewId/comments/:id', validateReviewId, async (req, 
       error: error.message || 'Failed to update comment'
     });
   }
+});
+
+// Unlike dismissal, deletion clears local draft text and cannot be restored.
+// Keep the identity tombstone so a late create/save cannot resurrect it.
+router.delete('/api/reviews/:reviewId/comments/:id/draft', validateReviewId, (req, res) => {
+  const db = req.app.get('db');
+  const { expected_revision, draft_key } = req.body || {};
+  if (!Number.isInteger(expected_revision) || typeof draft_key !== 'string') return res.status(428).json({ error: 'Draft identity and expected revision required' });
+  try {
+    db.transaction(() => {
+      const current = db.prepare("SELECT * FROM comments WHERE id = ? AND review_id = ? AND source = 'user'").get(req.params.id, req.reviewId);
+      if (!current) throw Object.assign(new Error('Draft not found'), { statusCode: 404 });
+      const result = db.prepare(`UPDATE comments SET body = '', deleted_at = CURRENT_TIMESTAMP, included = 0, status = 'inactive'
+        WHERE id = ? AND draft_key = ? AND revision = ? AND deleted_at IS NULL AND status != 'submitted'`).run(current.id, draft_key, expected_revision);
+      if (!result.changes) throw new Error('Draft changed or is already submitted/deleted');
+      if (current.parent_id) db.prepare("UPDATE comments SET status = 'dismissed', adopted_as_id = NULL WHERE id = ? AND adopted_as_id = ?").run(current.parent_id, current.id);
+    })();
+    res.json({ success: true });
+    broadcastReviewEvent(req.reviewId, { type: 'review:comments_changed' }, { sourceClientId: req.get('X-Client-Id') });
+  } catch (error) {
+    res.status(error.statusCode || 409).json({ error: error.message, current: db.prepare('SELECT * FROM comments WHERE id = ? AND review_id = ?').get(req.params.id, req.reviewId) });
+  }
+});
+
+router.get('/api/reviews/:reviewId/draft', validateReviewId, (req, res) => {
+  res.json(req.app.get('db').prepare('SELECT id, draft_body AS body, draft_event AS event, draft_revision AS revision FROM reviews WHERE id = ?').get(req.reviewId));
+});
+
+router.put('/api/reviews/:reviewId/draft', validateReviewId, (req, res) => {
+  const { body, event, expected_revision } = req.body;
+  if (typeof body !== 'string' || !['COMMENT', 'APPROVE', 'REQUEST_CHANGES'].includes(event)) return res.status(400).json({ error: 'Invalid review body or decision' });
+  if (!Number.isInteger(expected_revision)) return res.status(428).json({ error: 'Expected draft revision required' });
+  const db = req.app.get('db');
+  const outcome = db.transaction(() => {
+    const result = db.prepare('UPDATE reviews SET draft_body = ?, draft_event = ? WHERE id = ? AND draft_revision = ?').run(body, event, req.reviewId, expected_revision);
+    const current = db.prepare('SELECT id, draft_body AS body, draft_event AS event, draft_revision AS revision FROM reviews WHERE id = ?').get(req.reviewId);
+    return { updated: result.changes > 0, current };
+  })();
+  if (!outcome.updated) return res.status(409).json({ error: 'Review body or decision changed in another editor', current: outcome.current });
+  res.json(outcome.current);
+  broadcastReviewEvent(req.reviewId, { type: 'review:comments_changed' }, { sourceClientId: req.get('X-Client-Id') });
 });
 
 /**
@@ -320,6 +566,7 @@ router.put('/api/reviews/:reviewId/comments/:id/restore', validateReviewId, asyn
       return res.status(404).json({ error: 'User comment not found' });
     }
 
+    if (comment.deleted_at) return res.status(410).json({ error: 'This draft was deleted, not dismissed' });
     if (comment.status !== 'inactive') {
       return res.status(400).json({ error: 'Comment is not dismissed' });
     }
@@ -560,6 +807,7 @@ router.get('/api/reviews/:reviewId/suggestions', validateReviewId, async (req, r
         source,
         author,
         ai_run_id,
+        COALESCE(commit_sha, (SELECT head_sha FROM analysis_runs WHERE id = comments.ai_run_id)) AS analyzed_head,
         ai_level,
         ai_confidence,
         file,
@@ -600,6 +848,10 @@ router.get('/api/reviews/:reviewId/suggestions', validateReviewId, async (req, r
     // Resolve format config once for all suggestions
     const config = req.app.get('config') || {};
     const formatConfig = resolveFormat(config.comment_format);
+    const revision = await queryOne(db, `SELECT CASE WHEN r.review_type = 'local' THEN r.local_head_sha
+      WHEN json_valid(p.pr_data) THEN json_extract(p.pr_data, '$.head_sha') END AS head
+      FROM reviews r LEFT JOIN pr_metadata p ON p.repository = r.repository COLLATE NOCASE AND p.pr_number = r.pr_number
+      WHERE r.id = ?`, [reviewId]);
 
     const suggestions = rows.map(row => {
       const formattedBody = formatComment({
@@ -612,6 +864,7 @@ router.get('/api/reviews/:reviewId/suggestions', validateReviewId, async (req, r
 
       return {
         ...row,
+        revision: reviewProgress.revisionState(row.analyzed_head, revision?.head),
         reasoning: safeParseJson(row.reasoning),
         formattedBody
       };
@@ -798,7 +1051,7 @@ router.post('/api/reviews/:reviewId/suggestions/:id/adopt', validateReviewId, as
 router.post('/api/reviews/:reviewId/suggestions/:id/edit', validateReviewId, async (req, res) => {
   try {
     const { id } = req.params;
-    const { editedText, action } = req.body;
+    const { editedText, action, draft } = req.body;
 
     if (action !== 'adopt_edited') {
       return res.status(400).json({
@@ -806,7 +1059,7 @@ router.post('/api/reviews/:reviewId/suggestions/:id/edit', validateReviewId, asy
       });
     }
 
-    if (!editedText || !editedText.trim()) {
+    if (typeof editedText !== 'string' || !editedText.trim()) {
       return res.status(400).json({
         error: 'Edited text cannot be empty'
       });
@@ -832,11 +1085,11 @@ router.post('/api/reviews/:reviewId/suggestions/:id/edit', validateReviewId, asy
     }
 
     // The user already edited the fully formatted text, so store it verbatim
-    const formattedBody = editedText.trim();
+    const formattedBody = editedText;
 
     // Atomically adopt: create user comment and update suggestion status in one transaction
     const userCommentId = await withTransaction(db, async () => {
-      const ucId = await commentRepo.adoptSuggestion(id, formattedBody);
+      const ucId = await commentRepo.adoptSuggestion(id, formattedBody, draft);
       await commentRepo.updateSuggestionStatus(id, 'adopted', ucId);
       return ucId;
     });
@@ -845,12 +1098,14 @@ router.post('/api/reviews/:reviewId/suggestions/:id/edit', validateReviewId, asy
       success: true,
       userCommentId,
       formattedBody,
+      comment: await commentRepo.getComment(userCommentId, 'user'),
       message: 'Suggestion edited and adopted as user comment'
     });
     broadcastReviewEvent(req.reviewId, { type: 'review:suggestions_changed' }, { sourceClientId: req.get('X-Client-Id') });
     broadcastReviewEvent(req.reviewId, { type: 'review:comments_changed' }, { sourceClientId: req.get('X-Client-Id') });
 
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, code: error.code, current: error.current });
     logger.error('Error editing suggestion:', error);
     res.status(500).json({
       error: error.message || 'Failed to edit suggestion'

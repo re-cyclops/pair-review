@@ -389,7 +389,7 @@ class CodexProvider extends AIProvider {
 
       // Register process for cancellation tracking if analysisId provided
       if (analysisId && registerProcess) {
-        registerProcess(analysisId, codex);
+        registerProcess(analysisId, codex, signal => killChildSafely(codex, { shell: this.useShell, signal }));
         logger.info(`${levelPrefix} Registered process ${pid} for analysis ${analysisId}`);
       }
 
