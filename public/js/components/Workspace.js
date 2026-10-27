@@ -42,6 +42,14 @@
       this.registerCommands();
       this.keyHandler = event => this.onKey(event);
       document.addEventListener('keydown', this.keyHandler, true);
+      // Shortcut chips live inside their buttons and stay hidden until a
+      // modifier is held (like macOS menu alternates). One class, app-wide.
+      const syncShortcutHints = event => {
+        document.documentElement.classList.toggle('show-keyboard-hints', Boolean(event.metaKey || event.ctrlKey || event.altKey));
+      };
+      document.addEventListener('keydown', syncShortcutHints, true);
+      document.addEventListener('keyup', syncShortcutHints, true);
+      window.addEventListener('blur', () => document.documentElement.classList.remove('show-keyboard-hints'));
       window.wsClient?.subscribe('index:analyses', message => {
         if (message.type === 'subscribed') { this.refresh().then(() => this.refresh()); return; }
         if (message.type !== 'activity' || message.run?.parentRunId) return;
@@ -161,6 +169,8 @@
         event.stopImmediatePropagation();
         this.showPalette();
       } else if (document.querySelector('.workspace-dialog[open]')) {
+        // The review dialog owns Cmd/Ctrl+Enter (submit) and its own keys.
+        if (event.target?.closest?.('#review-modal')) return;
         // Native cancellation belongs to the topmost dialog. Do not close an
         // underlying editor or bypass its cancel/close lifecycle.
         if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {

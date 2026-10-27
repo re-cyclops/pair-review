@@ -57,6 +57,25 @@ class KeyboardShortcuts {
         this.options.onPrevSuggestion();
       }
     });
+
+    // Review flow
+    this.registerShortcut(['s'], 'Submit review…', () => {
+      if (this.options.onSubmitReview) {
+        this.options.onSubmitReview();
+      }
+    });
+
+    this.registerShortcut(['a'], 'Analyze…', () => {
+      if (this.options.onAnalyze) {
+        this.options.onAnalyze();
+      }
+    });
+
+    this.registerShortcut(['o'], 'Show / hide outdated comments', () => {
+      if (this.options.onToggleOutdated) {
+        this.options.onToggleOutdated();
+      }
+    });
   }
 
   /**
@@ -141,6 +160,7 @@ class KeyboardShortcuts {
   renderShortcutsList() {
     const groups = {
       navigation: { title: 'Navigation', shortcuts: [] },
+      review: { title: 'Review', shortcuts: [] },
       comments: { title: 'Comments', shortcuts: [] },
       panels: { title: 'Panels', shortcuts: [] },
       general: { title: 'General', shortcuts: [] }
@@ -153,6 +173,8 @@ class KeyboardShortcuts {
 
       if (keys.includes('j') || keys.includes('k')) {
         groups.navigation.shortcuts.push(item);
+      } else if (['s', 'a', 'o'].includes(keys[0])) {
+        groups.review.shortcuts.push(item);
       } else if (keys[0] === 'c') {
         groups.comments.shortcuts.push(item);
       } else if (keys[0] === 'p') {
@@ -167,6 +189,19 @@ class KeyboardShortcuts {
         description: 'Find a review or action'
       });
     }
+    // Modifier shortcuts are handled by the review dialog and comment
+    // editors themselves; listed here so they are discoverable in one place.
+    const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
+    const mod = isMac ? '⌘' : 'Ctrl';
+    const alt = isMac ? '⌥' : 'Alt';
+    groups.review.shortcuts.push(
+      { keys: [`${mod}⏎`], description: 'Submit review (review dialog) · Save comment (comment editor)' },
+      { keys: [`${mod}⇧⏎`], description: 'Prepare exact final preview only (review dialog)' },
+      { keys: [`${mod}S`], description: 'Save all drafts (review dialog)' },
+      { keys: [`${alt}1–3`], description: 'Decision: Approve / Comment / Request changes (review dialog)' },
+      { keys: [`${alt}↑↓`], description: 'Move between summary and draft editors (review dialog)' },
+      { keys: ['Esc'], description: 'Close dialog · Cancel comment edit' }
+    );
 
     let html = '';
 
@@ -613,8 +648,10 @@ class KeyboardShortcuts {
       align-items: center;
       justify-content: center;
       min-width: 24px;
-      height: 24px;
-      padding: 0 8px;
+      min-height: 24px;
+      padding: 1px 8px;
+      white-space: nowrap;
+      flex-shrink: 0;
       background: var(--color-bg-primary, #ffffff);
       border: 1px solid var(--color-border-default, #d0d7de);
       border-radius: 4px;

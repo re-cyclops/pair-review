@@ -65,6 +65,36 @@ test('retires only published editors while keeping excluded text local', async (
     .toEqual({ status: 'active', included: 0, body: 'Unfinished alternative' });
 });
 
+test('treats a cleared draft as optional and submits the rest with Cmd+Enter', async ({ page, testServer }) => {
+  await page.goto(url);
+  const create = async (body, included) => {
+    const response = await page.request.post('/api/reviews/1/comments', { data: {
+      file: 'src/utils.js', body, included, commit_sha: testServer.reviewHost.state.head
+    } });
+    expect(response.ok()).toBe(true);
+    return (await response.json()).commentId;
+  };
+  const selected = await create('Keep this comment', true);
+  const cleared = await create('Clear me instead of deleting', true);
+  await openReviewAuthoring(page);
+  const clearedBox = page.getByRole('textbox', { name: `Draft ${cleared} exact Markdown`, exact: true });
+  await clearedBox.fill('');
+  const card = page.locator(`[data-draft-id="${cleared}"]`);
+  await expect(card).toHaveAttribute('data-empty', 'true');
+  await expect(card.getByText('Empty — skipped')).toBeVisible();
+  const keepCard = page.locator(`[data-draft-id="${selected}"]`);
+  await expect(keepCard.getByText('Empty — skipped')).toBeHidden();
+  await expect(keepCard).toHaveAttribute('data-empty', 'false');
+  await expect(page.getByText(/Save failed/)).toHaveCount(0);
+  await expect.poll(() => testServer.db.prepare('SELECT body, included FROM comments WHERE id = ?').get(cleared))
+    .toEqual({ body: '', included: 0 });
+  await page.locator('#review-decision').selectOption('APPROVE');
+  await page.getByRole('textbox', { name: `Draft ${selected} exact Markdown`, exact: true }).focus();
+  await page.keyboard.press('Meta+Enter');
+  await expect.poll(() => testServer.db.prepare('SELECT state FROM submission_attempts').all()).toEqual([{ state: 'submitted' }]);
+  expect([...testServer.reviewHost.state.reviews.values()][0].comments.map(comment => comment.body)).toEqual(['Keep this comment']);
+});
+
 test('blocks an empty comment-only review but permits an explicitly confirmed empty approval', async ({ page, testServer }) => {
   await page.goto(url);
   await openReviewAuthoring(page);

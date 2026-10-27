@@ -18,6 +18,8 @@
   --workspace-good-soft: rgba(26, 127, 55, 0.09);
   --workspace-error: #cf222e;
   --workspace-error-soft: rgba(207, 34, 46, 0.09);
+  --workspace-warn: #9a6700;
+  --workspace-warn-soft: rgba(212, 167, 44, 0.16);
 }
 html[data-theme="light"] { color-scheme: light; }
 html[data-theme="dark"] { color-scheme: dark; }
@@ -38,6 +40,8 @@ html[data-theme="dark"] { color-scheme: dark; }
   --workspace-good-soft: rgba(63, 185, 80, 0.14);
   --workspace-error: #f85149;
   --workspace-error-soft: rgba(248, 81, 73, 0.14);
+  --workspace-warn: #e3b341;
+  --workspace-warn-soft: rgba(227, 179, 65, 0.16);
 }
 @keyframes workspace-dialog-enter {
   from { opacity: 0; transform: translateY(8px) scale(0.985); }
@@ -410,7 +414,7 @@ html[data-theme="dark"] { color-scheme: dark; }
 .workspace-decision-card.active[data-decision="REQUEST_CHANGES"] strong { color: var(--workspace-error); }
 .workspace-submit-primary {
   border-radius: 999px !important;
-  padding: 8px 20px !important;
+  padding: 8px 18px !important;
   min-height: 38px;
   background: var(--workspace-accent) !important;
   border-color: var(--workspace-accent) !important;
@@ -424,7 +428,7 @@ html[data-theme="dark"] { color-scheme: dark; }
 .workspace-submit-primary:active:not(:disabled) { transform: scale(0.98); }
 .workspace-btn-secondary, .workspace-review-actions button:not(.workspace-submit-primary) {
   border-radius: 999px;
-  padding: 6px 14px;
+  padding: 6px 12px;
   min-height: 34px;
   background: var(--workspace-surface-subtle);
   border-color: transparent;
@@ -437,17 +441,109 @@ html[data-theme="dark"] { color-scheme: dark; }
   border-color: transparent;
   color: var(--workspace-text);
 }
+/* Escape-hatch action: text weight only, pushed to the trailing edge so the
+   bar reads primary → secondary → leave. */
+.workspace-review-actions button.workspace-btn-ghost { background: transparent; padding-inline: 8px; margin-left: auto; }
+/* Final publish: same pill language as Submit; disabled stays legible and
+   explains itself through the unchecked confirmation above it. */
+.workspace-review button.workspace-publish {
+  justify-self: start;
+  min-height: 38px;
+  padding: 8px 18px;
+  border-radius: 999px;
+  border: 1px solid var(--workspace-accent);
+  background: var(--workspace-accent);
+  color: var(--workspace-on-accent);
+  font: 600 13px/1.3 var(--workspace-font);
+}
+.workspace-review button.workspace-publish:hover:not(:disabled) { background: var(--workspace-accent-hover); border-color: var(--workspace-accent-hover); }
+.workspace-review button.workspace-publish:disabled {
+  opacity: 1;
+  background: var(--workspace-surface);
+  border: 1px dashed var(--workspace-border);
+  color: var(--workspace-muted);
+}
 .workspace-review-draft {
   display: grid;
-  gap: 10px;
-  padding: 14px 16px;
+  gap: 8px;
+  padding: 12px 14px;
   border: 1px solid var(--workspace-bezel-ring); /* taste-skill-ignore */
   border-radius: 12px;
   background: var(--workspace-surface);
   box-shadow: inset 0 1px 0 var(--workspace-inset-highlight); /* taste-skill-ignore */
   min-width: 0;
 }
+/* Editors hug their content (2 lines minimum) instead of a fixed 4-row box;
+   browsers without field-sizing keep the rows attribute. */
+@supports (field-sizing: content) { .workspace-review textarea { resize: none; } }
+.workspace-review textarea { field-sizing: content; min-height: 44px; max-height: 240px; }
+.workspace-review-draft-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.workspace-review-draft-tools > button { flex: 0 0 auto; color: var(--workspace-muted); background: transparent; border-color: transparent; min-height: 28px; padding: 2px 6px; font-size: 13px; }
+.workspace-review-draft-tools > button:hover:not(:disabled) { color: var(--workspace-error); background: var(--workspace-error-soft); }
+.workspace-review-draft h4 .workspace-review-provenance { margin-left: auto; font-size: 12px; font-weight: 400; }
+.workspace-review-append-ai { justify-self: start; }
+.workspace-review-note { font-size: 13px; color: var(--workspace-muted); }
+.workspace-review-note[data-state="success"] { color: var(--workspace-good); font-weight: 500; }
+.workspace-review-note[data-state="warning"] { color: var(--workspace-warn); font-weight: 500; }
+.workspace-review-final { scroll-margin-top: 12px; }
+.workspace-review-final-summary { font-weight: 600; color: var(--workspace-text); }
+.workspace-submit-primary.workspace-submit-superseded {
+  background: var(--workspace-surface-subtle) !important;
+  border-color: transparent !important;
+  color: var(--workspace-muted) !important;
+  box-shadow: none;
+  font-weight: 500 !important;
+}
+.review-draft-state:has(> .review-draft-status:empty):has(> .review-draft-resolve[hidden]) { display: none; }
 .workspace-review-draft[data-included="false"] { border-style: dashed; opacity: 0.72; }
+.workspace-review-draft[data-empty="true"] { border-style: dashed; opacity: 1; background: var(--workspace-surface-subtle); }
+.workspace-review-draft[data-empty="true"] textarea { color: var(--workspace-muted); }
+.workspace-review-draft h4 { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.workspace-review-empty-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--workspace-surface-subtle);
+  color: var(--workspace-muted);
+  border: 1px dashed var(--workspace-border);
+  font: 600 11px/1.5 var(--workspace-font);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.workspace-review-empty-badge[hidden] { display: none; }
+/* Programmatic focus for screen-reader announcement must not paint the
+   browser focus ring around the whole alert box. Scroll headroom keeps the
+   alert fully inside the dialog scrollport after scrollIntoView. */
+.workspace-review-error { scroll-margin-top: 12px; }
+.workspace-review-error:focus { outline: none; }
+.workspace-review-hint { font-size: 13px; line-height: 1.45; }
+.workspace-decision-kbd { position: absolute; top: 10px; right: 10px; margin-left: 0; }
+/* Shortcut chips: one home (inside their button), hidden until a modifier
+   key is held anywhere in the app. */
+.workspace-kbd-hint { display: none; }
+html.show-keyboard-hints .workspace-kbd-hint { display: inline-flex; }
+.workspace-review-actions button { display: inline-flex; align-items: center; justify-content: center; }
+.workspace-review-actions .workspace-kbd-hint { margin-left: 8px; }
+.workspace-submit-primary .workspace-kbd-hint { background: rgba(255, 255, 255, 0.16); color: inherit; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35); }
+.workspace-submit-primary.workspace-submit-superseded .workspace-kbd-hint { background: var(--workspace-surface); color: var(--workspace-muted); box-shadow: inset 0 1px 0 var(--workspace-inset-highlight), 0 0 0 1px var(--workspace-bezel-ring); }
+.workspace-review-actions--sticky {
+  position: sticky;
+  bottom: -22px;
+  z-index: 2;
+  margin-inline: -24px;
+  padding: 12px 24px 14px !important;
+  background: var(--workspace-surface);
+  box-shadow: 0 -1px 0 var(--workspace-bezel-ring), 0 -12px 24px -18px rgba(15, 23, 42, 0.35); /* taste-skill-ignore */
+}
+.workspace-review-error:not(:empty) {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--workspace-error-soft);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.review-draft-status[data-state="error"] { color: var(--workspace-error); font-weight: 500; }
 .workspace-review label:has(input[type="checkbox"]) { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; }
 .workspace-review input[type="checkbox"] { flex: 0 0 auto; width: 16px; height: 16px; accent-color: var(--workspace-accent); }
 .workspace-review :is(.workspace-review-anchor, .workspace-review-association, .workspace-review-final, .workspace-review-receipts) { display: grid; gap: 10px; min-width: 0; }
@@ -465,7 +561,12 @@ html[data-theme="dark"] { color-scheme: dark; }
 .workspace-review details { padding-block: 4px; }
 .workspace-review summary { cursor: pointer; padding-block: 4px; overflow-wrap: anywhere; color: var(--workspace-muted); font-size: 13px; font-weight: 500; }
 .workspace-review pre { max-height: 300px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
-@media (max-width: 768px) { .workspace-review { width: calc(100% - 16px); padding: 16px; } .workspace-review-draft { padding: 12px; } .workspace-decision-cards { grid-template-columns: 1fr; } }
+@media (max-width: 768px) { .workspace-review { width: calc(100% - 16px); padding: 16px; } .workspace-review-draft { padding: 12px; } .workspace-decision-cards { grid-template-columns: 1fr; } .workspace-review-actions--sticky { bottom: -16px; margin-inline: -16px; padding-inline: 16px !important; } }
+@media (max-width: 560px) {
+  .workspace-review-actions--sticky > button { flex: 1 1 42%; }
+  .workspace-review-actions--sticky > .workspace-submit-primary { flex-basis: 100%; }
+  .workspace-review-actions button.workspace-btn-ghost { margin-left: 0; flex-basis: 100%; }
+}
 .workspace-export-text { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 50dvh; overflow: auto; padding-block: 16px; }
 .workspace-review a { color: var(--workspace-accent); }
 .workspace-review-draft > button { justify-self: start; color: var(--workspace-muted); background: transparent; border-color: transparent; min-height: 28px; padding: 2px 6px; font-size: 13px; }

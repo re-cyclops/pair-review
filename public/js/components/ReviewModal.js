@@ -25,6 +25,85 @@ class ReviewModal {
 
   get isVisible() { return Boolean(this.modal?.open); }
 
+  static get isMac() { return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || ''); }
+  static get modLabel() { return ReviewModal.isMac ? '⌘' : 'Ctrl'; }
+  static get altLabel() { return ReviewModal.isMac ? '⌥' : 'Alt'; }
+
+  onKeyDown(event) {
+    if (event.isComposing) return;
+    const mod = event.metaKey || event.ctrlKey;
+    if (mod && event.key === 'Enter') {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.shiftKey) {
+        if (this.prepareButton && !this.prepareButton.disabled) this.prepareButton.click();
+      } else if (this.publishButton && !this.publishButton.disabled && this.confirm?.checked) {
+        // Deliberate invariant: an armed exact final preview publishes only
+        // via its Publish button, never via a global submit chord. Move
+        // focus to that button so the final action stays explicit.
+        this.publishButton.focus();
+      } else if (this.quickSubmitButton && !this.quickSubmitButton.disabled) {
+        this.quickSubmitButton.click();
+      }
+      return;
+    }
+    if (mod && (event.key === 's' || event.key === 'S')) {
+      event.preventDefault();
+      window.reviewDrafts.flushAll(this.reviewId)
+        .then(() => { if (this.note && this.modal?.open) this.note.textContent = 'All drafts saved locally. Nothing has been published.'; })
+        .catch(error => this.showError(error));
+      return;
+    }
+    if (event.altKey && !mod && /^Digit[1-3]$/.test(event.code || '')) {
+      const value = { Digit1: 'APPROVE', Digit2: 'COMMENT', Digit3: 'REQUEST_CHANGES' }[event.code];
+      const option = this.decision?.querySelector(`option[value="${value}"]`);
+      if (this.decision && option && !option.disabled) {
+        event.preventDefault();
+        this.decision.value = value;
+        this.decision.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      return;
+    }
+    if (event.altKey && !mod && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+      const editors = [this.bodyInput, ...(this.cards ? [...this.cards.values()].map(view => view.textarea) : [])].filter(Boolean);
+      if (editors.length < 2) return;
+      const delta = event.key === 'ArrowDown' ? 1 : -1;
+      const current = editors.indexOf(document.activeElement);
+      const next = editors[(current + delta + editors.length) % editors.length];
+      event.preventDefault();
+      next.scrollIntoView({ behavior: 'instant', block: 'center' });
+      next.focus({ preventScroll: true });
+      next.setSelectionRange(next.value.length, next.value.length);
+    }
+  }
+
+  selectedCount() {
+    if (!this.cards) return 0;
+    let count = 0;
+    for (const view of this.cards.values()) {
+      if (view.include.checked && view.textarea.value.trim()) count++;
+    }
+    return count;
+  }
+
+  updateCount() {
+    if (!this.count || !this.cards) return;
+    let empty = 0;
+    for (const view of this.cards.values()) if (!view.textarea.value.trim()) empty++;
+    const selected = this.selectedCount();
+    this.count.textContent = `${selected} selected saved comment${selected === 1 ? '' : 's'}${empty ? ` · ${empty} empty (skipped)` : ''}`; // taste-skill-ignore
+    this.updateSummaryHint?.();
+  }
+
+  refreshDraftCard(view) {
+    const empty = !view.textarea.value.trim();
+    view.card.dataset.empty = String(empty);
+    if (view.emptyBadge) view.emptyBadge.hidden = !empty;
+    view.include.disabled = empty;
+    if (empty) view.include.checked = false;
+    this.updateCount();
+  }
+
   static node(tag, text, attributes = {}) {
     const element = document.createElement(tag);
     if (text !== undefined && text !== null) element.textContent = text;
@@ -83,10 +162,14 @@ class ReviewModal {
     this.reviewId = window.prManager.currentPR.id;
     this.capabilities = null;
     if (!this.modal) {
-      this.modal = window.reviewWorkspace.makeDialog('review-modal', 'Review authoring and final preview');
+      this.modal = window.reviewWorkspace.makeDialog('review-modal', 'Submit review');
       this.modal.classList.add('workspace-review');
       this.content = ReviewModal.node('div', null, { class: 'workspace-review-content' });
       this.modal.append(this.content);
+      this.modal.addEventListener('keydown', event => this.onKeyDown(event));
+      this.modal.addEventListener('cancel', event => {
+        if (this.isSubmitting || this.isQuickSubmitting) event.preventDefault();
+      });
       this.modal.addEventListener('close', () => {
         this.generation++;
         for (const textarea of this.modal.querySelectorAll('textarea[data-draft-key]')) window.reviewDrafts.close(textarea);
@@ -94,10 +177,11 @@ class ReviewModal {
     }
     this.content.replaceChildren();
     this.manifest = null;
-    this.note = ReviewModal.node('p', 'Loading saved local drafts…', { role: 'status' });
+    this.note = ReviewModal.node('p', 'Loading saved local drafts…', { role: 'status', class: 'workspace-review-note' });
     this.error = ReviewModal.node('p', '', { role: 'alert', class: 'workspace-review-error' });
     this.content.append(this.note, this.error);
     window.reviewWorkspace.open(this.modal);
+    this.focusOnLoad = true;
     await this.load();
   }
 
@@ -143,7 +227,7 @@ class ReviewModal {
     const node = ReviewModal.node;
     this.authoring = node('fieldset', null, { class: 'workspace-review-authoring' });
     this.authoring.disabled = this.isSubmitting || this.isQuickSubmitting;
-    this.authoring.append(node('legend', 'Submit review'));
+    this.authoring.append(node('legend', 'Your review', { class: 'workspace-sr-only' }));
     const decisions = node('label', 'Decision ', { for: 'review-decision', class: 'workspace-sr-only' });
     this.decision = node('select', null, { id: 'review-decision', name: 'review-decision' });
     for (const [value, text] of [['COMMENT', 'Comment only'], ['APPROVE', 'Approve'], ['APPROVE_WITH_COMMENT', 'Approve with comment'], ['REQUEST_CHANGES', 'Request changes']]) {
@@ -154,13 +238,13 @@ class ReviewModal {
     decisions.append(this.decision);
     this.decisionCards = node('div', null, { class: 'workspace-decision-cards', role: 'group', 'aria-label': 'Review decision' });
     this.decisionCardButtons = new Map();
-    for (const [value, titleText, descText] of [
-      ['APPROVE', 'Approve', 'Approve merging these changes'],
-      ['COMMENT', 'Comment', 'Submit feedback without explicit approval'],
-      ['REQUEST_CHANGES', 'Request changes', 'Changes must be addressed before merge']
-    ]) {
-      const cardBtn = node('button', null, { type: 'button', class: 'workspace-decision-card', 'data-decision': value, 'aria-pressed': 'false' });
-      cardBtn.append(node('strong', titleText), node('span', descText));
+    for (const [index, [value, titleText, descText]] of [
+      ['APPROVE', 'Approve', 'Approve merging'],
+      ['COMMENT', 'Comment', 'Feedback, no approval'],
+      ['REQUEST_CHANGES', 'Request changes', 'Must fix before merge']
+    ].entries()) {
+      const cardBtn = node('button', null, { type: 'button', class: 'workspace-decision-card', 'data-decision': value, 'aria-pressed': 'false', 'aria-keyshortcuts': `Alt+${index + 1}`, title: `${titleText} (${ReviewModal.altLabel}${index + 1})` });
+      cardBtn.append(node('strong', titleText), node('span', descText), node('kbd', `${ReviewModal.altLabel}${index + 1}`, { class: 'workspace-kbd workspace-kbd-hint workspace-decision-kbd', 'aria-hidden': 'true' }));
       cardBtn.addEventListener('click', () => {
         if (cardBtn.disabled) return;
         this.decision.value = value;
@@ -195,7 +279,7 @@ class ReviewModal {
         const action = { APPROVE: 'approval', COMMENT: 'comment review', REQUEST_CHANGES: 'change request' }[current] || 'review';
         const preparing = this.isQuickSubmitting || this.isPreparing;
         this.quickSubmitButton.disabled = this.isSubmitting || preparing || this.cleanupPending;
-        this.quickSubmitButton.textContent = this.cleanupPending ? 'Review submitted' : this.isSubmitting ? 'Publishing review\u2026' : preparing ? `Preparing ${action}\u2026` : `Submit ${action}`;
+        this.setQuickLabel?.(this.cleanupPending ? 'Review submitted' : this.isSubmitting ? 'Publishing review\u2026' : preparing ? `Preparing ${action}\u2026` : `Submit ${action}`, !this.cleanupPending && !this.isSubmitting && !preparing);
         if (this.isSubmitting || preparing) {
           this.quickSubmitButton.dataset.loading = 'true';
           this.quickSubmitButton.setAttribute('aria-busy', 'true');
@@ -205,14 +289,29 @@ class ReviewModal {
         }
         this.quickSubmitButton.dataset.decision = current;
       }
+      this.updateSummaryHint?.();
+    };
+    this.updateSummaryHint = () => {
+      if (!this.summaryHint) return;
+      const current = this.decision.value === 'APPROVE_WITH_COMMENT' ? 'APPROVE' : this.decision.value;
+      if (current === 'APPROVE') {
+        this.summaryHint.textContent = 'Optional. An approval can be submitted with no summary and no comments.';
+      } else if (this.selectedCount() > 0) {
+        this.summaryHint.textContent = 'Optional. Your included comments publish with or without a summary.';
+      } else {
+        this.summaryHint.textContent = 'Add a summary or include a comment: this decision needs content to publish.';
+      }
     };
     this.capabilityStatus = node('p', 'Checking host identity…', { class: 'workspace-muted' });
     this.authoring.append(this.decisionCards, decisions, this.capabilityStatus);
-    const label = node('label', 'Review summary (optional for approval)', { for: 'review-body-modal' });
-    this.bodyInput = node('textarea', null, { id: 'review-body-modal', rows: '4', spellcheck: 'true', placeholder: 'Leave a summary comment…' });
-    this.authoring.append(label, this.bodyInput);
+    const label = node('label', 'Review summary (optional)', { for: 'review-body-modal' });
+    this.bodyInput = node('textarea', null, { id: 'review-body-modal', rows: '3', spellcheck: 'true', placeholder: 'Optional summary — leave blank to submit without one…' }); // taste-skill-ignore
+    this.summaryHint = node('p', '', { class: 'workspace-muted workspace-review-hint' });
+    this.authoring.append(label, this.bodyInput, this.summaryHint);
     const summaryReady = window.reviewDrafts.bindSummary(this.bodyInput, this.savedSummary);
-    this.authoring.append(this.button('Append AI summary to review body', () => this.appendAISummary()));
+    const appendAiButton = this.button('Append AI summary to review body', () => this.appendAISummary());
+    appendAiButton.classList.add('workspace-btn-secondary', 'workspace-review-append-ai');
+    this.authoring.append(appendAiButton);
     this.decision.addEventListener('change', async () => {
       this.syncDecisionCards();
       try {
@@ -245,17 +344,30 @@ class ReviewModal {
       const card = node('article', null, { class: 'workspace-review-draft', 'data-draft-id': draft.id });
       const location = draft.wire.isFileLevel ? 'file' : `${draft.wire.side} ${draft.wire.start_line ? `${draft.wire.start_line}–` : ''}${draft.wire.line}`;
       const provenance = node('p', `Draft ${draft.id} · revision ${draft.revision}`, { class: 'workspace-review-provenance' });
-      card.append(node('h4', `${draft.wire.path} · ${location}`), provenance);
+      const emptyBadge = node('span', 'Empty — skipped', { class: 'workspace-review-empty-badge' }); // taste-skill-ignore
+      emptyBadge.hidden = Boolean((draft.body || '').trim());
+      emptyBadge.title = 'Empty comments are optional: this draft is excluded and will not be published.';
+      const heading = node('h4', `${draft.wire.path} · ${location}`);
+      heading.append(emptyBadge, provenance);
+      card.append(heading);
       const includeLabel = node('label', 'Include in submission ');
       const include = node('input', null, { type: 'checkbox', 'aria-label': `Include draft ${draft.id} in submission` });
       include.checked = draft.included;
       includeLabel.prepend(include);
-      const textarea = node('textarea', null, { rows: '4', 'aria-label': `Draft ${draft.id} exact Markdown` });
-      card.append(includeLabel, textarea);
+      const tools = node('div', null, { class: 'workspace-review-draft-tools' });
+      tools.append(includeLabel);
+      const textarea = node('textarea', null, { rows: '3', 'aria-label': `Draft ${draft.id} exact Markdown`, placeholder: 'Optional — leave empty to skip this comment' }); // taste-skill-ignore
+      card.append(tools, textarea);
+      const view = { card, textarea, include, emptyBadge, provenance };
+      textarea.addEventListener('input', () => this.refreshDraftCard(view));
       this.authoring.append(card);
       window.reviewDrafts.bind(textarea, { comment, mode: comment.is_file_level ? 'file-edit' : 'edit' });
-      bindings.push(textarea.draftReady.then(entry => { if (entry) include.checked = entry.included; }));
+      bindings.push(textarea.draftReady.then(entry => {
+        if (entry) include.checked = entry.included;
+        this.refreshDraftCard(view);
+      }));
       include.addEventListener('change', async () => {
+        this.updateCount();
         try { await window.reviewDrafts.setIncluded(comment, include.checked); }
         catch (error) { this.showError(error); }
       });
@@ -276,8 +388,10 @@ class ReviewModal {
         await this.load();
       });
       deletion.append(cancelDeletion, confirmDeletion);
-      card.append(this.button('Delete this local draft…', () => { deletion.hidden = false; cancelDeletion.focus(); }), deletion);
-      this.cards.set(draft.key, { card, textarea, include, anchorStatus, provenance });
+      tools.append(this.button('Delete this local draft…', () => { deletion.hidden = false; cancelDeletion.focus(); }));
+      card.append(deletion);
+      view.anchorStatus = anchorStatus;
+      this.cards.set(draft.key, view);
     }
     this.mode = node('select', null, { id: 'review-publication-mode' });
     this.mode.append(node('option', 'Publish completed review', { value: 'submit' }), node('option', 'Save pending review on host', { value: 'draft' }));
@@ -285,15 +399,29 @@ class ReviewModal {
     modeLabel.append(this.mode);
     this.mode.addEventListener('change', () => this.invalidate('Host action changed. Prepare a new final preview.'));
     this.authoring.append(modeLabel);
-    this.actions = node('div', null, { class: 'workspace-review-actions' });
+    this.actions = node('div', null, { class: 'workspace-review-actions workspace-review-actions--sticky' });
     this.quickSubmitButton = this.button('Submit review', () => this.quickSubmit());
     this.quickSubmitButton.classList.add('btn', 'btn-primary', 'workspace-submit-primary');
+    this.quickSubmitButton.setAttribute('aria-keyshortcuts', 'Meta+Enter Control+Enter');
+    this.quickSubmitButton.title = `Submit review (${ReviewModal.modLabel}⏎)`;
+    // One home for shortcut chips: inside the button they act on, hidden
+    // until a modifier key is held (html.show-keyboard-hints).
+    const kbdChip = text => node('kbd', text, { class: 'workspace-kbd workspace-kbd-hint', 'aria-hidden': 'true' });
+    this.setQuickLabel = (text, withChip = true) => {
+      const children = [document.createTextNode(text)];
+      if (withChip) children.push(kbdChip(`${ReviewModal.modLabel}⏎`));
+      this.quickSubmitButton.replaceChildren(...children);
+    };
+    this.setQuickLabel('Submit review');
     this.prepareButton = this.button('Prepare exact final preview', () => this.prepare());
     this.prepareButton.classList.add('workspace-btn-secondary');
+    this.prepareButton.setAttribute('aria-keyshortcuts', 'Meta+Shift+Enter Control+Shift+Enter');
+    this.prepareButton.title = `Preview without publishing (${ReviewModal.modLabel}⇧⏎)`;
+    this.prepareButton.append(kbdChip(`${ReviewModal.modLabel}⇧⏎`));
     this.refreshButton = this.button('Reload saved drafts', async () => { await window.reviewDrafts.flushAll(this.reviewId); this.invalidate('Saved drafts reloaded.'); await this.load(); });
     this.refreshButton.classList.add('workspace-btn-secondary');
     const skipButton = this.button('Skip — keep drafts local', () => this.modal.close()); // taste-skill-ignore
-    skipButton.classList.add('workspace-btn-secondary');
+    skipButton.classList.add('workspace-btn-secondary', 'workspace-btn-ghost');
     this.quickSubmitButton.disabled = this.isSubmitting || this.isQuickSubmitting;
     this.prepareButton.disabled = this.isSubmitting || this.isQuickSubmitting;
     this.refreshButton.disabled = this.isSubmitting || this.isQuickSubmitting;
@@ -309,6 +437,11 @@ class ReviewModal {
     this.decision.value = entry.event === 'APPROVE' && (entry.body || manifest.count) ? 'APPROVE_WITH_COMMENT' : entry.event;
     this.syncDecisionCards?.();
     this.invalidate();
+    if (this.focusOnLoad) {
+      this.focusOnLoad = false;
+      this.bodyInput.focus({ preventScroll: true });
+      this.bodyInput.setSelectionRange(this.bodyInput.value.length, this.bodyInput.value.length);
+    }
   }
 
   applyCapabilities(manifest) {
@@ -330,10 +463,11 @@ class ReviewModal {
   invalidate(message) {
     this.version++;
     this.manifest = null;
+    this.quickSubmitButton?.classList.remove('workspace-submit-superseded');
     if (this.confirm) { this.confirm.checked = false; this.confirm.disabled = true; }
     if (this.publishButton) this.publishButton.disabled = true;
     if (message && this.note && !this.isSubmitting) this.note.textContent = message;
-    if (message && this.count && !this.isSubmitting) this.count.textContent = 'Selection changed — prepare to confirm the saved count'; // taste-skill-ignore
+    if (!this.isSubmitting) this.updateCount?.();
     const heading = this.finalSection?.querySelector('h3');
     if (heading) heading.textContent = 'Previous preview — confirmation cleared'; // taste-skill-ignore
   }
@@ -344,7 +478,7 @@ class ReviewModal {
       this.renderReceipts([error.receipt]);
       this.revealReceipt();
     } else if (this.modal?.open) {
-      this.error.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+      this.error.scrollIntoView({ behavior: 'instant', block: 'start' });
       this.error.tabIndex = -1;
       this.error.focus({ preventScroll: true });
     }
@@ -378,6 +512,12 @@ class ReviewModal {
       if (version !== this.version || generation !== this.generation || !this.modal.open) throw new Error('The review changed while preflight loaded. Prepare a new preview.');
       this.manifest = manifest;
       this.renderFinal(manifest);
+    } catch (error) {
+      if (this.note) {
+        delete this.note.dataset.state;
+        this.note.textContent = 'Preflight did not complete. Local text is preserved — nothing was published.'; // taste-skill-ignore
+      }
+      throw error;
     } finally {
       this.isPreparing = false;
       this.authoring.disabled = this.isSubmitting || this.isQuickSubmitting;
@@ -446,7 +586,7 @@ class ReviewModal {
     this.refreshButton.disabled = true;
     const current = this.decision?.value === 'APPROVE_WITH_COMMENT' ? 'APPROVE' : this.decision?.value;
     const progressMap = { APPROVE: 'Preparing approval\u2026', COMMENT: 'Preparing comment review\u2026', REQUEST_CHANGES: 'Preparing change request\u2026' };
-    this.quickSubmitButton.textContent = progressMap[current] || 'Preparing review\u2026';
+    this.setQuickLabel?.(progressMap[current] || 'Preparing review\u2026', false);
     try {
       await this.prepare();
       const manifest = this.manifest;
@@ -511,37 +651,48 @@ class ReviewModal {
     for (const draft of manifest.drafts) {
       this.cards.get(draft.key).provenance.textContent = `Draft ${draft.id} · revision ${draft.revision}`;
     }
-    this.count.textContent = `${manifest.count} selected saved comments`;
+    this.updateCount();
     this.applyCapabilities(manifest);
     if (manifest.target) {
       const target = manifest.target;
       this.finalSection.append(ReviewModal.link(`${target.repository} #${target.number} · ${target.host}`, target.url),
-        node('p', `Publishing as ${target.account.login}${target.account.id == null ? ' (account ID unavailable)' : ` · account ${target.account.id}`}`),
-        node('p', `Head ${target.head}`, { class: 'workspace-review-provenance' }));
+        node('p', `Publishing as ${target.account.login}${target.account.id == null ? ' (account ID unavailable)' : ` · account ${target.account.id}`}`));
     } else this.finalSection.append(node('p', 'No remote publication target'));
-    this.finalSection.append(node('p', `${manifest.event} · ${manifest.mode === 'draft' ? 'Save pending host draft' : 'Publish completed review'} · ${manifest.count} inline/file comments`),
-      node('p', 'The review body and selected comment editors above are the exact Markdown payloads. No footer, location prefix or attribution is appended. Editing invalidates this preview.'),
-      node('p', `Checked ${manifest.fetchedAt} · manifest ${manifest.digest}`, { class: 'workspace-review-provenance' }));
-    this.finalSection.append(node('p', 'Keep the pending host draft unchanged while publishing. Its final read and submission are not atomic; edits from another host client can race with publication.', { class: 'workspace-muted' }));
+    this.finalSection.append(node('p', `${manifest.event} · ${manifest.mode === 'draft' ? 'Save pending host draft' : 'Publish completed review'} · ${manifest.count} inline/file comments`, { class: 'workspace-review-final-summary' }),
+      node('p', 'The review body and selected comment editors above are the exact Markdown payloads. No footer, location prefix or attribution is appended. Editing invalidates this preview.', { class: 'workspace-muted' }));
+    if (manifest.skippedEmpty) {
+      this.finalSection.append(node('p', `${manifest.skippedEmpty} empty draft${manifest.skippedEmpty === 1 ? '' : 's'} skipped — empty comments are optional and are not published.`, { class: 'workspace-muted' })); // taste-skill-ignore
+    }
+    const manifestDetails = node('details');
+    manifestDetails.append(node('summary', 'Manifest details'),
+      ...(manifest.target ? [node('p', `Head ${manifest.target.head}`, { class: 'workspace-review-provenance' })] : []),
+      node('p', `Checked ${manifest.fetchedAt} · manifest ${manifest.digest}`, { class: 'workspace-review-provenance' }),
+      node('p', 'Keep the pending host draft unchanged while publishing. Its final read and submission are not atomic; edits from another host client can race with publication.', { class: 'workspace-muted' }));
+    this.finalSection.append(manifestDetails);
     if (manifest.prose) {
       const policy = manifest.prose;
-      const section = node('section', null, { 'aria-label': 'Outgoing draft policy' });
-      section.append(node('h4', `Prose policy: ${policy.profile || 'No named profile'}`),
-        node('p', policy.state === 'configured' ? policy.enforcement : 'No structural prose checks are configured. Exact text is still preserved.'));
-      for (const diagnostic of policy.diagnostics) {
-        const draft = manifest.comments.find(comment => comment.key === diagnostic.key);
-        const label = diagnostic.key === 'summary' ? 'Review body' : `Draft ${draft?.id ?? diagnostic.key}`;
-        section.append(node('p', `${diagnostic.severity === 'blocking' ? 'Blocking' : 'Advisory'} · ${label}: ${diagnostic.message} Source: ${diagnostic.source} (${diagnostic.layer || 'source not recorded'})`));
-        section.append(this.button(`Edit ${label.toLowerCase()}`, () => {
-          const textarea = diagnostic.key === 'summary' ? this.bodyInput : this.cards.get(diagnostic.key)?.textarea;
-          textarea?.scrollIntoView({ block: 'center' });
-          textarea?.focus({ preventScroll: true });
-        }));
+      const receipt = node('details');
+      receipt.append(node('summary', 'Exact outgoing policy receipt'), node('pre', JSON.stringify(policy, null, 2)));
+      if (policy.state !== 'configured' && !policy.diagnostics.length) {
+        // Nothing to act on: keep the receipt available without a heading.
+        manifestDetails.append(node('p', 'No structural prose checks are configured. Exact text is still preserved.', { class: 'workspace-muted' }), receipt);
+      } else {
+        const section = node('section', null, { 'aria-label': 'Outgoing draft policy' });
+        section.append(node('h4', `Prose policy: ${policy.profile || 'No named profile'}`),
+          node('p', policy.state === 'configured' ? policy.enforcement : 'No structural prose checks are configured. Exact text is still preserved.'));
+        for (const diagnostic of policy.diagnostics) {
+          const draft = manifest.comments.find(comment => comment.key === diagnostic.key);
+          const label = diagnostic.key === 'summary' ? 'Review body' : `Draft ${draft?.id ?? diagnostic.key}`;
+          section.append(node('p', `${diagnostic.severity === 'blocking' ? 'Blocking' : 'Advisory'} · ${label}: ${diagnostic.message} Source: ${diagnostic.source} (${diagnostic.layer || 'source not recorded'})`));
+          section.append(this.button(`Edit ${label.toLowerCase()}`, () => {
+            const textarea = diagnostic.key === 'summary' ? this.bodyInput : this.cards.get(diagnostic.key)?.textarea;
+            textarea?.scrollIntoView({ block: 'center' });
+            textarea?.focus({ preventScroll: true });
+          }));
+        }
+        section.append(receipt);
+        this.finalSection.append(section);
       }
-      const details = node('details');
-      details.append(node('summary', 'Exact outgoing policy receipt'), node('pre', JSON.stringify(policy, null, 2)));
-      section.append(details);
-      this.finalSection.append(section);
     }
     this.renderDraftAnchors(manifest);
     if (manifest.blockers.length) {
@@ -555,12 +706,17 @@ class ReviewModal {
     this.confirm = node('input', null, { type: 'checkbox', 'aria-label': 'Confirm this exact submission manifest' });
     this.confirm.disabled = manifest.blockers.length > 0 || !this.manifest;
     confirmLabel.prepend(this.confirm);
-    this.publishButton = node('button', manifest.mode === 'draft' ? `Save host draft · ${manifest.count} comments` : `Publish ${manifest.event.toLowerCase().replaceAll('_', ' ')} · ${manifest.count} comments`, { type: 'button', class: 'btn btn-primary' });
+    this.publishButton = node('button', manifest.mode === 'draft' ? `Save host draft · ${manifest.count} comments` : `Publish ${manifest.event.toLowerCase().replaceAll('_', ' ')} · ${manifest.count} comments`, { type: 'button', class: 'btn btn-primary workspace-publish' });
     this.publishButton.disabled = true;
     this.confirm.addEventListener('change', () => { this.publishButton.disabled = !this.confirm.checked || !this.manifest || this.isSubmitting; });
     this.publishButton.addEventListener('click', () => this.publish());
     this.finalSection.append(confirmLabel, this.publishButton);
     this.note.textContent = manifest.blockers.length ? 'Publication blocked. Local text is preserved.' : 'Fresh preflight complete. Nothing has been published.';
+    // One primary action at a time: while a fresh preview can publish, the
+    // sticky quick-submit (which would re-prepare) steps back visually.
+    this.quickSubmitButton?.classList.toggle('workspace-submit-superseded', !manifest.blockers.length);
+    // Bring the preview to the author; it renders below every draft card.
+    if (!this.isQuickSubmitting) this.finalSection.scrollIntoView?.({ behavior: 'instant', block: 'start' });
   }
 
   async publish() {
@@ -572,7 +728,7 @@ class ReviewModal {
     if (this.quickSubmitButton) {
       this.quickSubmitButton.disabled = true;
       this.quickSubmitButton.dataset.loading = 'true';
-      this.quickSubmitButton.textContent = 'Publishing review\u2026';
+      this.setQuickLabel?.('Publishing review\u2026', false);
     }
     this.publishButton.disabled = true;
     this.publishButton.dataset.loading = 'true';

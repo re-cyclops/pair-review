@@ -7540,7 +7540,13 @@ class PRManager {
       onCopyComments: () => this.copyCommentsToClipboard(),
       onClearComments: () => this.clearAllUserComments(),
       onNextSuggestion: () => this.suggestionNavigator?.goToNext(),
-      onPrevSuggestion: () => this.suggestionNavigator?.goToPrevious()
+      onPrevSuggestion: () => this.suggestionNavigator?.goToPrevious(),
+      onSubmitReview: () => this.openReviewModal(),
+      onAnalyze: () => this.triggerAIAnalysis?.(),
+      onToggleOutdated: () => {
+        const panel = window.aiPanel;
+        if (panel?.outdatedThreadCount?.() > 0) panel.toggleHideOutdated();
+      }
     });
   }
 
