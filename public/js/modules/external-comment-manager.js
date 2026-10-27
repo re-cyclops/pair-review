@@ -910,12 +910,14 @@ class ExternalCommentManager {
       headerLeft.appendChild(span);
     }
 
-    // Outdated badge
-    if (comment.is_outdated === 1 || comment.is_outdated === true) {
+    // Outdated badge: loud, not faded — the reviewer must not read this
+    // comment as if it still described the current code.
+    const isOutdated = comment.is_outdated === 1 || comment.is_outdated === true;
+    if (isOutdated) {
       const badge = document.createElement('span');
       badge.className = 'external-comment-outdated-badge';
-      badge.title = 'This comment was made against an earlier version of the file';
-      badge.textContent = 'outdated';
+      badge.title = 'Outdated: this comment was made against an earlier version of the code and may no longer apply';
+      badge.textContent = 'Outdated';
       headerLeft.appendChild(badge);
     }
 
@@ -952,6 +954,13 @@ class ExternalCommentManager {
 
     header.appendChild(headerRight);
     el.appendChild(header);
+
+    if (isOutdated && !isReply) {
+      const note = document.createElement('p');
+      note.className = 'external-comment-outdated-note';
+      note.textContent = 'The code this comment references has changed since it was written. It may no longer apply.';
+      el.appendChild(note);
+    }
 
     // ---- Body ----
     const body = document.createElement('div');

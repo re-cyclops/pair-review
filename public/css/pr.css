@@ -700,6 +700,11 @@
   --color-info: #0969da;
   --color-praise: #8250df;
 
+  /* Attention (GitHub primer): used to flag outdated review comments */
+  --color-attention-fg: #9a6700;
+  --color-attention-subtle: #fff8c5;
+  --color-attention-muted: rgba(212, 167, 44, 0.45);
+
   /* Comment accent colors - purple to distinguish from AI amber */
   --comment-primary: #8250df;
   --comment-subtle: rgba(130, 80, 223, 0.08);
@@ -814,6 +819,10 @@
   --color-warning: #d29922;
   --color-info: #58a6ff;
   --color-praise: #a371f7;
+
+  --color-attention-fg: #e3b341;
+  --color-attention-subtle: rgba(187, 128, 9, 0.15);
+  --color-attention-muted: rgba(187, 128, 9, 0.45);
 
   /* Comment accent colors - purple to distinguish from AI amber (dark theme) */
   --comment-primary: #a371f7;
@@ -4873,24 +4882,35 @@ div.external-comment-row {
   background: var(--ec-subtle);
 }
 
-/* Outdated: comment's anchor no longer maps to current diff. Faded with
-   a dashed accent border so it reads as "still here but stale". */
+/* Outdated: comment's anchor no longer maps to current diff. Flagged loud
+   (attention colors, full opacity) so it is never read as current feedback;
+   the dashed border marks the stale anchor. */
 .external-comment.is-outdated {
-  opacity: 0.7;
-  border-left-style: dashed;
+  border-style: dashed;
+  border-color: var(--color-attention-muted);
 }
 
 .external-comment-outdated-badge {
   display: inline-block;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 10px;
-  font-weight: 600;
-  background: var(--color-bg-secondary, #f6f8fa);
-  color: var(--color-text-secondary, #57606a);
-  border: 1px solid var(--color-border-primary, #d0d7de);
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--color-attention-subtle);
+  color: var(--color-attention-fg);
+  border: 1px solid var(--color-attention-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.external-comment-outdated-note {
+  margin: 0;
+  padding: 6px 0 0;
+  color: var(--color-attention-fg);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
 }
 
 [data-theme="dark"] .external-comment {
@@ -4908,12 +4928,6 @@ div.external-comment-row {
 
 [data-theme="dark"] .external-comment-body pre {
   background: var(--color-bg-primary, #0d1117);
-}
-
-[data-theme="dark"] .external-comment-outdated-badge {
-  background: var(--color-bg-tertiary, #1c2128);
-  color: var(--color-text-secondary, #8b949e);
-  border-color: var(--color-border-primary, #30363d);
 }
 
 /* Refresh button spinner: reuse the project-wide `spin` keyframes (defined
@@ -9319,11 +9333,11 @@ body.resizing * {
   --ec-border: var(--external-github-border);
 }
 
-/* Outdated thread: faded + dashed accent, matching the inline
-   .external-comment.is-outdated treatment. */
+/* Outdated thread: flagged with attention colors at full opacity so stale
+   feedback is never mistaken for current feedback. */
 .finding-item.ai-panel__list-item--external.is-outdated {
-  opacity: 0.7;
-  border-left-style: dashed;
+  border-style: dashed;
+  border-color: var(--color-attention-muted);
 }
 
 .finding-item.ai-panel__list-item--external .external-list-author {
@@ -9358,15 +9372,15 @@ body.resizing * {
 
 .finding-item.ai-panel__list-item--external .external-list-outdated-badge {
   display: inline-block;
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 9px;
-  font-weight: 600;
-  background: var(--color-bg-secondary, #f6f8fa);
-  color: var(--color-text-secondary, #57606a);
-  border: 1px solid var(--color-border-primary, #d0d7de);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  background: var(--color-attention-subtle);
+  color: var(--color-attention-fg);
+  border: 1px solid var(--color-attention-muted);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
 }
 
 /* Transient focus flash for the matching inline external-comment-row after
@@ -9382,10 +9396,49 @@ body.resizing * {
   color: var(--color-bg-primary, #0d1117);
 }
 
-[data-theme="dark"] .finding-item.ai-panel__list-item--external .external-list-outdated-badge {
-  background: var(--color-bg-tertiary, #1c2128);
-  color: var(--color-text-secondary, #8b949e);
-  border-color: var(--color-border-primary, #30363d);
+/* Aggregate outdated notice under the segment control */
+.ai-panel-outdated-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 12px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--color-attention-subtle);
+  color: var(--color-attention-fg);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+.ai-panel-outdated-notice[hidden] { display: none; }
+.ai-panel-outdated-notice-text { flex: 1 1 auto; min-width: 0; }
+.ai-panel-outdated-toggle {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--color-attention-muted);
+  background: transparent;
+  color: var(--color-attention-fg);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ai-panel-outdated-toggle:hover { background: var(--color-attention-muted); color: var(--color-text-primary); }
+.ai-panel-outdated-toggle:focus-visible { outline: 2px solid var(--color-attention-fg); outline-offset: 2px; }
+.ai-panel-outdated-toggle[aria-pressed="true"] { background: var(--color-attention-fg); border-color: var(--color-attention-fg); color: var(--color-bg-primary, #ffffff); }
+.chat-panel__context-badge--outdated {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--color-attention-subtle);
+  color: var(--color-attention-fg);
+  border: 1px solid var(--color-attention-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 /* Adopted findings - brighter green success state with solid left border */

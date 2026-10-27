@@ -54,6 +54,11 @@ class AIPanel {
         // Filter toggle state for showing dismissed comments (default: hidden)
         this.showDismissedComments = false;
 
+        // Outdated external threads (their code changed since the comment)
+        // stay visible by default but are flagged; the reviewer can hide them.
+        this.hideOutdated = false;
+        try { this.hideOutdated = localStorage.getItem('pair-review:hide-outdated') === '1'; } catch { /* storage unavailable */ }
+
         this.selectMode = false;
         this.selectedFindingIds = new Set();
         this.initElements();
@@ -124,7 +129,55 @@ class AIPanel {
         // Create filter toggle if segment control exists
         if (this.segmentControl) {
             this.createFilterToggle();
+            this.createOutdatedNotice();
         }
+    }
+
+    outdatedThreadCount() {
+        return (this.externalThreads || []).filter(t => t?.is_outdated === 1 || t?.is_outdated === true).length;
+    }
+
+    createOutdatedNotice() {
+        this.outdatedNotice = document.createElement('div');
+        this.outdatedNotice.className = 'ai-panel-outdated-notice';
+        this.outdatedNotice.setAttribute('role', 'status');
+        this.outdatedNoticeText = document.createElement('span');
+        this.outdatedNoticeText.className = 'ai-panel-outdated-notice-text';
+        this.outdatedToggleBtn = document.createElement('button');
+        this.outdatedToggleBtn.type = 'button';
+        this.outdatedToggleBtn.className = 'ai-panel-outdated-toggle';
+        this.outdatedToggleBtn.addEventListener('click', () => this.toggleHideOutdated());
+        this.outdatedNotice.append(this.outdatedNoticeText, this.outdatedToggleBtn);
+        this.outdatedNotice.hidden = true;
+        this.segmentControl.after(this.outdatedNotice);
+    }
+
+    updateOutdatedNotice() {
+        if (!this.outdatedNotice) return;
+        const outdated = this.outdatedThreadCount();
+        const total = this.externalThreads?.length ?? 0;
+        const inView = this.selectedSegment === 'external' || this.selectedSegment === 'all';
+        const show = outdated > 0 && inView;
+        this.outdatedNotice.hidden = !show;
+        if (this.segmentExternalBtn) {
+            this.segmentExternalBtn.title = outdated > 0
+                ? `${outdated} of ${total} external threads are outdated (the code they reference has changed)`
+                : '';
+        }
+        if (!show) return;
+        this.outdatedNoticeText.textContent = this.hideOutdated
+            ? `${outdated} outdated thread${outdated === 1 ? '' : 's'} hidden — the code they reference has changed.` // taste-skill-ignore
+            : `${outdated} of ${total} external thread${total === 1 ? '' : 's'} outdated — the code they reference has changed; they may no longer apply.`; // taste-skill-ignore
+        this.outdatedToggleBtn.textContent = this.hideOutdated ? 'Show outdated' : 'Hide outdated';
+        this.outdatedToggleBtn.setAttribute('aria-pressed', String(this.hideOutdated));
+        this.outdatedToggleBtn.setAttribute('aria-label', this.hideOutdated ? 'Show outdated external threads' : 'Hide outdated external threads');
+    }
+
+    toggleHideOutdated() {
+        this.hideOutdated = !this.hideOutdated;
+        try { localStorage.setItem('pair-review:hide-outdated', this.hideOutdated ? '1' : '0'); } catch { /* storage unavailable */ }
+        this.updateOutdatedNotice();
+        this.renderFindings();
     }
 
     /**
@@ -691,6 +744,7 @@ class AIPanel {
      */
     updateSegmentCounts() {
         this.updateFindingsAction();
+        this.updateOutdatedNotice?.();
         const aiCount = this.findings.length;
         const commentsCount = this.comments.length;
         // External threads are PR-only; hidden in Local mode. The button is
@@ -761,6 +815,10 @@ class AIPanel {
                 break;
         }
 
+        if (this.hideOutdated) {
+            items = items.filter(item => !(item._itemType === 'external' && (item.is_outdated === 1 || item.is_outdated === true)));
+        }
+
         // Sort by canonical file order, then file-level first, then line number
         return this.sortItemsByFileOrder(items);
     }
@@ -826,6 +884,7 @@ class AIPanel {
 
     renderFindings() {
         if (!this.findingsList) return;
+        this.updateOutdatedNotice?.();
 
         const items = this.getFilteredItems();
 
@@ -1997,7 +2056,7 @@ class AIPanel {
                     <span class="external-list-count" title="${totalComments} ${commentNoun}" aria-label="${totalComments} ${commentNoun} in thread">${totalComments}</span>
                     <div class="finding-content">
                         <span class="finding-title"><span class="external-list-author">${this.escapeHtml(author)}</span><span class="external-list-snippet">${snippet ? ' — ' + this.escapeHtml(snippet) : ''}</span></span> <!-- taste-skill-ignore -->
-                        ${thread.is_outdated ? '<span class="finding-meta"><span class="external-list-outdated-badge">outdated</span></span>' : ''}
+                        ${thread.is_outdated ? '<span class="finding-meta"><span class="external-list-outdated-badge" title="The code this comment references has changed; it may no longer apply">Outdated · code changed</span></span>' : ''} <!-- taste-skill-ignore -->
                         ${fileName ? `<span class="finding-location">${this.escapeHtml(fileName)}${locationSuffix}</span>` : ''}
                     </div>
                 </button>
