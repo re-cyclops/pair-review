@@ -10,11 +10,16 @@ for (const [decision, event] of [['COMMENT', 'COMMENT'], ['APPROVE_WITH_COMMENT'
     await page.goto(url);
     await openReviewAuthoring(page);
     await page.locator('#review-body-modal').fill(body);
-    await expect(page.locator(`#review-decision option[value="${decision}"]`)).toBeEnabled();
-    await page.locator('#review-decision').selectOption(decision);
+    const decisionCard = page.getByRole('group', { name: 'Review decision' }).locator(`[data-decision="${event}"]`);
+    await expect(decisionCard).toBeEnabled();
+    await decisionCard.click();
     await page.getByRole('button', { name: 'Prepare exact final preview', exact: true }).click();
     const confirm = page.getByRole('checkbox', { name: 'Confirm this exact submission manifest' });
     await expect(confirm).toBeEnabled();
+    await expect(confirm).toBeFocused();
+    await page.keyboard.press('ControlOrMeta+Enter');
+    await expect(confirm).not.toBeChecked();
+    await expect(confirm).toBeFocused();
     expect(testServer.reviewHost.state.calls).toEqual([]);
     await confirm.check();
     await page.keyboard.press('ControlOrMeta+Enter');
@@ -27,10 +32,68 @@ for (const [decision, event] of [['COMMENT', 'COMMENT'], ['APPROVE_WITH_COMMENT'
   });
 }
 
+test('backward tabbing from the summary stays on a visible decision control', async ({ page }) => {
+  await page.goto(url);
+  await openReviewAuthoring(page);
+  const summary = page.getByRole('textbox', { name: 'Review summary (optional)' });
+  await expect(summary).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  const decision = page.getByRole('group', { name: 'Review decision' }).locator('[data-decision="REQUEST_CHANGES"]');
+  await expect(decision).toBeVisible();
+  await expect(decision).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(summary).toBeFocused();
+});
+
+test('does not expose stale submission actions while reopening saved drafts', async ({ page, testServer }) => {
+  await page.goto(url);
+  await openReviewAuthoring(page);
+  await page.getByRole('button', { name: 'Skip — keep drafts local', exact: true }).click();
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  await page.route('**/api/reviews/1/draft', async route => {
+    await pending;
+    await route.continue();
+  });
+  try {
+    await page.locator('#split-button-main').click();
+    await expect(page.getByText('Loading saved local drafts…', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: /^Submit comment review/ })).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Prepare exact final preview', exact: true })).toBeHidden();
+    await page.keyboard.press('ControlOrMeta+Enter');
+    await page.keyboard.press('ControlOrMeta+Shift+Enter');
+    await expect(page.getByText('Loading saved local drafts…', { exact: true })).toBeVisible();
+    expect(testServer.reviewHost.state.calls).toEqual([]);
+  } finally {
+    release();
+  }
+  await expect(page.getByRole('textbox', { name: 'Review summary (optional)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Submit comment review/ })).toBeEnabled();
+});
+
+test('keyboard preview keeps confirmation and Publish visible for a long review', async ({ page, testServer }) => {
+  await page.setViewportSize({ width: 390, height: 600 });
+  await page.goto(url);
+  await openReviewAuthoring(page);
+  await page.getByRole('textbox', { name: 'Review summary (optional)' })
+    .fill(Array.from({ length: 60 }, (_, index) => `Review note ${index + 1}: preserve the invariant.`).join('\n'));
+  await page.getByRole('button', { name: 'Prepare exact final preview', exact: true }).click();
+  const confirm = page.getByRole('checkbox', { name: 'Confirm this exact submission manifest' });
+  await expect(confirm).toBeFocused();
+  await expect(confirm).toBeInViewport({ ratio: 1 });
+  await confirm.check();
+  await page.keyboard.press('ControlOrMeta+Enter');
+  const publish = page.getByRole('button', { name: /^Publish comment · 0 comments$/ });
+  await expect(publish).toBeFocused();
+  await expect(publish).toBeInViewport({ ratio: 1 });
+  expect(testServer.reviewHost.state.calls).toEqual([]);
+});
+
 test('keeps the exact body in a host draft without submitting its decision', async ({ page, testServer }) => {
   await page.goto(url);
   await openReviewAuthoring(page);
   await page.locator('#review-body-modal').fill(body);
+  await page.locator('.workspace-review-options > summary').click();
   await page.locator('#review-publication-mode').selectOption('draft');
   await page.getByRole('button', { name: 'Prepare exact final preview', exact: true }).click();
   await page.getByRole('checkbox', { name: 'Confirm this exact submission manifest' }).check();
@@ -88,7 +151,7 @@ test('treats a cleared draft as optional and submits the rest with Cmd+Enter', a
   await expect(page.getByText(/Save failed/)).toHaveCount(0);
   await expect.poll(() => testServer.db.prepare('SELECT body, included FROM comments WHERE id = ?').get(cleared))
     .toEqual({ body: '', included: 0 });
-  await page.locator('#review-decision').selectOption('APPROVE');
+  await page.getByRole('group', { name: 'Review decision' }).locator('[data-decision="APPROVE"]').click();
   await page.getByRole('textbox', { name: `Draft ${selected} exact Markdown`, exact: true }).focus();
   await page.keyboard.press('Meta+Enter');
   await expect.poll(() => testServer.db.prepare('SELECT state FROM submission_attempts').all()).toEqual([{ state: 'submitted' }]);
@@ -101,7 +164,7 @@ test('blocks an empty comment-only review but permits an explicitly confirmed em
   await page.getByRole('button', { name: 'Prepare exact final preview', exact: true }).click();
   await expect(page.getByRole('checkbox', { name: 'Confirm this exact submission manifest' })).toBeDisabled();
   expect(testServer.reviewHost.state.calls).toEqual([]);
-  await page.locator('#review-decision').selectOption('APPROVE');
+  await page.getByRole('group', { name: 'Review decision' }).locator('[data-decision="APPROVE"]').click();
   await page.getByRole('button', { name: 'Prepare exact final preview', exact: true }).click();
   await page.getByRole('checkbox', { name: 'Confirm this exact submission manifest' }).check();
   await page.getByRole('button', { name: /^Publish approve · 0 comments$/ }).click();
@@ -146,7 +209,7 @@ test('reconciles a lost final response without replaying the host write', async 
 test('acknowledges quick approval before a held comments refresh completes', async ({ page, testServer }) => {
   await page.goto(url);
   await openReviewAuthoring(page);
-  await page.locator('#review-decision').selectOption('APPROVE');
+  await page.getByRole('group', { name: 'Review decision' }).locator('[data-decision="APPROVE"]').click();
   let release;
   let entered;
   const gate = new Promise(resolve => { release = resolve; });
@@ -175,7 +238,7 @@ test('acknowledges quick approval before a held comments refresh completes', asy
 test('locks quick preflight and restores the approval action after preflight failure', async ({ page, testServer }) => {
   await page.goto(url);
   await openReviewAuthoring(page);
-  await page.locator('#review-decision').selectOption('APPROVE');
+  await page.getByRole('group', { name: 'Review decision' }).locator('[data-decision="APPROVE"]').click();
   let release;
   let entered;
   const gate = new Promise(resolve => { release = resolve; });
@@ -192,8 +255,8 @@ test('locks quick preflight and restores the approval action after preflight fai
     await expect(page.locator('.workspace-submit-primary')).toBeDisabled();
     await expect(page.locator('.workspace-submit-primary')).toHaveAttribute('data-loading', 'true');
     await expect(page.getByRole('button', { name: 'Prepare exact final preview', exact: true })).toBeDisabled();
-    await expect(page.getByRole('button', { name: 'Reload saved drafts', exact: true })).toBeDisabled();
-    await expect(page.locator('#review-decision')).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Reload saved drafts', exact: true, includeHidden: true })).toBeDisabled();
+    await expect(page.getByRole('group', { name: 'Review decision' }).locator('[data-decision="APPROVE"]')).toBeDisabled();
     expect(testServer.reviewHost.state.calls).toEqual([]);
     release();
     await expect(page.locator('.workspace-review-error')).toContainText('Preflight temporarily unavailable');
@@ -226,7 +289,7 @@ test('keeps remote approval visible while finishing failed local cleanup without
   expect(created.ok()).toBe(true);
   const { commentId } = await created.json();
   await openReviewAuthoring(page);
-  await page.locator('#review-decision').selectOption('APPROVE');
+  await page.getByRole('group', { name: 'Review decision' }).locator('[data-decision="APPROVE"]').click();
   testServer.db.exec(`CREATE TRIGGER fail_submission_cleanup BEFORE UPDATE OF status ON comments
     WHEN NEW.status = 'submitted'
     BEGIN SELECT RAISE(ABORT, 'fixture cleanup failure'); END;`);

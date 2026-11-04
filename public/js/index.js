@@ -2738,7 +2738,7 @@
     }
 
     var selectableRow = event.target.closest('tr[data-review-id], tr[data-session-id]');
-    if (selectableRow && !event.target.closest('a, button, .col-select')) {
+    if (selectableRow && !event.target.closest('a, button, input, select, details, .col-select')) {
       if (activeSelection && activeSelection.active && selectableRow.closest('.selection-mode')) {
         var selectableCb = selectableRow.querySelector('.col-select input[type="checkbox"]');
         if (selectableCb) {
@@ -2751,7 +2751,7 @@
 
     // Click on a collection PR row — toggle checkbox in selection mode, else start review
     var collectionRow = event.target.closest('.collection-pr-row');
-    if (collectionRow && !event.target.closest('a') && !event.target.closest('.col-select')) {
+    if (collectionRow && !event.target.closest('a, button, input, select, details, .col-select')) {
       // If in selection mode, toggle the row's checkbox
       if (activeSelection && activeSelection.active && collectionRow.closest('.selection-mode')) {
         var cb = collectionRow.querySelector('.col-select input[type="checkbox"]');

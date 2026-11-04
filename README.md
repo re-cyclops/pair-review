@@ -886,11 +886,20 @@ The CLI command used for a provider follows this precedence (highest to lowest):
 ### Review inbox and revision clarity
 
 The inbox separates **Pull request**, **First requested**, **AI review**, and
-**Review state**. At narrow widths, the same information becomes labelled rows.
-Selection, filters, saved drafts, and bulk analysis remain available. Search and
-filter controls share a consistent baseline; matching/loaded counts sit beside
-the active tab's selection controls. **Refresh status** updates visible PR
-evidence, and **Sort by next action** explicitly reapplies priority ordering.
+**Review state**, with compact multi-column rows on tablets and cards on phones.
+Search and **Refresh status** stay visible. **Filters** opens repository, author,
+review state, approved-review cleanup, and ordering controls; its active count
+also includes **Hide approved**, so a collapsed filter never hides its scope.
+Matching/loaded counts sit beside the active tab's selection controls.
+**Sort by next action** explicitly reapplies priority ordering.
+If nothing matches, **Clear search** keeps the current filters; **Reset filters
+and view** clears them and returns to Recent reviews without changing selection.
+
+Each row keeps its next review action visible. **More** holds host links,
+repository settings, and removal of local history with the existing confirmation.
+Opening row details does not navigate or change bulk selection. Expand the
+**First requested** date for the requester, direct/team source, and any history
+limitations; unavailable dates and review-state warnings remain visible.
 
 **First requested** shows the earliest recorded request to your GitHub account,
 including its date, time, time zone, and requester when available. Removing and
@@ -916,6 +925,17 @@ code, and closing the list restores the diff.
 Clicking **Edit** on an AI suggestion brings its editor into view below the sticky
 headers and focuses the text field, without animated scrolling.
 
+PR and Local review pages keep **Submit review** visible, with refresh, theme,
+notification, repository, and host utilities under **Tools**. The compact progress
+line shows viewed files and selected comments; expand **Review progress** for
+visited/triaged counts, comparison, and the explicit reviewed-revision action.
+On narrow screens, **Details** discloses branch, commit, path, and diff controls
+without truncating the branch to a few characters.
+The submission dialog keeps decisions and editable comments in a scrollable
+body, with actions outside that scrollport so they cannot cover an editor or
+**More options**. Those options contain the optional AI summary, host-draft
+action, and saved-draft reload.
+
 A stale snapshot explains the viewed and latest revisions and offers
 **Update to latest commits**. Updating retains saved drafts and analysis history;
 an open unsaved editor pauses replacement. Existing safe automatic refresh still
@@ -929,18 +949,22 @@ Open the shared command palette with `Cmd+K` on macOS or `Ctrl+K` elsewhere.
 It is available in the inbox, PR and local reviews, and settings. Opening it
 from an editor or another dialog preserves that editor's text; `Escape`
 returns focus to the previous control.
+**Stop pair-review server…** remains in this palette rather than the persistent
+activity bar. It still requires confirmation and explains active-run cancellation.
 
 Press `?` for the full shortcut list. Shortcut chips live inside the buttons
 they act on and stay hidden until you hold `Cmd`, `Ctrl`, or `Alt`. The review flow is keyboard-first:
-outdated external comments. In the review dialog, `Cmd+Enter` (macOS) or
-`Ctrl+Enter` submits, `Cmd+Shift+Enter` prepares the exact final preview
-without publishing, `Cmd+S` saves every draft locally, `Alt+1` / `Alt+2` /
+In the review dialog, `Cmd+Enter` (macOS) or `Ctrl+Enter` submits the
+included text after fresh checks; `Cmd+Shift+Enter` prepares the exact final
+preview without publishing, `Cmd+S` saves every draft locally, `Alt+1` / `Alt+2` /
 `Alt+3` choose Approve / Comment / Request changes, and `Alt+↑` / `Alt+↓`
 move between the summary and each draft editor. The dialog opens with the
 summary focused, editors grow with their text, and preparing a preview
-scrolls it into view. An armed exact final
-preview still publishes only from its **Publish** button; the submit chord
-moves focus to it instead of firing it. In a comment editor,
+scrolls it into view and focuses its confirmation. The preview places the exact
+outgoing summary and included comment text beside that confirmation, with **Edit**
+actions back to their editors. Once an exact final preview is open, the submit chord
+focuses its unchecked confirmation or its **Publish** button instead of
+bypassing that inspection. In a comment editor,
 `Cmd+Enter` saves the comment and `Escape` cancels the edit. Empty comment
 drafts are optional: clear the text and the draft is marked **Empty —
 skipped**, excluded from the submission, and reported in the final preview;
@@ -1114,6 +1138,20 @@ Quick submission locks conflicting actions during preflight and publication.
 Once the host acknowledges success, the dialog closes without waiting for
 background comment refreshes. Failed preflight restores the action and brings
 the error into view.
+Direct Submit authorizes only the target, account, head, and review scope
+already shown, and requires the visible decision to match the saved decision.
+A peer-updated decision requires reloading saved drafts before publication.
+A change discovered during fresh target checks stops at an unchecked
+preview instead. Invalid anchors require their explicit repair or conversion
+controls; fast submission never silently reanchors a comment or checks the
+human confirmation box.
+Reopening the dialog hides the previous submission controls until its drafts
+load; submit and preview shortcuts cannot act on the previous authoring view.
+
+Temporary clearing while replacing text preserves the prior inclusion choice.
+Once an empty draft has been saved as excluded, refilling it does not silently
+include it again. Counts, checkbox state, and final preview reflect the same
+stored intent; undoing to acknowledged text removes stale unsaved feedback.
 
 If publication succeeds but local draft cleanup fails, the submitted receipt
 remains authoritative. The dialog shows the warning and focuses **Finish local
@@ -1588,6 +1626,8 @@ pnpm run test:e2e:headed
 # Start development server
 pnpm run dev
 ```
+
+E2E worker URLs use `127.0.0.1`, matching their server binding so `localhost` cannot resolve to an unrelated IPv6 service.
 
 ### Isolated workspace fixture
 

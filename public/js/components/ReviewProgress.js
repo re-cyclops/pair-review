@@ -165,19 +165,23 @@ class ReviewProgress {
       this.panel = node('section', null, { class: 'workspace-review-progress', 'aria-label': 'Review progress' });
       this.summary = node('p', '', { role: 'status', class: 'workspace-progress-summary' });
       this.message = node('p', '', { class: 'workspace-muted workspace-progress-notice' });
+      const details = node('details', null, { class: 'workspace-progress-details' });
       const actions = node('div', null, { class: 'workspace-progress-actions' });
+      this.metrics = node('p', '', { class: 'workspace-muted' });
+      details.append(node('summary', 'Review progress'), this.metrics, actions);
       const compare = node('button', 'Changes since reviewed…', { type: 'button', class: 'workspace-progress-pill' });
       compare.addEventListener('click', () => this.showComparison());
       this.mark = node('button', 'Mark revision reviewed…', { type: 'button', class: 'workspace-progress-pill workspace-progress-pill--primary' });
       this.mark.addEventListener('click', () => this.confirmReviewed());
-      this.panel.append(this.summary, this.message, actions);
+      this.panel.append(this.summary, this.message, details);
       actions.append(compare, this.mark);
       diff.before(this.panel);
     }
     const s = this.state;
     this.mark.disabled = !s?.available;
     if (!s) { this.summary.textContent = 'Review progress unavailable'; return; }
-    this.summary.textContent = `${s.reviewedFiles}/${s.totalFiles} viewed · ${s.visitedFiles}/${s.totalFiles} visited · ${s.triagedFindings} triaged · ${s.selectedComments} comment${s.selectedComments === 1 ? '' : 's'} selected${s.submitted ? ' · submitted' : ''}`;
+    this.summary.textContent = `${s.reviewedFiles}/${s.totalFiles} files viewed · ${s.selectedComments} comment${s.selectedComments === 1 ? '' : 's'} selected${s.submitted ? ' · submitted' : ''}`;
+    this.metrics.textContent = `${s.visitedFiles}/${s.totalFiles} files visited · ${s.triagedFindings} findings triaged`;
     this.message.removeAttribute('role');
     const notices = [];
     if (!s.available) notices.push('Current diff unavailable. Any existing reviewed baseline is preserved.');

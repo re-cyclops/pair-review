@@ -440,21 +440,13 @@ class AnalysisHistoryManager {
       });
       toolbarActions.insertBefore(pill, analyzeBtn);
     }
-    if (!this.runs || this.runs.length === 0) {
-      pill.dataset.state = 'unreviewed';
-      pill.textContent = 'Not AI reviewed';
-      pill.title = 'No AI analysis has been run on this pull request yet. Click to configure and run AI analysis.';
-      pill.setAttribute('aria-label', 'Not AI reviewed. Click to analyze with AI.');
-      return;
-    }
+    pill.hidden = !this.runs?.length;
+    if (!this.runs || this.runs.length === 0) return;
     const run = this.selectedRun || this.runs[0];
     const actual = this.actualModelLabel(run);
-    const count = Number(run.total_suggestions || 0);
-    const countText = count === 0 ? '0 findings' : `${count} finding${count === 1 ? '' : 's'}`;
-    const timeAgo = this.formatRelativeTime(run.completed_at || run.started_at);
-    const historySuffix = this.runs.length > 1 ? ` \u00B7 ${this.runs.length} runs \u25BE` : ' \u25BE';
+    const historySuffix = this.runs.length > 1 ? ` \u00B7 ${this.runs.length} runs` : '';
     pill.dataset.state = 'reviewed';
-    pill.textContent = `AI reviewed \u00B7 ${actual} \u00B7 ${countText} \u00B7 ${timeAgo}${historySuffix}`;
+    pill.textContent = `${actual}${historySuffix}`;
     pill.title = `Actual: ${actual} · Requested: ${this.requestedModelLabel(run)}. Click to view ${this.runs.length} AI analysis run${this.runs.length === 1 ? '' : 's'} and summary`;
     pill.setAttribute('aria-label', pill.textContent);
   }

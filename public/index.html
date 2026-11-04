@@ -1500,7 +1500,7 @@
                 <div class="recent-reviews-section" id="recent-reviews-section">
                     <div class="section-header" id="recent-reviews-header">
                         <div class="tab-bar" id="unified-tab-bar">
-                            <button class="tab-btn active" data-tab="pr-tab" data-workspace-view="all" type="button">Review inbox</button>
+                            <button class="tab-btn active" data-tab="pr-tab" data-workspace-view="all" type="button">Recent reviews</button>
                             <button class="tab-btn" data-tab="review-requests-tab" data-workspace-view="needs-you" type="button">Needs you</button>
                             <button class="tab-btn" data-tab="pr-tab" data-workspace-view="drafts" type="button">Ready to preview</button>
                             <button class="tab-btn" data-tab="team-reviews-tab" data-workspace-view="teams" type="button" hidden>Team requests</button>
@@ -1652,7 +1652,7 @@
                 </button>
             </div>
             <div class="help-modal-content">
-                <p>pair-review is an AI-assisted code review partner. You can start a review from the command line or by pasting a PR URL above.</p>
+                <p>Start a review from the command line, or expand <strong>Open a pull request by URL</strong> below the review list.</p>
 
                 <h3>Review a PR by Number</h3>
                 <p>From within a cloned repository directory:</p>
@@ -1666,6 +1666,13 @@
                 <p>Review your uncommitted changes in the current repository before creating a PR:</p>
                 <pre><code class="cmd-example" data-args="--local [path]"></code></pre>
                 <p>This is useful for getting AI feedback on your changes before committing or opening a pull request.</p>
+
+                <h3>Use the Review Inbox</h3>
+                <p>Search or filter your saved reviews. Choose <strong>Select</strong> to work across several PRs; filtering keeps your selections and reports any that are hidden.</p>
+                <h3>Inspect Findings</h3>
+                <p><strong>Analyze</strong> opens the configured review options. Open <strong>AI findings</strong> to inspect a run, and its model label for recorded served-model evidence. An unknown or not-reviewed state is not a clean review.</p>
+                <h3>Submit Deliberately</h3>
+                <p>Drafts save locally. Choose which comments to include, then <strong>Submit</strong> to send them after fresh checks, or <strong>Prepare exact final preview</strong> to inspect the outgoing text before confirming <strong>Publish</strong>. Editing clears the preview confirmation. <strong>Skip — keep drafts local</strong> leaves your work saved without publishing.</p>
 
                 <h3>Configuration (Optional)</h3>
                 <p>To integrate with GitHub, set your token in <code>~/.pair-review/config.json</code>:</p>

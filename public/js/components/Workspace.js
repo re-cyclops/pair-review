@@ -84,11 +84,9 @@
       this.activityButton = node('button', 'Connecting to activity…', { type: 'button', 'aria-haspopup': 'dialog', class: 'workspace-activity-button' });
       this.activityButton.addEventListener('click', () => this.showActivity());
       const commands = node('button', null, { type: 'button', 'aria-haspopup': 'dialog', 'aria-keyshortcuts': `${this.isMac ? 'Meta' : 'Control'}+K`, class: 'workspace-rail-commands' });
-      commands.append(node('span', 'Commands '), node('kbd', this.shortcutHint, { class: 'workspace-kbd' }));
+      commands.append(node('span', 'Commands '), node('kbd', this.shortcutHint, { class: 'workspace-kbd workspace-kbd-hint', 'aria-hidden': 'true' }));
       commands.addEventListener('click', () => this.showPalette());
-      this.stopServerBtn = node('button', 'Stop server', { type: 'button', 'aria-haspopup': 'dialog', class: 'workspace-stop-server-btn', title: 'Stop the background pair-review server' });
-      this.stopServerBtn.addEventListener('click', () => this.showStopServerModal());
-      this.rail.append(node('a', 'Review inbox', { href: '/' }), this.activityButton, commands, this.stopServerBtn);
+      this.rail.append(node('a', 'Review inbox', { href: '/' }), this.activityButton, commands);
       if (this.currentTarget) {
         const evidence = node('button', this.currentTarget.local ? 'Local context' : 'Review evidence', { type: 'button', 'aria-haspopup': 'dialog' });
         evidence.addEventListener('click', () => this.showCurrentEvidence());
@@ -96,6 +94,42 @@
       }
       document.body.append(this.rail);
       document.body.classList.add('has-workspace');
+      const utilities = document.querySelector('.header-icon-group');
+      if (utilities) {
+        const tools = node('div', null, { class: 'workspace-review-tools' });
+        const popover = node('div', null, { class: 'workspace-tools-popover', popover: 'auto', id: 'workspace-tools-popover', 'aria-label': 'Review tools' });
+        const trigger = node('button', 'Tools', { type: 'button', popovertarget: popover.id });
+        tools.append(trigger);
+        utilities.before(tools);
+        for (const control of utilities.querySelectorAll(':scope > button, :scope > a')) {
+          if (!control.hasAttribute('aria-label')) control.setAttribute('aria-label', control.title);
+        }
+        popover.append(utilities);
+        tools.append(popover);
+        popover.addEventListener('beforetoggle', event => {
+          if (event.newState !== 'open') return;
+          const bounds = trigger.getBoundingClientRect();
+          popover.style.top = `${Math.max(8, Math.min(bounds.bottom + 8, innerHeight - 280))}px`;
+          popover.style.right = `${Math.max(16, innerWidth - bounds.right)}px`;
+        });
+      }
+      const metadata = document.getElementById('toolbar-meta');
+      if (metadata) {
+        const details = node('details', null, { class: 'workspace-diff-details' });
+        details.append(node('summary', 'Details', { 'aria-label': 'Diff details' }));
+        const narrow = window.matchMedia('(max-width: 768px)');
+        const syncMetadata = () => {
+          if (narrow.matches && !details.isConnected) {
+            metadata.before(details);
+            details.append(metadata);
+          } else if (!narrow.matches && details.isConnected) {
+            details.replaceWith(metadata);
+            details.open = false;
+          }
+        };
+        narrow.addEventListener('change', syncMetadata);
+        syncMetadata();
+      }
 
       this.drawer = this.makeDialog('workspace-activity', 'Analysis activity');
       this.activityList = node('div', null, { class: 'workspace-run-list' });
@@ -458,11 +492,20 @@
       const unknown = runs.filter(run => run.observation === 'unavailable');
       let label = !this.available ? 'Activity unavailable; last observed state retained'
         : live.length ? `${live.length} ${live.length === 1 ? 'analysis' : 'analyses'} ${live.some(r => r.status === 'cancellation_requested') ? 'active / cancelling' : 'running'} · ${live[0].repository} · ${live[0].stage} · ${age(live[0].startedAt)}`
-          : 'No active analyses observed on this server';
+          : 'No active analyses on this server';
       if (unknown.length) label += ` · ${unknown.length} unobserved executor${unknown.length === 1 ? '' : 's'}`;
       if (unread.length) label += ` · ${unread.length} unread result${unread.length === 1 ? '' : 's'}`;
-      if (this.identity?.draftCount) label += ` · ${this.identity.draftCount} review${this.identity.draftCount === 1 ? '' : 's'} with saved drafts`;
-      this.activityButton.textContent = label;
+      if (this.identity?.draftCount) label += ` · ${this.identity.draftCount} review${this.identity.draftCount === 1 ? '' : 's'} with drafts`;
+      let compact = !this.available ? 'Unavailable'
+        : live.length ? `${live.length} ${live.some(r => r.status === 'cancellation_requested') ? 'cancelling' : 'running'}`
+          : unknown.length ? `${unknown.length} unobserved` : 'Idle';
+      if (this.available && unread.length) compact += ` · ${unread.length} unread`;
+      else if (this.available && this.identity?.draftCount) compact += ` · Drafts ${this.identity.draftCount}`;
+      this.activityButton.replaceChildren(
+        node('span', label, { class: 'workspace-activity-full', 'aria-hidden': 'true' }),
+        node('span', compact, { class: 'workspace-activity-compact', 'aria-hidden': 'true' }));
+      this.activityButton.setAttribute('aria-label', label);
+      this.activityButton.title = label;
       this.activityButton.dataset.state = !this.available ? 'unknown' : live.length ? 'running' : unread.some(r => ['failed', 'partial'].includes(r.status)) ? 'attention' : 'idle';
       if (this.drawer.open) this.renderActivityList();
       window.dispatchEvent(new CustomEvent('workspaceActivity', { detail: { runs, available: this.available } }));
@@ -495,8 +538,8 @@
           clearTimeout(this.timer);
           this.available = false;
           this.activityButton.textContent = 'Server stopped \u00B7 run ,pr_review --ui to restart';
-          this.stopServerBtn.disabled = true;
-          this.stopServerBtn.textContent = 'Server stopped';
+          this.activityButton.setAttribute('aria-label', this.activityButton.textContent);
+          this.activityButton.title = this.activityButton.textContent;
           this.stopModalBody.replaceChildren(
             node('p', 'Pair-review server has been stopped. Run ,pr_review --ui in your terminal whenever you want to start it again.')
           );

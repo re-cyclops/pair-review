@@ -76,7 +76,7 @@ publicationTest('analysis configuration supports keyboard toggles, excludes back
   await analyze.press('Enter');
   const modal = page.getByRole('dialog', { name: 'Configure AI Analysis' });
   await expect(modal.locator('#custom-instructions')).toBeVisible();
-  await page.locator('#refresh-pr').focus();
+  await page.getByRole('button', { name: 'Tools', exact: true }).focus();
   await expect.poll(() => modal.evaluate(element => element.contains(document.activeElement))).toBe(true);
   const level = modal.getByRole('checkbox', { name: 'Level 2 — File Context', exact: true });
   await level.press('Space');

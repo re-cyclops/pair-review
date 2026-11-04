@@ -5744,7 +5744,7 @@ class AnalysisRunRepository {
       SELECT ${columns.join(', ')}
       FROM analysis_runs
       WHERE review_id = ?
-      ORDER BY COALESCE(completed_at, started_at) DESC, CASE WHEN parent_run_id IS NULL THEN 0 ELSE 1 END, started_at DESC, id DESC`;
+      ORDER BY COALESCE(completed_at, started_at) DESC, CASE WHEN parent_run_id IS NULL THEN 0 ELSE 1 END, started_at DESC, rowid DESC`;
     if (limit) {
       sql += `\n      LIMIT ?`;
       params.push(limit);
@@ -5782,7 +5782,7 @@ class AnalysisRunRepository {
       SELECT ${columns.join(', ')}
       FROM analysis_runs
       WHERE review_id = ? AND status = 'completed'
-      ORDER BY completed_at DESC
+      ORDER BY completed_at DESC, CASE WHEN parent_run_id IS NULL THEN 0 ELSE 1 END, started_at DESC, rowid DESC
       LIMIT 1
     `, [reviewId]);
 

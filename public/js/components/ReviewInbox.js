@@ -102,7 +102,7 @@
 
     buildTools() {
       const heading = element('div', null, { class: 'workspace-inbox-heading' });
-      heading.append(element('h1', 'Review inbox'), element('p', 'Decide what needs you. Inspect evidence before opening a review.', { class: 'workspace-muted' }));
+      heading.append(element('h1', 'Review inbox'));
       const tools = element('div', null, { class: 'workspace-inbox-tools', role: 'search', 'aria-label': 'Filter loaded reviews' });
       this.search = element('input', null, { type: 'search', name: 'inbox-search', autocomplete: 'off', spellcheck: 'false', placeholder: 'Repository, author, title, or PR number\u2026', 'aria-label': 'Filter loaded reviews' });
       this.view = element('select', null, { 'aria-label': 'Additional review filter' });
@@ -164,19 +164,41 @@
       this.operationStatus = element('p', '', { class: 'workspace-muted workspace-operation-status', role: 'status', 'aria-live': 'polite' });
       this.requestDateNotice = element('p', '', { class: 'workspace-muted workspace-operation-status', role: 'status', 'aria-live': 'polite' });
       this.filters = element('details', null, { class: 'workspace-filters' });
-      this.filterSummary = element('summary', 'Filters and order');
+      this.filterSummary = element('summary', 'Filters');
       const options = element('div', null, { class: 'workspace-filter-options' });
       const labelled = (text, control) => { const label = element('label', text); label.append(control); return label; };
-      options.append(labelled('Repository', this.repository), labelled('Author', this.author), labelled('Review state', this.view), this.hideApprovedBtn, this.clearApprovedBtn, refresh, this.sort);
+      options.append(labelled('Repository', this.repository), labelled('Author', this.author), labelled('Review state', this.view), this.hideApprovedBtn, this.clearApprovedBtn, this.sort);
       this.filters.append(this.filterSummary, options);
-      const wide = matchMedia('(min-width: 769px)');
-      this.filters.open = wide.matches;
-      wide.addEventListener('change', () => { this.filters.open = wide.matches; });
       const searchLabel = labelled('Search', this.search);
       searchLabel.className = 'workspace-search-field';
-      tools.append(searchLabel, this.filters);
+      tools.append(searchLabel, this.filters, refresh);
       this.root.before(heading);
       this.root.querySelector('.section-header').after(tools, this.status, this.requestDateNotice, this.operationStatus);
+      this.emptyState = element('section', null, { class: 'workspace-empty-results', hidden: '', role: 'status' });
+      this.emptyState.append(element('h2', 'No matching reviews'), element('p', 'No loaded reviews match this search or view. Your saved reviews and selections are unchanged.'));
+      const recoveryActions = element('div');
+      this.clearSearch = element('button', 'Clear search', { type: 'button' });
+      this.clearSearch.addEventListener('click', () => {
+        this.search.value = '';
+        this.applyFilters(true);
+        this.search.focus();
+      });
+      const resetFilters = element('button', 'Reset filters and view', { type: 'button' });
+      resetFilters.addEventListener('click', () => {
+        this.search.value = '';
+        this.repository.value = '';
+        this.author.value = '';
+        this.view.value = 'all';
+        localStorage.setItem('pair-review-inbox-filter', 'all');
+        if (this.hideApproved) this.hideApprovedBtn.click();
+        this.root.querySelector('[data-workspace-view="all"]')?.click();
+        this.primary = 'all';
+        this.applyFilters(true);
+        this.search.focus();
+      });
+      recoveryActions.append(this.clearSearch, resetFilters);
+      this.emptyState.append(recoveryActions);
+      this.root.append(this.emptyState);
       const form = this.root.querySelector('#pr-tab .start-review-section');
       if (form) {
         const launcher = element('details', null, { class: 'workspace-open-review' });
@@ -238,8 +260,25 @@
         summary.append(record.badge, record.decisions, record.approvals, record.checks, record.draft);
         lane('state').append(summary);
         lane('ai').append(record.activity, record.model);
-        if (!local) lane('requested').append(record.requested, record.requestContext, record.reason);
-        row.querySelector('.col-actions')?.prepend(record.next);
+        if (!local) {
+          const request = element('details', null, { class: 'workspace-request-details' });
+          const requested = element('summary');
+          requested.append(record.requested);
+          request.append(requested, record.requestContext, record.reason);
+          lane('requested').append(request);
+        }
+        const actions = lane('actions');
+        const utilities = [...actions.querySelectorAll(':scope > a, :scope > button')];
+        if (utilities.length) {
+          const more = element('details', null, { class: 'workspace-row-more' });
+          more.append(element('summary', 'More', { 'aria-label': `More actions for ${local ? 'local review' : `PR #${number}`}` }));
+          for (const action of utilities) {
+            action.append(element('span', action.getAttribute('aria-label') || action.title || 'Open link'));
+            more.append(action);
+          }
+          actions.append(more);
+        }
+        actions.prepend(record.next);
         row.tabIndex = 0;
         this.records.set(row, record);
         this.observer.observe(row);
@@ -619,10 +658,13 @@
       this.placeStatus();
       const message = `${visible} ${deferred ? 'displayed' : 'matching'} of ${loaded} loaded${unknown ? ` · ${unknown} with unavailable or outdated status` : ''}${deferred ? ` · ${deferred} updates held; reapply filters when ready` : ''}`;
       if (this.status.textContent !== message) this.status.textContent = message;
+      this.emptyState.hidden = visible > 0 || loaded === 0;
+      this.clearSearch.hidden = query.length === 0;
+      if (!this.emptyState.hidden) this.root.querySelector('.tab-pane.active table')?.before(this.emptyState);
       const requestDateMessage = needsServerUpdate ? 'Request dates need a server restart. Finish active analyses, restart pair-review, then reload this page.' : '';
       if (this.requestDateNotice.textContent !== requestDateMessage) this.requestDateNotice.textContent = requestDateMessage;
-      const filterCount = Number(!!this.repository.value) + Number(!!this.author.value) + Number(this.view.value !== 'all');
-      this.filterSummary.textContent = `Filters and order${filterCount ? ` · ${filterCount} active` : ''}`;
+      const filterCount = Number(!!this.repository.value) + Number(!!this.author.value) + Number(this.view.value !== 'all') + Number(this.hideApproved);
+      this.filterSummary.textContent = `Filters${filterCount ? ` · ${filterCount} active` : ''}`;
       window.dispatchEvent(new CustomEvent('workspaceFilterChanged'));
       const clearableIds = this.approvedCandidates().map(record => Number(record.row.dataset.reviewId));
       if (this.clearApprovedBtn) {
@@ -765,7 +807,7 @@
       }
     }
     onKey(event) {
-      if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing || event.target.closest('input,textarea,select,button,a,[contenteditable]')) return;
+      if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing || event.target.closest('input,textarea,select,button,a,summary,[contenteditable]')) return;
       const rows = [...this.records.keys()].filter(row => row.getClientRects().length);
       const index = rows.indexOf(event.target.closest('tr'));
       if (event.key === 'j' || event.key === 'k') {

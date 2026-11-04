@@ -18,7 +18,7 @@ const test = base.extend({
   }, { scope: 'worker' }],
 
   baseURL: async ({ testServer }, use) => {
-    await use(`http://localhost:${testServer.port}`);
+    await use(`http://127.0.0.1:${testServer.port}`);
   },
 
   // Inject CSS to disable all animations/transitions for faster test execution

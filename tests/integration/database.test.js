@@ -2800,18 +2800,18 @@ describe('AnalysisRunRepository', () => {
   });
 
   describe('getByReviewId()', () => {
-    it('should retrieve all analysis runs for a review ordered by started_at DESC', async () => {
-      // Create multiple runs
-      await analysisRunRepo.create({ id: 'run-1', reviewId: testReview.id });
-      await analysisRunRepo.create({ id: 'run-2', reviewId: testReview.id });
-      await analysisRunRepo.create({ id: 'run-3', reviewId: testReview.id });
+    it('keeps the newest findings first when completed runs share a timestamp', async () => {
+      await analysisRunRepo.create({ id: 'z-older-run', reviewId: testReview.id, status: 'completed' });
+      await analysisRunRepo.create({ id: 'a-newer-run', reviewId: testReview.id, status: 'completed' });
+      await analysisRunRepo.update('a-newer-run', { totalSuggestions: 1 });
+      await run(db, `UPDATE analysis_runs
+        SET started_at = '2026-01-01 00:00:00', completed_at = '2026-01-01 00:00:01'
+        WHERE review_id = ?`, [testReview.id]);
 
       const runs = await analysisRunRepo.getByReviewId(testReview.id);
-      expect(runs).toHaveLength(3);
-      // Most recent first (run-3 was created last)
-      expect(runs[0].id).toBe('run-3');
-      expect(runs[1].id).toBe('run-2');
-      expect(runs[2].id).toBe('run-1');
+      expect(runs.map(record => record.id)).toEqual(['a-newer-run', 'z-older-run']);
+      expect((await analysisRunRepo.getLatestByReviewId(testReview.id)).total_suggestions).toBe(1);
+      expect((await analysisRunRepo.getLatestCompletedByReviewId(testReview.id)).total_suggestions).toBe(1);
     });
 
     it('should return empty array for review with no analysis runs', async () => {
@@ -2822,14 +2822,11 @@ describe('AnalysisRunRepository', () => {
     it('should include head_sha in all retrieved records', async () => {
       const sha1 = 'sha1111111111111111111111111111111111111';
       const sha2 = 'sha2222222222222222222222222222222222222';
-      // Use IDs that sort correctly when timestamps are identical
-      // (id DESC is used as tiebreaker, so 'run-sha-2' > 'run-sha-1')
       await analysisRunRepo.create({ id: 'run-sha-1', reviewId: testReview.id, headSha: sha1 });
       await analysisRunRepo.create({ id: 'run-sha-2', reviewId: testReview.id, headSha: sha2 });
 
       const runs = await analysisRunRepo.getByReviewId(testReview.id);
       expect(runs).toHaveLength(2);
-      // Most recent first (id DESC tiebreaker makes 'run-sha-2' come first)
       expect(runs[0].head_sha).toBe(sha2);
       expect(runs[1].head_sha).toBe(sha1);
     });

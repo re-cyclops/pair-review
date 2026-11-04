@@ -179,7 +179,7 @@
         entry.recoveryFailed = false;
       } catch { entry.recoveryFailed = true; }
       this.render(entry);
-      window.dispatchEvent(new CustomEvent('reviewDraftChanged', { detail: { reviewId: entry.reviewId } }));
+      window.dispatchEvent(new CustomEvent('reviewDraftChanged', { detail: { reviewId: entry.reviewId, draftKey: entry.key } }));
     }
 
     schedule(entry) {
@@ -351,6 +351,7 @@
           for (const view of entry.views) view.textarea.value = entry.body;
         }
         this.render(entry);
+        window.dispatchEvent(new CustomEvent('reviewDraftChanged', { detail: { reviewId: entry.reviewId, draftKey: entry.key } }));
       }
     }
 
@@ -365,6 +366,9 @@
     }
 
     render(entry) {
+      if (entry.base && !this.dirty(entry) && !entry.saving && !entry.conflict && !entry.paused && !this.serverChanged && !entry.recoveryFailed) {
+        entry.state = this.isEmpty(entry) ? 'Empty — excluded; won’t be submitted' : 'Saved locally';
+      }
       for (const view of entry.views) {
         // Quiet when settled: a saved, included draft needs no status line,
         // and a saved empty draft is already labelled by its card badge.

@@ -46,6 +46,7 @@ beforeEach(async () => {
       wire: { path: 'a.js', line: 2, side: 'RIGHT', isFileLevel: false }, errors: [] }]
   };
   await modal.renderAuthoring(manifest);
+  modal.applyCapabilities(manifest);
 });
 
 afterEach(() => {
@@ -85,6 +86,125 @@ describe('Review authorization and durable authoring', () => {
     expect(drafts.hasPending(1)).toBe(true);
     await modal.publish();
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('keeps excluded text out of the frozen outgoing preview and lets authors return to the selected editor', async () => {
+    const excluded = { ...modal.comments.get(10), id: 11, draft_key: 'draft-11', included: 0, body: 'Excluded alternative' };
+    modal.comments.set(excluded.id, excluded);
+    manifest.drafts.push({ ...manifest.drafts[0], id: 11, key: excluded.draft_key, included: false, body: excluded.body });
+    await modal.renderAuthoring(manifest);
+    modal.manifest = manifest;
+    modal.renderFinal(manifest);
+
+    const payload = modal.finalSection.querySelector('[aria-label="Exact outgoing text"]');
+    expect([...payload.querySelectorAll('pre')].map(element => element.textContent))
+      .toEqual([manifest.body, manifest.drafts[0].body]);
+    expect(payload.textContent).not.toContain(excluded.body);
+    payload.querySelector('[aria-label="Edit draft 10"]').click();
+    expect(document.activeElement).toBe(modal.cards.get('draft-10').textarea);
+    expect(modal.confirm.checked).toBe(false);
+  });
+
+  it.each([true, false])('preserves explicit inclusion %s while replacing text before autosave', included => {
+    const view = modal.cards.get('draft-10');
+    const entry = view.textarea.draftEntry;
+    entry.included = included;
+    entry.base.included = Number(included);
+    view.include.checked = included;
+    view.textarea.value = '';
+    view.textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(view.include.checked).toBe(false);
+    expect(view.include.disabled).toBe(true);
+    view.textarea.value = 'Replacement text\n';
+    view.textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(view.include.disabled).toBe(false);
+    expect(view.include.checked).toBe(included);
+    expect(entry.included).toBe(included);
+    expect(modal.selectedCount()).toBe(Number(included));
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(['comment', 'summary'])('settles a clean %s after undo without another save', kind => {
+    const textarea = kind === 'summary' ? modal.bodyInput : modal.cards.get('draft-10').textarea;
+    const entry = textarea.draftEntry;
+    const original = textarea.value;
+    textarea.value = `${original}Unfinished edit`;
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(drafts.hasPending(1)).toBe(true);
+    textarea.value = original;
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(drafts.hasPending(1)).toBe(false);
+    const view = [...entry.views].find(view => view.textarea === textarea);
+    expect(view.status.textContent).toBe('');
+    expect(sessionStorage.getItem(`${drafts.prefix}1:${entry.key}`)).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('reconciles visible inclusion and body after clean peer ingestion', () => {
+    const view = modal.cards.get('draft-10');
+    drafts.ingest([{ ...view.textarea.draftEntry.base, revision: 4, included: 0, body: 'A newer excluded observation' }]);
+    expect(view.textarea.value).toBe('A newer excluded observation');
+    expect(view.include.checked).toBe(false);
+    expect(modal.selectedCount()).toBe(0);
+    expect(drafts.hasPending(1)).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(['selection', 'text'])('blocks publication for a visible-only %s mismatch', field => {
+    const view = modal.cards.get('draft-10');
+    if (field === 'selection') view.include.checked = false;
+    else view.textarea.value = 'Visible text not yet reflected in the store';
+    modal.manifest = manifest;
+    modal.renderFinal(manifest);
+    expect(modal.manifest).toBeNull();
+    expect(modal.finalSection.querySelector('input[type=checkbox]')).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('refuses a peer-updated decision that differs from the visible selected action', () => {
+    const entry = modal.bodyInput.draftEntry;
+    drafts.ingest([{ ...entry.base, draft_key: entry.key, revision: 3, event: 'APPROVE', included: true }]);
+    manifest.bodyRevision = 3;
+    manifest.event = 'APPROVE';
+    expect(modal.decisionCardButtons.get('COMMENT').getAttribute('aria-pressed')).toBe('true');
+    modal.manifest = manifest;
+    modal.renderFinal(manifest);
+    expect(modal.manifest).toBeNull();
+    expect(modal.finalSection.querySelector('input[type=checkbox]')).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(['account', 'head', 'repository', 'base'])('stops fast submission when fresh %s differs from visible intent', async field => {
+    const fresh = { ...manifest, target: { ...manifest.target, account: { ...manifest.target.account } } };
+    if (field === 'account') fresh.target.account.id++;
+    else fresh.target[field] = `new-${field}`;
+    fetch.mockResolvedValue({ ok: true, json: async () => fresh });
+    await modal.quickSubmit();
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(modal.manifest).toBe(fresh);
+    expect(modal.confirm.checked).toBe(false);
+    expect(modal.publishButton.disabled).toBe(true);
+  });
+
+  it('keeps an unchecked inspect-first preview from being bypassed by the submit chord', () => {
+    modal.manifest = manifest;
+    modal.renderFinal(manifest);
+    modal.onKeyDown({ key: 'Enter', metaKey: true, ctrlKey: false, shiftKey: false, preventDefault() {}, stopImmediatePropagation() {} });
+    expect(modal.confirm.checked).toBe(false);
+    expect(document.activeElement).toBe(modal.confirm);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('leaves invalid anchors to the explicit repair controls during fast submission', async () => {
+    const blocked = { ...manifest, blockers: ['Draft anchor is on an older head'], drafts: [
+      { ...manifest.drafts[0], errors: ['Draft anchor is on an older head'] }
+    ] };
+    fetch.mockResolvedValue({ ok: true, json: async () => blocked });
+    await modal.quickSubmit();
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(modal.confirm.checked).toBe(false);
+    expect(modal.publishButton.disabled).toBe(true);
+    expect(modal.cards.get('draft-10').anchorStatus.querySelector('button')).not.toBeNull();
   });
 
   it.each(['revision', 'body', 'included'])('refuses a fresh manifest whose %s differs from the visible authoring view', field => {

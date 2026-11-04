@@ -25,7 +25,7 @@ test('preserves pending body text, caret and modal ownership through the command
   await expect(editor).toBeVisible();
   await expect(editor).toHaveValue(body);
   await page.getByRole('button', { name: 'Skip — keep drafts local', exact: true }).click();
-  await page.getByRole('link', { name: 'Review inbox', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Review workspace' }).getByRole('link', { name: 'Review inbox', exact: true }).click();
   await page.goto(url);
   await openReviewAuthoring(page);
   await expect(editor).toHaveValue(body);

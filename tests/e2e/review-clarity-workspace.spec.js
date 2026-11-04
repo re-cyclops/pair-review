@@ -161,6 +161,34 @@ test('Requested lane uses earliest direct history, labelled team fallback and un
   await expect(prRow(page, 42).locator('.col-actions')).not.toContainText('Review requested changes');
 });
 
+test('inbox disclosures preserve row selection, target and saved comments', async ({ page, workspace }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(workspace.url);
+  const row = prRow(page, 42);
+  await expect(row.locator('.workspace-next-action')).toBeVisible();
+  await page.locator('.workspace-filters > summary').press('Enter');
+  await page.getByRole('combobox', { name: 'Repository filter', exact: true }).selectOption('example/alpha');
+  await expect(page.locator('#recent-reviews-tbody tr:visible')).toHaveCount(3);
+  await page.locator('.workspace-filters > summary').press('Enter');
+  await page.locator('[data-selection-tab="pr-tab"]').click();
+  const selected = row.locator('.col-select input');
+  await selected.check();
+  await row.locator('.workspace-row-more > summary').press('Enter');
+  await expect(row.getByRole('link', { name: 'Repository settings', exact: true })).toBeVisible();
+  await row.locator('.workspace-request-details > summary').press('Enter');
+  await expect(row.locator('.col-requested')).toContainText('@maintainer');
+  await expect(selected).toBeChecked();
+  await expect(page.locator('#pr-tab .col-select input:checked')).toHaveCount(1);
+  expect(page.url()).toBe(workspace.url + '/');
+  const state = await workspace.control({});
+  expect(state.comments.filter(comment => comment.review_id === 1).map(comment => comment.body)).toEqual([
+    'Removing this guard changes the failure path.',
+    'These assignments no longer share the same value.',
+    'Keep the file-level invariant explicit.'
+  ]);
+  expect(state.calls).toEqual([]);
+});
+
 test('selected bulk AI lifecycle occupies its own lane and preserves actual served model evidence', async ({ page, workspace }) => {
   await page.goto(workspace.url);
   await expect(prRow(page, 42).locator('.col-ai [data-ai-state="unreviewed"]')).toBeVisible();
@@ -190,6 +218,7 @@ for (const mode of ['PR', 'Local']) {
     const endpoint = mode === 'PR' ? '/api/pr/example/alpha/42/analyses' : '/api/local/' + localId + '/analyses';
     await page.goto(workspace.url + target);
     await expect(page.locator('#ai-panel-toggle')).toContainText(/Not reviewed/);
+    await page.locator('.workspace-progress-details > summary').click();
     await expect(page.getByRole('button', { name: 'Mark revision reviewed…', exact: true })).toBeEnabled();
     await analyze(page, workspace, endpoint, []);
     await page.reload();
@@ -268,6 +297,7 @@ test('explicit stale update retains draft/history and historical findings open t
   await banner.getByRole('button', { name: 'Update to latest commits' }).click();
   await expect(banner).toBeHidden();
   await expect(page.locator('#diff-container')).toContainText('revisedOnly');
+  await page.locator('.workspace-progress-details > summary').click();
   await expect(page.getByRole('button', { name: 'Mark revision reviewed…', exact: true })).toBeEnabled();
   const after = await workspace.control({});
   expect(after.comments.filter(comment => comment.review_id === 1)).toEqual(drafts);

@@ -60,6 +60,26 @@ describe('Inbox read ownership', () => {
     expect(Number.parseInt(inbox.status.textContent, 10)).toBe(1);
   });
 
+  it('recovers an empty search without clearing filters until the explicit reset action', () => {
+    inbox.search.value = 'no matching review';
+    inbox.view.value = 'approved';
+    inbox.hideApprovedBtn.click();
+    inbox.applyFilters(true);
+    expect(record.row.hidden).toBe(true);
+    expect(inbox.emptyState.hidden).toBe(false);
+    inbox.clearSearch.click();
+    expect(inbox.search.value).toBe('');
+    expect(inbox.view.value).toBe('approved');
+    expect(record.row.hidden).toBe(true);
+    expect(inbox.emptyState.hidden).toBe(false);
+    inbox.emptyState.querySelector('button:last-child').click();
+    expect(inbox.view.value).toBe('all');
+    expect(inbox.hideApproved).toBe(false);
+    expect(record.row.hidden).toBe(false);
+    expect(inbox.emptyState.hidden).toBe(true);
+    expect(dom.window.localStorage.getItem('pair-review-hide-approved')).toBe('false');
+  });
+
   it('moves only the shared status when an empty pane activates and its header arrives later', async () => {
     const doc = dom.window.document;
     const originalPane = doc.querySelector('.tab-pane');

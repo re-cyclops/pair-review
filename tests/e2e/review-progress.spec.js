@@ -50,6 +50,7 @@ test('merges viewed marks across tabs without implicitly reviewing the revision'
     await expect(checkbox(page, 'src/utils.js')).toBeChecked();
     await expect(checkbox(peer, 'src/main.js')).toBeChecked();
     expect(saved(testServer).reviewed).toBeUndefined();
+    await page.locator('.workspace-progress-details > summary').click();
     await page.getByRole('button', { name: 'Mark revision reviewed…', exact: true }).click();
     await page.keyboard.press('Escape');
     expect(saved(testServer).reviewed).toBeUndefined();
@@ -63,6 +64,7 @@ test('merges viewed marks across tabs without implicitly reviewing the revision'
 test('rejects confirmation after the head moves without advancing the baseline', async ({ page, testServer }) => {
   await page.goto(url);
   await waitForDiffToRender(page);
+  await page.locator('.workspace-progress-details > summary').click();
   await page.getByRole('button', { name: 'Mark revision reviewed…', exact: true }).click();
   moveHead(testServer);
   await page.getByRole('button', { name: 'Mark this revision reviewed', exact: true }).click();
@@ -79,6 +81,7 @@ test('does not authorize a newer revision behind an already loaded older diff', 
   });
   await page.goto(url);
   await waitForDiffToRender(page);
+  await page.locator('.workspace-progress-details > summary').click();
   await expect(page.getByRole('button', { name: 'Mark revision reviewed…', exact: true })).toBeDisabled();
   await expect(page.locator('.workspace-review-progress [role="alert"]')).toContainText('displayed diff');
   expect(saved(testServer).reviewed).toBeUndefined();
@@ -142,6 +145,7 @@ test('keeps refreshed findings on the selected run when an older response arrive
     await arrived;
     seed('newer-result', '02', 'Current finding text.');
     await page.evaluate(() => window.prManager.analysisHistoryManager.refresh({ switchToNew: true }));
+    await page.getByRole('button', { name: 'Tools', exact: true }).click();
     await page.getByRole('button', { name: 'Refresh PR', exact: true }).click();
     await expect(page.locator('#diff-container')).toContainText('Current finding text.');
     release();

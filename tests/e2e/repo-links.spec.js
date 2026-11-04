@@ -47,6 +47,7 @@ test.describe('Repo Links UI', () => {
 
     await page.goto('/pr/test-owner/test-repo/1');
     await waitForDiffToRender(page);
+    await page.getByRole('button', { name: 'Tools', exact: true }).click();
 
     // The endpoint should have been called with the test-owner/test-repo.
     expect(fetchedUrl).toContain('/api/repos/test-owner/test-repo/links');
@@ -91,7 +92,7 @@ test.describe('Repo Links UI', () => {
     await waitForDiffToRender(page);
 
     await expect(page.locator('#github-link')).toBeHidden();
-    // Settings and refresh remain visible — only the GitHub link is suppressed.
+    await page.getByRole('button', { name: 'Tools', exact: true }).click();
     await expect(page.locator('#settings-link')).toBeVisible();
     await expect(page.locator('#refresh-pr')).toBeVisible();
     // No external link is created when none is configured.
@@ -112,6 +113,7 @@ test.describe('Repo Links UI', () => {
 
     await page.goto('/pr/test-owner/test-repo/1');
     await waitForDiffToRender(page);
+    await page.getByRole('button', { name: 'Tools', exact: true }).click();
 
     // The default GitHub link stays visible.
     await expect(page.locator('#github-link')).toBeVisible();
@@ -163,6 +165,7 @@ test.describe('Repo Links UI', () => {
 
     await page.goto('/pr/test-owner/test-repo/1');
     await waitForDiffToRender(page);
+    await page.getByRole('button', { name: 'Tools', exact: true }).click();
 
     // No external link should have been inserted.
     await expect(page.locator('#external-link')).toHaveCount(0);
