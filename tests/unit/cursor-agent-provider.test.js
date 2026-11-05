@@ -64,8 +64,8 @@ describe('CursorAgentProvider', () => {
       expect(CursorAgentProvider.getProviderId()).toBe('cursor-agent');
     });
 
-    it('should return sonnet-4.6-thinking as default model', () => {
-      expect(CursorAgentProvider.getDefaultModel()).toBe('sonnet-4.6-thinking');
+    it('should return composer-1.5 as default model', () => {
+      expect(CursorAgentProvider.getDefaultModel()).toBe('composer-1.5');
     });
 
     it('should return array of models with expected structure', () => {
@@ -92,13 +92,14 @@ describe('CursorAgentProvider', () => {
       expect(modelIds).toContain('gpt-5.4-medium');
 
       // Check model structure for the default model
-      const defaultModel = models.find(m => m.id === 'sonnet-4.6-thinking');
+      const defaultModel = models.find(m => m.id === 'composer-1.5');
       expect(defaultModel).toMatchObject({
-        id: 'sonnet-4.6-thinking',
-        name: 'Claude 4.6 Sonnet (Thinking)',
+        id: 'composer-1.5',
+        name: 'Composer 1.5',
         tier: 'balanced',
         default: true
       });
+      expect(models.filter(m => m.default).map(m => m.id)).toEqual(['composer-1.5']);
     });
 
     it('should have correct tier assignments', () => {
@@ -129,7 +130,7 @@ describe('CursorAgentProvider', () => {
   describe('constructor', () => {
     it('should create instance with default model', () => {
       const provider = new CursorAgentProvider();
-      expect(provider.model).toBe('sonnet-4.6-thinking');
+      expect(provider.model).toBe('composer-1.5');
     });
 
     it('should create instance with specified model', () => {
@@ -660,6 +661,34 @@ describe('CursorAgentProvider', () => {
       const config = provider.getExtractionConfig('auto');
 
       expect(config.args).toContain('--custom');
+    });
+
+    it('should return merged provider + model env for the extraction model', () => {
+      const provider = new CursorAgentProvider('sonnet-4.5', {
+        env: { PROVIDER_VAR: 'p', SHARED: 'provider' },
+        models: [
+          { id: 'sonnet-4.5', env: { ANALYSIS_VAR: 'a' } },
+          { id: 'auto', env: { MODEL_VAR: 'm', SHARED: 'model' } }
+        ]
+      });
+      const config = provider.getExtractionConfig('auto');
+
+      // Extraction model's own env, not the analysis model's; model wins over provider
+      expect(config.env).toEqual({ PROVIDER_VAR: 'p', SHARED: 'model', MODEL_VAR: 'm' });
+    });
+
+    it('should include env in shell mode', () => {
+      process.env.PAIR_REVIEW_CURSOR_AGENT_CMD = 'docker run agent';
+      const provider = new CursorAgentProvider('sonnet-4.5', { env: { PROVIDER_VAR: 'p' } });
+      const config = provider.getExtractionConfig('auto');
+
+      expect(config.useShell).toBe(true);
+      expect(config.env).toEqual({ PROVIDER_VAR: 'p' });
+    });
+
+    it('should return empty env when none is configured', () => {
+      const provider = new CursorAgentProvider();
+      expect(provider.getExtractionConfig('auto').env).toEqual({});
     });
   });
 

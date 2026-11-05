@@ -1,6 +1,7 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
 import { test as base, expect } from '@playwright/test';
 import { spawn, execFileSync } from 'node:child_process';
+import { randomInt } from 'node:crypto';
 import { once } from 'node:events';
 import fs from 'node:fs/promises';
 import net from 'node:net';
@@ -9,7 +10,8 @@ import path from 'node:path';
 const Database = require('better-sqlite3');
 const serverScript = require.resolve('../utils/workspace-server.js');
 
-// Reserve both adjacent ports, not a worker-derived port that could hit a live workspace.
+// Validate both ports outside common client ephemeral ranges: outgoing fixture
+// requests must not take the admin port during the child startup handoff.
 async function availablePorts() {
   for (let attempt = 0; attempt < 30; attempt++) {
     const app = net.createServer();
@@ -17,7 +19,7 @@ async function availablePorts() {
     try {
       await new Promise((resolve, reject) => {
         app.once('error', reject);
-        app.listen(0, '127.0.0.1', resolve);
+        app.listen(randomInt(20000, 30000), '127.0.0.1', resolve);
       });
       const port = app.address().port;
       if (port === 65535) continue;

@@ -1,5 +1,6 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { createTestDatabase, closeTestDatabase } from '../utils/schema';
 
 // analyzer.js destructures createProvider from src/ai/index at load time
 // (line 2), so the binding is captured the first time the module is required.
@@ -12,8 +13,18 @@ const createProvider = vi.spyOn(aiIndex, 'createProvider');
 
 const Analyzer = require('../../src/ai/analyzer');
 const { AnalysisRunRepository } = require('../../src/database');
+const { GitWorktreeManager } = require('../../src/git/worktree');
+const { createGitFixture } = require('../utils/git-fixture');
+let checkout;
+let pinnedRead;
+let testDb;
 let baselineRead;
-afterEach(() => { baselineRead?.mockRestore(); baselineRead = null; });
+afterEach(() => {
+  baselineRead?.mockRestore(); baselineRead = null; pinnedRead?.mockRestore();
+  if (testDb?.open) closeTestDatabase(testDb);
+  testDb = null;
+  checkout?.close(); checkout = null; pinnedRead = null;
+});
 
 /**
  * Regression tests for issue #560: consolidation could silently drop every
@@ -300,7 +311,7 @@ describe('_intraLevelConsolidate parse-failure handling (issue #560)', () => {
 // levelOutcomes. Storage and the absent human baseline are isolated here.
 describe('analyzeAllLevels consolidation outcome mapping (issue #560)', () => {
   function createWiredAnalyzer() {
-    const analyzer = new Analyzer({}, 'sonnet', 'claude');
+    const analyzer = new Analyzer(testDb, 'sonnet', 'claude');
     analyzer.loadGeneratedFilePatterns = vi.fn().mockResolvedValue([]);
     analyzer.getChangedFilesList = vi.fn().mockResolvedValue(['src/a.js', 'src/b.js']);
     analyzer.storeSuggestions = vi.fn().mockResolvedValue(undefined);
@@ -317,6 +328,8 @@ describe('analyzeAllLevels consolidation outcome mapping (issue #560)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     baselineRead = vi.spyOn(AnalysisRunRepository.prototype, 'getById').mockResolvedValue(null);
+    testDb = createTestDatabase();
+    checkout = createGitFixture(['src/a.js', 'src/b.js']);
   });
 
   it('records levelOutcomes.consolidation = failed and orchestrationFailed when the consolidation response is unparseable', async () => {
@@ -325,7 +338,8 @@ describe('analyzeAllLevels consolidation outcome mapping (issue #560)', () => {
     const progressCallback = vi.fn();
 
     const result = await analyzer.analyzeAllLevels(
-      1, '/nonexistent-worktree', prMetadata, progressCallback, null, ['src/a.js', 'src/b.js'], runOptions
+      1, checkout.directory, { ...prMetadata, head_sha: checkout.head, base_sha: checkout.base },
+      progressCallback, null, ['src/a.js', 'src/b.js'], runOptions
     );
 
     expect(result.levelOutcomes.consolidation).toBe('failed');
@@ -345,7 +359,8 @@ describe('analyzeAllLevels consolidation outcome mapping (issue #560)', () => {
     });
 
     const result = await analyzer.analyzeAllLevels(
-      1, '/nonexistent-worktree', prMetadata, null, null, ['src/a.js', 'src/b.js'], runOptions
+      1, checkout.directory, { ...prMetadata, head_sha: checkout.head, base_sha: checkout.base },
+      null, null, ['src/a.js', 'src/b.js'], runOptions
     );
 
     expect(result.levelOutcomes.consolidation).toBe('success');
@@ -360,7 +375,7 @@ describe('runCouncilAnalysis intra-level consolidation failure (issue #560)', ()
   });
 
   function createCouncilAnalyzer() {
-    const analyzer = new Analyzer({}, 'sonnet', 'claude');
+    const analyzer = new Analyzer(testDb, 'sonnet', 'claude');
     analyzer.loadGeneratedFilePatterns = vi.fn().mockResolvedValue([]);
     analyzer.getChangedFilesList = vi.fn().mockResolvedValue(['src/a.js']);
     analyzer.storeSuggestions = vi.fn().mockResolvedValue(undefined);
@@ -396,6 +411,8 @@ describe('runCouncilAnalysis intra-level consolidation failure (issue #560)', ()
   beforeEach(() => {
     vi.clearAllMocks();
     baselineRead = vi.spyOn(AnalysisRunRepository.prototype, 'getById').mockResolvedValue(null);
+    testDb = createTestDatabase();
+    pinnedRead = vi.spyOn(GitWorktreeManager.prototype, 'assertPinnedWorktree').mockResolvedValue(undefined);
   });
 
   it('reports consolidation failed when Pass 1 is unparseable even though Pass 2 succeeds', async () => {

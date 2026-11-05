@@ -746,10 +746,14 @@ Most providers (Claude, Antigravity, Codex, Copilot, Muse) come with built-in mo
 
 ##### Muse models and the contributor tradeoff
 
-Muse exposes its built-in models as reasoning-effort variants over two underlying CLI models:
+Muse exposes its built-in models as reasoning-effort variants over four underlying CLI models:
 
 | Model ID | Tier | CLI model |
 |----------|------|-----------|
+| `muse-wonder-1.0-high` | thorough | `muse-wonder-1.0` |
+| `muse-wonder-1.0-max` | thorough | `muse-wonder-1.0` |
+| `muse-wonder-full-1.0-high` | thorough | `muse-wonder-full-1.0` |
+| `muse-wonder-full-1.0-max` | thorough | `muse-wonder-full-1.0` |
 | `muse-spark-1.3-max` | thorough | `muse-spark-1.3` |
 | `muse-spark-1.3-contributor-max` | thorough | `muse-spark-1.3-contributor` |
 | `muse-spark-1.3-xhigh` | thorough | `muse-spark-1.3` |
@@ -758,6 +762,8 @@ Muse exposes its built-in models as reasoning-effort variants over two underlyin
 | `muse-spark-1.3-contributor-high` | balanced | `muse-spark-1.3-contributor` |
 | `muse-spark-1.3-low` | fast | `muse-spark-1.3` |
 | `muse-spark-1.3-contributor-low` | fast | `muse-spark-1.3-contributor` |
+
+Muse Wonder (released October 2026) is Meta's frontier model line. `muse-wonder-1.0` costs $4/M input and $20/M output, several times Muse Spark, so it sits in the thorough tier and is not the default. `muse-wonder-full-1.0` is the larger variant. It is available only with a Muse Code Power Usage or Maximum Usage subscription and is not served through the pay-as-you-go API; other accounts get a "does not exist or you lack access" error. Muse Code subscriptions turn contributor mode on by default, so every Wonder entry passes `--contributor-mode off` for the run. `muse-wonder-1.0`/`muse-wonder` and `muse-wonder-full-1.0`/`muse-wonder-full` are aliases for the matching `-high` entries.
 
 `muse-spark-1.3` and `muse-spark` are convenience aliases for `muse-spark-1.3-high`. `muse-spark-1.3-contributor` is likewise an alias for `muse-spark-1.3-contributor-high` — worth knowing because it is the bare CLI model name, so `--model muse-spark-1.3-contributor` selects the data-sharing tier described below rather than erroring out.
 
@@ -921,8 +927,12 @@ Older runs without execution evidence remain **model not recorded**. On PR and
 Local review pages, the **AI findings** button shows the actionable finding count
 and opens the AI list; selecting a finding navigates to its code. No review,
 zero findings, a running review, and unavailable results have distinct states.
-On phones, findings use the main pane; choosing a current finding returns to its
-code, and closing the list restores the diff.
+On narrow screens, Review and Chat float over the diff with toolbar controls
+still reachable; their layouts adapt without rewriting saved preferences.
+The AI findings button closes an already-open AI list, or returns from another
+Review tab to the AI list. Choosing a current finding reveals its code.
+If a matched line cannot be displayed, recovery actions stay visible beside the
+diff instead of disappearing inside a closed Review drawer.
 Clicking **Edit** on an AI suggestion brings its editor into view below the sticky
 headers and focuses the text field, without animated scrolling.
 
@@ -1097,11 +1107,17 @@ unobserved chats. For interrupted-owner recovery, verify that the provider and
 its children have stopped, back up the database, then settle only that verified
 `chat_sessions` row. Do not rewrite active rows just to permit history removal.
 
-Schema 62 serializes checkout removal with analysis/import creation, chat
-activation and pool claims across processes using the same database. This is
-a checkout reservation, not authority to cancel another executor. Back up the
-database with a SQLite backup before upgrading; do not run an older binary
-against an upgraded shared database.
+Schema 63 reconciles upstream's 56–59 migrations with this fork's 56–62
+history, preserving authored drafts, publication receipts, posted-comment
+history and checkout ownership. Before upgrading an existing schema 1–62
+database, pair-review writes an online SQLite backup beside it as
+`<database>.schema-<version>-<uuid>.bak`. Stop other pair-review processes
+before the first upgrade; do not run older and newer binaries against the
+same upgraded database.
+
+Checkout reservations serialize removal with analysis/import creation, chat
+activation and pool claims across processes. A reservation is not authority
+to cancel another executor.
 
 An interrupted removal can leave a `worktree_locks` reservation. Its age or an
 absent server heartbeat does not prove that its Git subprocesses exited, so
@@ -1316,6 +1332,12 @@ Two `chat_providers.<id>` keys control this: `model` sets the default model for 
 
 Available chat provider IDs: `pi`, `omp`, `claude`, `codex`, `copilot-acp`, `opencode-acp`, `cursor-acp`. Each supports `command`, `args` (replaces defaults; for `pi`, `omp` and `claude` there are no default args — supplied args are appended after the generated flags, so use a multi-word `command` like `"devx omp"` for wrappers rather than `args`), `extra_args` (appends), and `env` overrides, plus `model` and `models_from` (see **Choosing a model** above). Codex chat also supports `sandbox`: use `workspace-write` by default, or `read-only` for discussion-only sessions. (Antigravity and Muse are analysis-only providers — neither CLI has an ACP mode, so there are no Antigravity or Muse chat providers.)
 
+**Idle chat agents:** A chat's agent process is shut down after `chat.idle_timeout_minutes` minutes without activity (default `10`; `0` disables), so closing the browser doesn't leave agents running. The conversation is kept and transparently resumed, with its history, on your next message. An agent is never shut down while it is starting or still working on a reply, and a conversation whose agent can't be resumed with its history (for example, an ACP agent without session-loading support) is kept running instead. A chat with no messages yet may be shut down either way — your first message then starts a fresh agent with the same context. Set it in the **Chat** section of the [global settings page](#global-settings-page) (applies on next start) or in config:
+
+```json
+{ "chat": { "idle_timeout_minutes": 30 } }
+```
+
 **Keyboard shortcut:** Press `p` then `c` to toggle the chat panel.
 
 ### Customization
@@ -1345,6 +1367,16 @@ The markdown includes file paths, line numbers, and your comments - everything t
 - See all comments in context with the diff
 - Edit or discard AI suggestions before finalizing
 - Comments include file and line number for precision
+
+### Posted Comments and Review History
+
+In PR mode, editing a comment you've already posted marks it **Edited since posted**. Choose **Update on GitHub** to update that same comment in place. Posted edits are explicit and separate from submitting new comments; they are never counted or posted as new drafts. If a pending review belongs to an unfinished pair-review submission, finish that review or manage it on the host first: its authorized text stays frozen while your newer local edit remains saved.
+
+If pair-review cannot confidently identify the original GitHub comment, or GitHub rejects an update, it reports the failure and leaves your local edit intact. It never creates a replacement comment. Dismissing a posted comment is local-only; it does not delete it on GitHub.
+
+Publication state is independent of local dismissal. Restoring or editing a posted comment does not enqueue it again. Review history records acknowledged outgoing text and stable host identities; an uncertain write remains unresolved rather than appearing as a successful posting.
+
+**Review history** lists submitted reviews newest first, with their state, date, comment/edit counts and summary preview. Open a review to read its full summary, comments as originally sent, and subsequent edits, with links back to GitHub and the diff. Use Back (or Escape) to return to the list; Escape from the list closes history. Legacy backfilled entries are approximate. Publication actions and history are not shown in local mode.
 
 ### GitHub Review Comments
 

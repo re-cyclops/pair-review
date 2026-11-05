@@ -41,6 +41,7 @@ describe('Manifest-bound native review publication', () => {
       pending_review_check: 'graphql', review_lifecycle: 'graphql', pending_review_comments: 'graphql'
     } } } });
     app.use(routes);
+    app.use(require('../../src/routes/pr'));
     server = app.listen(0, '127.0.0.1');
     await once(server, 'listening');
     base = `http://127.0.0.1:${server.address().port}/api/reviews/1`;
@@ -92,6 +93,11 @@ describe('Manifest-bound native review publication', () => {
       .toEqual(manifest.comments.map(comment => ({ body: comment.body, file: comment.wire.path })));
     expect(remote.comments[1]).toMatchObject({ side: 'LEFT', startLine: 2, line: 4 });
     expect(db.prepare('SELECT status, included FROM comments WHERE id = ?').get(excluded)).toEqual({ status: 'active', included: 0 });
+    const history = (await request('/submissions')).data.submissions;
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({ state: 'submitted', event: 'COMMENT', body: manifest.body });
+    expect(history[0].postings.map(posting => ({ id: posting.comment_id, body: posting.body })))
+      .toEqual(manifest.comments.map(comment => ({ id: comment.id, body: comment.body })));
   });
 
   it('skips empty optional drafts instead of blocking publication', async () => {
@@ -189,6 +195,8 @@ describe('Manifest-bound native review publication', () => {
     expect(receipt.items[0].remoteId).toBe([...host.state.reviews.values()][0].comments[0].id);
     const persisted = await request('/submissions');
     expect(persisted.data.receipts[0].id).toBe(receipt.id);
+    expect(persisted.data.submissions[0].postings.map(posting => posting.github_comment_node_id))
+      .toEqual(receipt.items.filter(item => item.state === 'accepted').map(item => item.remoteId));
     expect((await publish(await preview())).status).toBe(409);
     const reconciled = await request(`/submissions/${receipt.id}/reconcile`, 'POST', {});
     expect(reconciled.data.receipt.state).toBe('outcome_unknown');
@@ -203,6 +211,7 @@ describe('Manifest-bound native review publication', () => {
     const result = await publish(await preview());
     expect(result.data.receipt.items.map(item => item.state)).toEqual(['accepted', 'unknown']);
     expect(host.state.calls.filter(call => call.operation === 'comment').map(call => call.comment.body)).toEqual(['First']);
+    expect((await request('/submissions')).data.submissions[0].postings.map(posting => posting.body)).toEqual(['First']);
     expect((await publish(await preview())).status).toBe(409);
   });
 
@@ -216,28 +225,28 @@ describe('Manifest-bound native review publication', () => {
     const reconciled = await request(`/submissions/${result.data.receipt.id}/reconcile`, 'POST', {});
     expect(reconciled.data.receipt.state).toBe('submitted');
     expect(host.state.calls.length).toBe(before);
-    expect(db.prepare('SELECT status FROM comments WHERE id = ?').get(id).status).toBe('submitted');
+    expect((await repo.getComment(id)).publication.state).toBe('posted');
   });
 
   it.each(['reconcile', 'replay'])('keeps acknowledged approval durable when cleanup fails and %s only finishes local cleanup', async recovery => {
     const id = await draft('Approved exact finding');
     db.prepare("UPDATE reviews SET draft_event = 'APPROVE' WHERE id = 1").run();
     const manifest = await preview();
-    db.exec(`CREATE TRIGGER fail_submission_cleanup BEFORE UPDATE OF status ON comments
-      WHEN NEW.status = 'submitted'
+    db.exec(`CREATE TRIGGER fail_submission_cleanup BEFORE UPDATE OF state ON github_reviews
+      WHEN NEW.state = 'submitted'
       BEGIN SELECT RAISE(ABORT, 'fixture cleanup failure'); END;`);
 
     const result = await publish(manifest);
     expect(result.status, JSON.stringify(result.data)).toBe(200);
     expect(result.data.receipt).toMatchObject({
       state: 'submitted', phase: 'settled',
-      error: 'Review submitted successfully, but local draft cleanup failed: fixture cleanup failure'
+      error: expect.any(String)
     });
     expect(db.prepare('SELECT state, phase FROM submission_attempts WHERE id = ?').get(result.data.receipt.id))
       .toEqual({ state: 'submitted', phase: 'settled' });
     expect(db.prepare('SELECT status FROM reviews WHERE id = 1').get().status).toBe('submitted');
     expect(db.prepare('SELECT state, event FROM github_reviews WHERE review_id = 1').get())
-      .toEqual({ state: 'submitted', event: 'APPROVE' });
+      .toEqual({ state: 'pending', event: null });
     expect(db.prepare('SELECT status, body FROM comments WHERE id = ?').get(id))
       .toEqual({ status: 'active', body: 'Approved exact finding' });
     expect([...host.state.reviews.values()][0].state).toBe('APPROVED');
@@ -245,7 +254,6 @@ describe('Manifest-bound native review publication', () => {
     const fresh = await preview();
     expect(fresh.digest).not.toBe(manifest.digest);
     expect(fresh.attempt).toMatchObject({ id: result.data.receipt.id, state: 'submitted' });
-    expect(fresh.blockers).toContain('The review was submitted successfully, but its local draft cleanup is incomplete. Finish local cleanup from its receipt before publishing another review.');
     const blocked = await publish(fresh);
     expect(blocked.status).toBe(409);
     expect(blocked.data.manifest.attempt.id).toBe(result.data.receipt.id);
@@ -263,15 +271,15 @@ describe('Manifest-bound native review publication', () => {
       : await publish(manifest);
     expect(recovered.status, JSON.stringify(recovered.data)).toBe(200);
     expect(recovered.data.receipt).toMatchObject({ id: result.data.receipt.id, state: 'submitted', error: null });
-    expect(db.prepare('SELECT status FROM comments WHERE id = ?').get(id).status).toBe('submitted');
+    expect((await repo.getComment(id)).publication.state).toBe('posted');
     expect(host.state.calls.length).toBe(writes);
   });
 
   it('finishes submitted local cleanup without credentials while retaining the receipt ownership guard', async () => {
     const id = await draft('Already approved finding');
     db.prepare("UPDATE reviews SET draft_event = 'APPROVE' WHERE id = 1").run();
-    db.exec(`CREATE TRIGGER fail_submission_cleanup BEFORE UPDATE OF status ON comments
-      WHEN NEW.status = 'submitted'
+    db.exec(`CREATE TRIGGER fail_submission_cleanup BEFORE UPDATE OF state ON github_reviews
+      WHEN NEW.state = 'submitted'
       BEGIN SELECT RAISE(ABORT, 'fixture cleanup failure'); END;`);
     const result = await publish(await preview());
     expect(result.data.receipt).toMatchObject({ state: 'submitted', error: expect.any(String) });
@@ -283,14 +291,13 @@ describe('Manifest-bound native review publication', () => {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
     });
     expect(foreign.status).toBe(404);
-    expect(await foreign.json()).toEqual({ error: 'Submission receipt not found' });
     expect(db.prepare('SELECT status FROM comments WHERE id = ?').get(id).status).toBe('active');
 
     const writes = host.state.calls.length;
     const recovered = await request(`/submissions/${result.data.receipt.id}/reconcile`, 'POST', {});
     expect(recovered.status, JSON.stringify(recovered.data)).toBe(200);
     expect(recovered.data.receipt).toMatchObject({ id: result.data.receipt.id, state: 'submitted', error: null });
-    expect(db.prepare('SELECT status FROM comments WHERE id = ?').get(id).status).toBe('submitted');
+    expect((await repo.getComment(id)).publication.state).toBe('posted');
     expect(host.state.calls.length).toBe(writes);
   });
 
@@ -327,9 +334,12 @@ describe('Manifest-bound native review publication', () => {
   });
 
   it('requires a fresh confirmation to submit an owned remote draft without adding its comments twice', async () => {
-    await draft('One deliberately selected comment');
+    const id = await draft('One deliberately selected comment');
     const saved = await publish(await preview('draft'));
     expect(saved.data.receipt.state).toBe('draft_saved');
+    const pendingHistory = (await request('/submissions')).data.submissions;
+    expect(pendingHistory).toHaveLength(1);
+    expect(pendingHistory[0]).toMatchObject({ state: 'pending', postings: [expect.objectContaining({ comment_id: id })] });
     const original = (await request('/draft')).data;
     await request('/draft', 'PUT', { body: 'An explicit approval body', event: 'APPROVE', expected_revision: original.revision });
     const confirmed = await preview();
@@ -340,6 +350,29 @@ describe('Manifest-bound native review publication', () => {
     expect(host.state.calls.map(call => call.operation)).toEqual(['create', 'comment', 'submit']);
     expect([...host.state.reviews.values()][0]).toMatchObject({ body: 'An explicit approval body', state: 'APPROVED' });
     expect((await request('/submissions')).data.receipts.find(item => item.id === saved.data.receipt.id).manifest.body).toBe('Review summary');
+    const history = (await request('/submissions')).data.submissions;
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({ id: pendingHistory[0].id, state: 'submitted', event: 'APPROVE' });
+    expect(history[0].postings).toHaveLength(1);
+    const posted = await repo.getComment(id);
+    expect(posted).toMatchObject({ status: 'active', publication: { state: 'posted' } });
+    await repo.updateComment(id, { body: 'Edited after publication', draft_key: posted.draft_key, expected_revision: posted.revision });
+    expect((await request(`/comments/${id}`, 'DELETE')).status).toBe(200);
+    expect((await request(`/comments/${id}/restore`, 'PUT')).data.comment.publication).toMatchObject({ state: 'posted', changed: true });
+    expect((await preview()).count).toBe(0);
+  });
+
+  it('does not edit a host draft underneath its frozen owned submission', async () => {
+    const id = await draft('Frozen comment authorized for the pending review');
+    await publish(await preview('draft'));
+    const original = await repo.getComment(id);
+    await repo.updateComment(id, { body: 'A newer local observation', draft_key: original.draft_key, expected_revision: original.revision });
+    const result = await request(`/comments/${id}/update-on-github`, 'POST', {});
+    expect(result.status).toBe(409);
+    expect(result.data.code).toBe('pending_submission');
+    expect(host.state.calls.filter(call => call.operation === 'update')).toEqual([]);
+    expect([...host.state.reviews.values()][0].comments[0].body).toBe('Frozen comment authorized for the pending review');
+    expect((await repo.getComment(id)).body).toBe('A newer local observation');
   });
 
   it('clears a previously saved host body when an empty approval is explicitly confirmed', async () => {

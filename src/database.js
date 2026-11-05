@@ -23,7 +23,7 @@ function getDbPath() {
 /**
  * Current schema version - increment this when adding new migrations
  */
-const CURRENT_SCHEMA_VERSION = 62;
+const CURRENT_SCHEMA_VERSION = 63;
 
 /**
  * Database schema SQL statements
@@ -56,6 +56,27 @@ const SCHEMA_SQL = {
       draft_revision INTEGER NOT NULL DEFAULT 1,
       associated_pr TEXT,
       review_progress TEXT NOT NULL DEFAULT '{}'
+    )
+  `,
+
+  comment_postings: `
+    CREATE TABLE IF NOT EXISTS comment_postings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      comment_id INTEGER NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
+      github_review_row_id INTEGER REFERENCES github_reviews(id) ON DELETE SET NULL,
+      comment_body TEXT,
+      body TEXT NOT NULL,
+      file TEXT,
+      line_start INTEGER,
+      line_end INTEGER,
+      side TEXT,
+      is_file_level INTEGER NOT NULL DEFAULT 0,
+      github_comment_id TEXT,
+      github_comment_node_id TEXT,
+      github_comment_url TEXT,
+      backfilled INTEGER NOT NULL DEFAULT 0,
+      kind TEXT NOT NULL DEFAULT 'post' CHECK (kind IN ('post', 'update')),
+      posted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `,
 
@@ -370,7 +391,9 @@ const SCHEMA_SQL = {
       last_fetched_at TEXT,
       last_fetch_attempt_at TEXT,
       fetch_failure_count INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      holder_pid INTEGER,
+      holder_claimed_at TEXT
     )
   `,
 
@@ -432,6 +455,8 @@ const SCHEMA_SQL = {
  * Index SQL statements for performance
  */
 const INDEX_SQL = [
+  'CREATE INDEX IF NOT EXISTS idx_comment_postings_comment ON comment_postings(comment_id, id)',
+  'CREATE INDEX IF NOT EXISTS idx_comment_postings_github_review ON comment_postings(github_review_row_id)',
   'CREATE INDEX IF NOT EXISTS idx_reviews_pr ON reviews(pr_number, repository)',
   'CREATE INDEX IF NOT EXISTS idx_comments_review_file ON comments(review_id, file, line_start)',
   'CREATE INDEX IF NOT EXISTS idx_comments_ai_run ON comments(ai_run_id)',
@@ -525,6 +550,27 @@ function tableExists(db, tableName) {
     `SELECT name FROM sqlite_master WHERE type='table' AND name=?`
   ).get(tableName);
   return !!row;
+}
+
+// Bind each legacy comment's values rather than referencing outer columns in
+// ORDER BY (unsupported by SQLite). Guarding by posting makes crash retry safe.
+function backfillLegacyPostings(db) {
+  const comments = db.prepare(`SELECT * FROM comments c
+    WHERE status IN ('submitted', 'draft')
+      AND NOT EXISTS (SELECT 1 FROM comment_postings p WHERE p.comment_id = c.id)`).all();
+  const findReview = db.prepare(`SELECT id FROM github_reviews WHERE review_id = ?
+    ORDER BY (state = 'pending') = ? DESC,
+      julianday(created_at) <= julianday(?) + 5.0/86400 DESC,
+      created_at DESC, id DESC LIMIT 1`);
+  const insert = db.prepare(`INSERT INTO comment_postings
+    (comment_id, github_review_row_id, comment_body, body, file, line_start, line_end,
+      side, is_file_level, backfilled, posted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, COALESCE(?, CURRENT_TIMESTAMP))`);
+  for (const c of comments) {
+    const review = findReview.get(c.review_id, c.status === 'draft' ? 1 : 0, c.updated_at);
+    insert.run(c.id, review?.id ?? null, c.body, c.body ?? '', c.file,
+      c.line_start, c.line_end, c.side, c.is_file_level || 0, c.updated_at);
+  }
 }
 
 const MIGRATIONS = {
@@ -2401,18 +2447,90 @@ const MIGRATIONS = {
     }
     console.log('Migration to schema version 55 complete');
   },
+
   56: (db) => {
     db.transaction(() => {
-      if (tableExists(db, 'analysis_runs') && !columnExists(db, 'analysis_runs', 'activity_state')) {
-        db.exec('ALTER TABLE analysis_runs ADD COLUMN activity_state TEXT');
-      }
+      db.exec(SCHEMA_SQL.comment_postings);
+      db.exec('CREATE INDEX IF NOT EXISTS idx_comment_postings_comment ON comment_postings(comment_id, id)');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_comment_postings_github_review ON comment_postings(github_review_row_id)');
+      backfillLegacyPostings(db);
     })();
   },
+
   57: (db) => {
     db.transaction(() => {
+      backfillLegacyPostings(db);
+      // Fix obsolete pending duplicates without deleting history. Subsequent
+      // upserts propagate state to all rows of the same GitHub identity.
+      const pending = db.prepare("SELECT * FROM github_reviews WHERE state = 'pending'").all();
+      const newer = db.prepare(`SELECT * FROM github_reviews WHERE review_id = ? AND id > ?
+        AND state != 'pending' AND
+        ((? IS NOT NULL AND github_node_id = ?) OR (? IS NOT NULL AND github_review_id = ?))
+        ORDER BY id DESC LIMIT 1`);
+      for (const row of pending) {
+        const match = newer.get(row.review_id, row.id, row.github_node_id, row.github_node_id,
+          row.github_review_id, row.github_review_id);
+        if (match) db.prepare('UPDATE github_reviews SET state = ?, submitted_at = ?, event = ? WHERE id = ?')
+          .run(match.state, match.submitted_at, match.event, row.id);
+      }
+      db.exec("UPDATE comments SET status = 'active' WHERE source = 'user' AND status IN ('submitted', 'draft')");
+      db.exec("UPDATE comments SET status = 'submitted' WHERE source = 'ai' AND status = 'draft'");
+    })();
+  },
+
+  58: (db) => {
+    if (!columnExists(db, 'comment_postings', 'kind')) {
+      db.exec("ALTER TABLE comment_postings ADD COLUMN kind TEXT NOT NULL DEFAULT 'post' CHECK (kind IN ('post', 'update'))");
+    }
+  },
+
+  // Migration to version 59: record which pair-review process holds a pool
+  // worktree. Several processes can share one database (two --headless runs,
+  // or a headless run beside the server); startup cleanup and idle release
+  // now skip or refuse rows a live peer holds. Existing rows get NULL holders,
+  // which startup treats as dead. Each ALTER is guarded by columnExists so a
+  // re-run after a crash between the two finishes the remaining piece.
+  // The checks and ALTERs run in one IMMEDIATE transaction: two processes
+  // starting together against a v58 database would otherwise both see the
+  // column missing, and the second ALTER would fail with a duplicate-column
+  // error. Under the write lock the second process waits (busy timeout),
+  // then sees the columns and skips. runVersionedMigrations does not wrap
+  // migrations in a transaction; if a caller ever does, better-sqlite3 turns
+  // this into a SAVEPOINT inside the caller's transaction.
+  59: (db) => {
+    console.log('Running migration to schema version 59: add holder process to worktree_pool...');
+    db.transaction(() => {
+      if (!tableExists(db, 'worktree_pool')) {
+        console.log('  worktree_pool table does not exist, skipping');
+        return;
+      }
+      if (!columnExists(db, 'worktree_pool', 'holder_pid')) {
+        db.exec('ALTER TABLE worktree_pool ADD COLUMN holder_pid INTEGER');
+        console.log('  Added holder_pid column to worktree_pool');
+      } else {
+        console.log('  holder_pid column already present; nothing to do');
+      }
+      if (!columnExists(db, 'worktree_pool', 'holder_claimed_at')) {
+        db.exec('ALTER TABLE worktree_pool ADD COLUMN holder_claimed_at TEXT');
+        console.log('  Added holder_claimed_at column to worktree_pool');
+      } else {
+        console.log('  holder_claimed_at column already present; nothing to do');
+      }
+    }).immediate();
+    console.log('Migration to schema version 59 complete');
+  },
+  60: (db) => {
+    db.transaction(() => {
       const additions = {
+        analysis_runs: { activity_state: 'TEXT', review_baseline: 'TEXT' },
         comments: { draft_key: 'TEXT', revision: 'INTEGER NOT NULL DEFAULT 1', included: 'INTEGER NOT NULL DEFAULT 1 CHECK(included IN (0, 1))', deleted_at: 'TEXT' },
-        reviews: { draft_body: "TEXT NOT NULL DEFAULT ''", draft_event: "TEXT NOT NULL DEFAULT 'COMMENT' CHECK(draft_event IN ('COMMENT', 'APPROVE', 'REQUEST_CHANGES'))", draft_revision: 'INTEGER NOT NULL DEFAULT 1' }
+        reviews: {
+          draft_body: "TEXT NOT NULL DEFAULT ''",
+          draft_event: "TEXT NOT NULL DEFAULT 'COMMENT' CHECK(draft_event IN ('COMMENT', 'APPROVE', 'REQUEST_CHANGES'))",
+          draft_revision: 'INTEGER NOT NULL DEFAULT 1',
+          associated_pr: 'TEXT',
+          review_progress: "TEXT NOT NULL DEFAULT '{}'"
+        }
       };
       for (const [table, columns] of Object.entries(additions)) {
         if (!tableExists(db, table)) continue;
@@ -2420,33 +2538,19 @@ const MIGRATIONS = {
           if (!columnExists(db, table, column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
         }
       }
-      if (tableExists(db, 'comments')) {
+      db.exec(SCHEMA_SQL.github_collection_observations);
+      if (tableExists(db, 'comments') && tableExists(db, 'reviews')) {
         db.exec("UPDATE comments SET draft_key = lower(hex(randomblob(16))) WHERE source = 'user' AND draft_key IS NULL");
+        initializeDraftTracking(db);
+        require('./review-submission').initializeSubmissionState(db);
       }
-      initializeDraftTracking(db);
-    })();
-  },
-  58: (db) => {
-    db.transaction(() => {
-      if (tableExists(db, 'reviews') && !columnExists(db, 'reviews', 'associated_pr')) db.exec('ALTER TABLE reviews ADD COLUMN associated_pr TEXT');
-      if (tableExists(db, 'reviews') && tableExists(db, 'comments')) require('./review-submission').initializeSubmissionState(db);
-    })();
-  },
-  59: (db) => {
-    db.exec(SCHEMA_SQL.github_collection_observations);
-  },
-  60: (db) => {
-    db.transaction(() => {
-      if (tableExists(db, 'reviews') && !columnExists(db, 'reviews', 'review_progress')) db.exec("ALTER TABLE reviews ADD COLUMN review_progress TEXT NOT NULL DEFAULT '{}'");
-      if (tableExists(db, 'analysis_runs') && !columnExists(db, 'analysis_runs', 'review_baseline')) db.exec('ALTER TABLE analysis_runs ADD COLUMN review_baseline TEXT');
       if (!tableExists(db, 'reviews') || !tableExists(db, 'pr_metadata')) return;
       for (const row of db.prepare(`SELECT p.rowid AS metadata_id, p.pr_data, r.id AS review_id FROM pr_metadata p
         LEFT JOIN reviews r ON r.repository = p.repository COLLATE NOCASE AND r.pr_number = p.pr_number`).all()) {
         let data;
         try { data = JSON.parse(row.pr_data); } catch { continue; }
         if (!data || !Object.hasOwn(data, 'viewedFiles')) continue;
-        // Legacy marks have no content/revision evidence; preserve them as
-        // unverified history rather than silently certifying the current head.
+        // Legacy marks have no revision evidence; retain them as unverified history.
         if (row.review_id && Array.isArray(data.viewedFiles)) {
           db.prepare("UPDATE reviews SET review_progress = json_set(review_progress, '$.legacyFiles', json(?)) WHERE id = ?")
             .run(JSON.stringify(data.viewedFiles.filter(file => typeof file === 'string')), row.review_id);
@@ -2461,6 +2565,16 @@ const MIGRATIONS = {
   },
   62: (db) => {
     db.exec(SCHEMA_SQL.worktree_locks);
+  },
+  // The fork used 56–62 for different tables than upstream's 56–59.
+  // Repair by schema, including interrupted upgrades, before trusting either history.
+  63: (db) => {
+    db.transaction(() => {
+      db.exec(SCHEMA_SQL.comment_postings);
+      for (const version of [58, 59, 60, 61, 62]) MIGRATIONS[version](db);
+      require('./review-submission').backfillSubmissionHistory(db);
+      for (const version of [56, 57]) MIGRATIONS[version](db);
+    }).immediate();
   }
 };
 
@@ -2496,6 +2610,14 @@ function runVersionedMigrations(db) {
   }
 
   console.log(`Database schema version: ${currentVersion}, target: ${CURRENT_SCHEMA_VERSION}`);
+  // Either lineage may own these numbers; migration 63 repairs both atomically.
+  if (currentVersion >= 56 && currentVersion <= 62) {
+    MIGRATIONS[63](db);
+    setSchemaVersion(db, 63);
+    console.log('Database schema reconciled to version 63');
+    return;
+  }
+
 
   // Run migrations sequentially
   for (let version = currentVersion + 1; version <= CURRENT_SCHEMA_VERSION; version++) {
@@ -2555,8 +2677,19 @@ async function initializeDatabase(dbName) {
     const db = new Database(getDbPath());
     // Enable foreign key enforcement (required for CASCADE to work)
     db.pragma('foreign_keys = ON');
-    setupSchema(db);
-    return db;
+    try {
+      const version = getSchemaVersion(db);
+      if (version > 0 && version < 63) {
+        const backupPath = `${getDbPath()}.schema-${version}-${randomUUID()}.bak`;
+        await db.backup(backupPath);
+        console.log(`Database backup before schema reconciliation: ${backupPath}`);
+      }
+      setupSchema(db);
+      return db;
+    } catch (error) {
+      db.close();
+      throw error;
+    }
   } catch (error) {
     console.error('Database connection error:', error.message);
 
@@ -3086,7 +3219,34 @@ class WorktreeRepository {
 }
 
 /**
- * WorktreePoolRepository class for managing pool worktree database records
+ * Validate the process ID a pool claim is stamped with. Every holder-taking
+ * WorktreePoolRepository method requires one; the repository never reads
+ * process.pid itself, so the caller (WorktreePoolLifecycle) owns identity.
+ * @param {*} holderPid
+ * @param {string} method - Method name for the error message
+ */
+function assertHolderPid(holderPid, method) {
+  if (!Number.isInteger(holderPid) || holderPid <= 0) {
+    throw new TypeError(`WorktreePoolRepository.${method}: holderPid must be a positive integer, got ${holderPid}`);
+  }
+}
+
+/**
+ * Pool worktree rows record the pair-review process that holds them
+ * (`holder_pid`, `holder_claimed_at`). Several processes can share one
+ * database, so every claim stamps the claimant, and the normal releases
+ * (`markAvailable`, `abandonSwitch`) are gated on still being the holder: in
+ * normal operation a process only frees a row it holds.
+ *
+ * Deliberate exceptions, which do not check the holder:
+ * - `forceMarkAvailable` serves user-initiated deletes (releaseForDeletion)
+ *   and frees the row whoever holds it;
+ * - `delete` serves user-initiated destroys (destroyPoolWorktree) and the
+ *   removal of stale or orphaned rows the caller has just claimed;
+ * - `deleteReservation` removes a failed `creating` placeholder, gated on
+ *   status only;
+ * - `resetStaleAndPreserve` (startup) checks holder liveness instead of
+ *   holding: it reclaims or resets only rows whose holder is dead.
  */
 class WorktreePoolRepository {
   constructor(db) {
@@ -3100,11 +3260,13 @@ class WorktreePoolRepository {
    * @param {string} params.repository - owner/repo
    * @param {string} params.path - Absolute filesystem path
    * @param {number} [params.prNumber] - If provided, insert as 'in_use' for this PR (avoids race with claimAvailable)
+   * @param {number} [params.holderPid] - Required with prNumber: the process that holds the in_use row
    */
-  async create({ id, repository, path, prNumber }) {
+  async create({ id, repository, path, prNumber, holderPid }) {
     const now = new Date().toISOString();
     if (prNumber != null) {
-      await run(this.db, `INSERT INTO worktree_pool (id, repository, path, status, current_pr_number, last_switched_at, created_at) VALUES (?, ?, ?, 'in_use', ?, ?, ?)`, [id, repository, path, prNumber, now, now]);
+      assertHolderPid(holderPid, 'create');
+      await run(this.db, `INSERT INTO worktree_pool (id, repository, path, status, current_pr_number, last_switched_at, created_at, holder_pid, holder_claimed_at) VALUES (?, ?, ?, 'in_use', ?, ?, ?, ?, ?)`, [id, repository, path, prNumber, now, now, holderPid, now]);
     } else {
       await run(this.db, `INSERT INTO worktree_pool (id, repository, path, status, created_at) VALUES (?, ?, ?, 'available', ?)`, [id, repository, path, now]);
     }
@@ -3162,26 +3324,102 @@ class WorktreePoolRepository {
   }
 
   /**
-   * Mark a pool worktree as in_use.
+   * Conditionally mark a pool worktree in_use for a PR, completing a claim
+   * this process already holds. Clears current_review_id (the caller sets
+   * the review owner afterwards).
+   *
+   * - fromStatus 'switching' (end of a PR switch): requires the row to still be
+   *   `switching` and held by holderPid.
+   * - fromStatus 'in_use' (end of a refresh): requires the row to still be
+   *   `in_use` for this PR and held by holderPid.
+   *
+   * A false return means the row was freed or taken over while the caller was
+   * working on it; nothing is written.
+   *
+   * @param {string} id - Pool worktree ID
+   * @param {number} prNumber - PR number the row is being marked for
+   * @param {number} holderPid - Process that must hold the row
+   * @param {'switching'|'in_use'} fromStatus - Status the row must still be in
+   * @returns {Promise<boolean>} true if the row was updated
    */
-  async markInUse(id, prNumber) {
+  async markInUse(id, prNumber, holderPid, fromStatus) {
+    assertHolderPid(holderPid, 'markInUse');
     const now = new Date().toISOString();
-    await run(this.db, `UPDATE worktree_pool SET status = 'in_use', current_pr_number = ?, last_switched_at = ?, current_review_id = NULL WHERE id = ?`, [prNumber, now, id]);
+    let result;
+    if (fromStatus === 'switching') {
+      result = await run(this.db, `UPDATE worktree_pool SET status = 'in_use', current_pr_number = ?, last_switched_at = ?, current_review_id = NULL WHERE id = ? AND status = 'switching' AND holder_pid = ?`, [prNumber, now, id, holderPid]);
+    } else if (fromStatus === 'in_use') {
+      result = await run(this.db, `UPDATE worktree_pool SET status = 'in_use', current_pr_number = ?, last_switched_at = ?, current_review_id = NULL WHERE id = ? AND status = 'in_use' AND current_pr_number = ? AND holder_pid = ?`, [prNumber, now, id, prNumber, holderPid]);
+    } else {
+      throw new TypeError(`WorktreePoolRepository.markInUse: fromStatus must be 'switching' or 'in_use', got ${fromStatus}`);
+    }
+    return result.changes > 0;
+  }
+
+  /** Restore a failed same-PR refresh without releasing a peer's ownership. */
+  async restoreFailedRefresh(id, prNumber, holderPid, restorePid) {
+    assertHolderPid(holderPid, 'restoreFailedRefresh');
+    assertHolderPid(restorePid, 'restoreFailedRefresh');
+    const result = await run(this.db, `UPDATE worktree_pool SET status = 'in_use', holder_pid = ?
+      WHERE id = ? AND current_pr_number = ? AND status = 'switching' AND holder_pid = ?`,
+    [restorePid, id, prNumber, holderPid]);
+    return result.changes > 0;
   }
 
   /**
-   * Mark a pool worktree as available (evictable).
-   * Clears current_review_id to release ownership.
+   * Atomically take an `available` pool worktree that still carries this PR
+   * back into use (the setup route's reclaim fast path). Conditional on the
+   * row still being available for the same PR, so a peer that claimed it
+   * first is never overwritten.
+   *
+   * @param {string} id - Pool worktree ID
+   * @param {number} prNumber - PR number the row must still carry
+   * @param {number} holderPid - Process taking the row
+   * @returns {Promise<boolean>} true if the row was reclaimed
    */
-  async markAvailable(id) {
-    await run(this.db, `UPDATE worktree_pool SET status = 'available', current_review_id = NULL WHERE id = ?`, [id]);
+  async reclaimAvailableForPR(id, prNumber, holderPid) {
+    assertHolderPid(holderPid, 'reclaimAvailableForPR');
+    const now = new Date().toISOString();
+    const result = await run(this.db, `UPDATE worktree_pool SET status = 'in_use', last_switched_at = ?, current_review_id = NULL, holder_pid = ?, holder_claimed_at = ? WHERE id = ? AND status = 'available' AND current_pr_number = ?`, [now, holderPid, now, id, prNumber]);
+    return result.changes > 0;
   }
 
   /**
-   * Mark a pool worktree as switching (transitional state during PR switch).
+   * Mark a pool worktree available (evictable), but only if it is `in_use`
+   * and held by holderPid. Clears review ownership and the holder.
+   *
+   * @param {string} id - Pool worktree ID
+   * @param {number} holderPid - Process that must hold the row
+   * @returns {Promise<boolean>} true if the row was released
    */
-  async markSwitching(id) {
-    await run(this.db, `UPDATE worktree_pool SET status = 'switching' WHERE id = ?`, [id]);
+  async markAvailable(id, holderPid) {
+    assertHolderPid(holderPid, 'markAvailable');
+    const result = await run(this.db, `UPDATE worktree_pool SET status = 'available', current_review_id = NULL, holder_pid = NULL, holder_claimed_at = NULL WHERE id = ? AND status = 'in_use' AND holder_pid = ?`, [id, holderPid]);
+    return result.changes > 0;
+  }
+
+  /**
+   * Roll back a failed PR switch: return a `switching` row held by holderPid
+   * to `available`. Clears review ownership and the holder.
+   *
+   * @param {string} id - Pool worktree ID
+   * @param {number} holderPid - Process that must hold the row
+   * @returns {Promise<boolean>} true if the row was rolled back
+   */
+  async abandonSwitch(id, holderPid) {
+    assertHolderPid(holderPid, 'abandonSwitch');
+    const result = await run(this.db, `UPDATE worktree_pool SET status = 'available', current_review_id = NULL, holder_pid = NULL, holder_claimed_at = NULL WHERE id = ? AND status = 'switching' AND holder_pid = ?`, [id, holderPid]);
+    return result.changes > 0;
+  }
+
+  /**
+   * Unconditionally mark a pool worktree available, clearing review ownership
+   * and the holder. Only for user-initiated deletes (releaseForDeletion).
+   *
+   * @param {string} id - Pool worktree ID
+   */
+  async forceMarkAvailable(id) {
+    await run(this.db, `UPDATE worktree_pool SET status = 'available', current_review_id = NULL, holder_pid = NULL, holder_claimed_at = NULL WHERE id = ?`, [id]);
   }
 
   /**
@@ -3299,16 +3537,19 @@ class WorktreePoolRepository {
    * Uses BEGIN IMMEDIATE to serialize against concurrent callers, preventing
    * two requests from both observing spare capacity and both creating slots.
    *
-   * Inserts a placeholder row with status 'creating'. The caller must:
-   * - On success: call markInUse() to transition to 'in_use'
+   * Inserts a placeholder row with status 'creating', held by holderPid.
+   * The caller must:
+   * - On success: call finalizeReservation() to transition to 'in_use'
    * - On failure: call deleteReservation() to remove the placeholder
    *
    * @param {string} id - Pool worktree ID (e.g., 'pool-abc')
    * @param {string} repository - Repository in "owner/repo" format
    * @param {number} poolSize - Maximum pool slots for this repository
+   * @param {number} holderPid - Process reserving the slot
    * @returns {Promise<boolean>} true if the slot was reserved, false if at capacity
    */
-  async reserveSlot(id, repository, poolSize) {
+  async reserveSlot(id, repository, poolSize, holderPid) {
+    assertHolderPid(holderPid, 'reserveSlot');
     const reserveTx = this.db.transaction(() => {
       const row = this.db.prepare(
         `SELECT COUNT(*) as count FROM worktree_pool WHERE repository = ? COLLATE NOCASE`
@@ -3322,8 +3563,8 @@ class WorktreePoolRepository {
       // finalizeReservation will replace it with the real path.
       const placeholderPath = `__creating__${id}`;
       this.db.prepare(
-        `INSERT INTO worktree_pool (id, repository, path, status, created_at) VALUES (?, ?, ?, 'creating', ?)`
-      ).run(id, repository, placeholderPath, now);
+        `INSERT INTO worktree_pool (id, repository, path, status, created_at, holder_pid, holder_claimed_at) VALUES (?, ?, ?, 'creating', ?, ?, ?)`
+      ).run(id, repository, placeholderPath, now, holderPid, now);
       return true;
     });
     return reserveTx.immediate();
@@ -3332,14 +3573,19 @@ class WorktreePoolRepository {
   /**
    * Finalize a reserved pool slot after successful worktree creation.
    * Updates the placeholder row with the actual path and marks it in_use.
+   * Requires the row to still be `creating` and held by holderPid.
    *
    * @param {string} id - Pool worktree ID
    * @param {string} path - Absolute filesystem path to the created worktree
    * @param {number} prNumber - PR number to assign
+   * @param {number} holderPid - Process that must hold the reservation
+   * @returns {Promise<boolean>} true if the reservation was finalized
    */
-  async finalizeReservation(id, path, prNumber) {
+  async finalizeReservation(id, path, prNumber, holderPid) {
+    assertHolderPid(holderPid, 'finalizeReservation');
     const now = new Date().toISOString();
-    await run(this.db, `UPDATE worktree_pool SET path = ?, status = 'in_use', current_pr_number = ?, last_switched_at = ? WHERE id = ? AND status = 'creating'`, [path, prNumber, now, id]);
+    const result = await run(this.db, `UPDATE worktree_pool SET path = ?, status = 'in_use', current_pr_number = ?, last_switched_at = ? WHERE id = ? AND status = 'creating' AND holder_pid = ?`, [path, prNumber, now, id, holderPid]);
+    return result.changes > 0;
   }
 
   /**
@@ -3354,15 +3600,21 @@ class WorktreePoolRepository {
   /**
    * Atomically find and claim a pool worktree already assigned to a PR.
    * Uses BEGIN IMMEDIATE to serialize against concurrent callers.
+   * The holder moves to holderPid. Same-PR sharing is intentional: a row
+   * held by another process for the same PR is still taken, and that
+   * process's pid is returned as `previousHolderPid` so the caller can log it.
    *
    * @param {number} prNumber - PR number to find
    * @param {string} repository - Repository in "owner/repo" format
-   * @returns {Promise<Object|null>} Claimed pool entry or null if not found
+   * @param {number} holderPid - Process claiming the row
+   * @returns {Promise<Object|null>} Claimed pool entry (with `previousHolderPid`,
+   *   null unless a different process held it) or null if not found
    */
-  async claimByPR(prNumber, repository) {
+  async claimByPR(prNumber, repository, holderPid) {
+    assertHolderPid(holderPid, 'claimByPR');
     const claimTx = this.db.transaction(() => {
       const entry = this.db.prepare(`
-        SELECT id, repository, path, status, current_pr_number, last_switched_at, last_fetched_at, created_at
+        SELECT id, repository, path, status, current_pr_number, last_switched_at, last_fetched_at, created_at, holder_pid
         FROM worktree_pool
         WHERE current_pr_number = ? AND repository = ? COLLATE NOCASE
           AND status IN ('in_use', 'available')
@@ -3372,14 +3624,17 @@ class WorktreePoolRepository {
         .get(prNumber, repository)) {
         throw Object.assign(new Error('This checkout is still being prepared. Wait for that operation to settle.'), { statusCode: 409 });
       }
-      if (entry) {
-        require('./review-removal').assertCheckoutAvailable(this.db, entry.path, { repository, prNumber });
-        const now = new Date().toISOString();
-        this.db.prepare(
-          `UPDATE worktree_pool SET status = 'switching', current_pr_number = ?, last_switched_at = ?, current_review_id = NULL WHERE id = ?`
-        ).run(prNumber, now, entry.id);
-      }
-      return entry || null;
+      if (!entry) return null;
+      require('./review-removal').assertCheckoutAvailable(this.db, entry.path, { repository, prNumber });
+      const now = new Date().toISOString();
+      this.db.prepare(
+        `UPDATE worktree_pool SET status = 'switching', current_pr_number = ?, last_switched_at = ?, current_review_id = NULL, holder_pid = ?, holder_claimed_at = ? WHERE id = ?`
+      ).run(prNumber, now, holderPid, now, entry.id);
+      const { holder_pid: priorHolder, ...claimed } = entry;
+      return {
+        ...claimed,
+        previousHolderPid: priorHolder != null && priorHolder !== holderPid ? priorHolder : null,
+      };
     });
     return claimTx.immediate();
   }
@@ -3387,12 +3642,15 @@ class WorktreePoolRepository {
   /**
    * Atomically find and claim the LRU available pool worktree for a repository.
    * Uses BEGIN IMMEDIATE to serialize against concurrent callers.
-   * Marks the claimed entry as 'switching' so no other caller can grab it.
+   * Marks the claimed entry as 'switching', held by holderPid, so no other
+   * caller can grab it.
    *
    * @param {string} repository - Repository in "owner/repo" format
+   * @param {number} holderPid - Process claiming the row
    * @returns {Promise<Object|null>} Claimed pool entry or null if none available
    */
-  async claimAvailable(repository) {
+  async claimAvailable(repository, holderPid) {
+    assertHolderPid(holderPid, 'claimAvailable');
     const claimTx = this.db.transaction(() => {
       const { WorktreeLockManager } = require('./git/worktree-lock');
       const locks = new WorktreeLockManager(this.db);
@@ -3403,9 +3661,10 @@ class WorktreePoolRepository {
         ORDER BY last_switched_at ASC NULLS FIRST
       `).all(repository).find(candidate => !locks.isLocked(candidate.path).locked);
       if (entry) {
+        const now = new Date().toISOString();
         this.db.prepare(
-          `UPDATE worktree_pool SET status = 'switching' WHERE id = ?`
-        ).run(entry.id);
+          `UPDATE worktree_pool SET status = 'switching', holder_pid = ?, holder_claimed_at = ? WHERE id = ?`
+        ).run(holderPid, now, entry.id);
       }
       return entry || null;
     });
@@ -3414,29 +3673,56 @@ class WorktreePoolRepository {
 
   /**
    * Reset stale pool entries on startup while preserving valid ownership.
-   * Entries are considered stale if: no review owner, interrupted switching,
-   * or the owning review has been deleted.
-   * @returns {Array<{id: string, current_review_id: number}>} Preserved entries for in-memory rehydration
+   * Runs in one IMMEDIATE transaction.
+   *
+   * Rows held by a live process (`isHolderDead(row)` false) are skipped: not
+   * written and not returned — another pair-review process sharing this
+   * database is preparing or using them. For rows whose holder is dead:
+   * - `creating` placeholders are deleted (no worktree on disk to recover);
+   * - `in_use` rows whose review still exists are taken over (holder =
+   *   selfPid) and returned for in-memory rehydration;
+   * - everything else (`switching`, `in_use` with no or a deleted review) is
+   *   reset to `available` with review ownership and holder cleared.
+   *
+   * @param {number} selfPid - The starting process, which takes over preserved rows
+   * @param {(row: {id: string, status: string, current_review_id: number|null,
+   *   holder_pid: number|null, holder_claimed_at: string|null}) => boolean} isHolderDead
+   *   Synchronous predicate deciding whether a row's holder is gone
+   * @returns {Promise<Array<{id: string, current_review_id: number}>>} Preserved entries for in-memory rehydration
    */
-  async resetStaleAndPreserve() {
-    // Delete placeholder entries that were mid-creation when the server stopped.
-    // These have no valid path or worktree on disk — they cannot be recovered.
-    await run(this.db, `DELETE FROM worktree_pool WHERE status = 'creating'`);
-
-    // Reset entries that are stale: no review owner, interrupted switching, or review deleted
-    await run(this.db, `
-      UPDATE worktree_pool SET status = 'available', current_review_id = NULL
-      WHERE status != 'available' AND (
-        current_review_id IS NULL
-        OR status = 'switching'
-        OR current_review_id NOT IN (SELECT id FROM reviews)
-      )
-    `);
-    // Return preserved entries for in-memory rehydration
-    return await query(this.db, `
-      SELECT id, current_review_id FROM worktree_pool
-      WHERE status = 'in_use' AND current_review_id IS NOT NULL
-    `);
+  async resetStaleAndPreserve(selfPid, isHolderDead) {
+    assertHolderPid(selfPid, 'resetStaleAndPreserve');
+    if (typeof isHolderDead !== 'function') {
+      throw new TypeError('WorktreePoolRepository.resetStaleAndPreserve: isHolderDead must be a function');
+    }
+    const resetTx = this.db.transaction(() => {
+      const rows = this.db.prepare(`
+        SELECT wp.id, wp.status, wp.current_review_id, wp.holder_pid, wp.holder_claimed_at,
+               (r.id IS NOT NULL) AS review_exists
+        FROM worktree_pool wp
+        LEFT JOIN reviews r ON r.id = wp.current_review_id
+        WHERE wp.status != 'available'
+        ORDER BY wp.id
+      `).all();
+      const deleteCreating = this.db.prepare(`DELETE FROM worktree_pool WHERE id = ? AND status = 'creating'`);
+      const takeOver = this.db.prepare(`UPDATE worktree_pool SET holder_pid = ?, holder_claimed_at = ? WHERE id = ?`);
+      const reset = this.db.prepare(`UPDATE worktree_pool SET status = 'available', current_review_id = NULL, holder_pid = NULL, holder_claimed_at = NULL WHERE id = ?`);
+      const now = new Date().toISOString();
+      const preserved = [];
+      for (const { review_exists: reviewExists, ...row } of rows) {
+        if (!isHolderDead(row)) continue;
+        if (row.status === 'creating') {
+          deleteCreating.run(row.id);
+        } else if (row.status === 'in_use' && reviewExists) {
+          takeOver.run(selfPid, now, row.id);
+          preserved.push({ id: row.id, current_review_id: row.current_review_id });
+        } else {
+          reset.run(row.id);
+        }
+      }
+      return preserved;
+    });
+    return resetTx.immediate();
   }
 }
 
@@ -3763,7 +4049,32 @@ class RepoSettingsRepository {
 /**
  * CommentRepository class for managing comment database records
  */
+// Shared joins for list/single/restore responses. Publication is independent
+// of lifecycle: dismissed comments retain their posting history.
+const PUBLICATION_JOIN = `LEFT JOIN comment_postings lp ON lp.id =
+  (SELECT MAX(id) FROM comment_postings WHERE comment_id = c.id)
+  LEFT JOIN github_reviews lgr ON lgr.id = lp.github_review_row_id`;
+const PUBLICATION_COLUMNS = `lp.id AS posting_id, lp.posted_at AS publication_posted_at,
+  lp.github_review_row_id, lp.github_comment_url, lgr.github_url AS review_url,
+  lgr.state AS publication_review_state, lp.comment_body IS NOT c.body AS publication_changed,
+  (SELECT COUNT(*) FROM comment_postings WHERE comment_id = c.id) AS posting_count`;
+
+function shapePublication(row) {
+  if (!row) return row;
+  const { posting_id, publication_posted_at, github_review_row_id,
+    github_comment_url, review_url, publication_review_state, publication_changed, posting_count, ...comment } = row;
+  return { ...comment, publication: posting_id == null ? null : {
+    state: publication_review_state === 'pending' ? 'draft' : 'posted',
+    posted_at: publication_posted_at, review_url, comment_url: github_comment_url,
+    github_review_row_id, posting_count, changed: Boolean(publication_changed)
+  } };
+}
+
 class CommentRepository {
+  // Mirrored by isPendingComment in posted-comment.js; pinned by parity tests.
+  static pendingCommentSql(alias = 'c') {
+    return `${alias}.status = 'active' AND NOT EXISTS (SELECT 1 FROM comment_postings p WHERE p.comment_id = ${alias}.id)`;
+  }
   /**
    * Create a new CommentRepository instance
    * @param {Database} db - Database instance
@@ -4024,7 +4335,7 @@ class CommentRepository {
    * @returns {Promise<Object|null>} Comment record or null if not found
    */
   async getComment(id, source = null) {
-    let sql = 'SELECT * FROM comments WHERE id = ?';
+    let sql = `SELECT c.*, ${PUBLICATION_COLUMNS} FROM comments c ${PUBLICATION_JOIN} WHERE c.id = ?`;
     const params = [id];
 
     if (source) {
@@ -4032,7 +4343,7 @@ class CommentRepository {
       params.push(source);
     }
 
-    return await queryOne(this.db, sql, params);
+    return shapePublication(await queryOne(this.db, sql, params));
   }
 
   /**
@@ -4096,7 +4407,7 @@ class CommentRepository {
   }
 
   /**
-   * Bulk delete all user comments for a review
+   * Bulk dismiss only user comments not yet posted for a review
    * Also dismisses any AI suggestions that were parents of the deleted comments.
    * @param {number} reviewId - Review ID (from reviews table)
    * @returns {Promise<{deletedCount: number, dismissedSuggestionIds: number[]}>} Number of comments deleted and list of dismissed suggestion IDs
@@ -4114,16 +4425,16 @@ class CommentRepository {
 
     // First, find all user comments with parent_id (adopted from AI suggestions)
     const adoptedComments = await query(this.db, `
-      SELECT parent_id FROM comments
+      SELECT parent_id FROM comments c
       WHERE review_id = ? AND source = 'user' AND parent_id IS NOT NULL
-        AND status IN ('active', 'submitted', 'draft')
+        AND ${CommentRepository.pendingCommentSql()}
     `, [reviewId]);
 
     // Soft delete all user comments
     const result = await run(this.db, `
-      UPDATE comments
+      UPDATE comments AS c
       SET status = 'inactive', updated_at = CURRENT_TIMESTAMP
-      WHERE review_id = ? AND source = 'user' AND status IN ('active', 'submitted', 'draft')
+      WHERE review_id = ? AND source = 'user' AND ${CommentRepository.pendingCommentSql()}
     `, [reviewId]);
 
     // Dismiss all parent AI suggestions with a single UPDATE statement
@@ -4155,34 +4466,14 @@ class CommentRepository {
    */
   async getUserComments(reviewId, options = {}) {
     const { includeDismissed = false } = options;
-    const statusFilter = includeDismissed
-      ? "status IN ('active', 'submitted', 'draft', 'inactive')"
-      : "status IN ('active', 'submitted', 'draft')";
-
-    return await query(this.db, `
-      SELECT
-        id,
-        review_id, draft_key, revision, included, commit_sha, deleted_at,
-        source,
-        author,
-        file,
-        line_start,
-        line_end,
-        side,
-        diff_position,
-        type,
-        title,
-        body,
-        status,
-        parent_id,
-        is_file_level,
-        severity,
-        created_at,
-        updated_at
-      FROM comments
-      WHERE review_id = ? AND source = 'user' AND deleted_at IS NULL AND ${statusFilter}
-      ORDER BY file, line_start, created_at
+    const statusFilter = includeDismissed ? "c.status IN ('active', 'inactive')" : "c.status = 'active'";
+    const rows = await query(this.db, `
+      SELECT c.*, ${PUBLICATION_COLUMNS}
+      FROM comments c ${PUBLICATION_JOIN}
+      WHERE c.review_id = ? AND c.source = 'user' AND c.deleted_at IS NULL AND ${statusFilter}
+      ORDER BY c.file, c.line_start, c.created_at
     `, [reviewId]);
+    return rows.map(shapePublication);
   }
 
   /**
@@ -4238,7 +4529,8 @@ class CommentRepository {
   }
 
   /**
-   * Restore a soft-deleted user comment (set status from 'inactive' back to 'active')
+   * Restore a soft-deleted user comment. Postings survive dismissal, so
+   * restoring a posted comment does not queue it for another submission.
    * @param {number} id - Comment ID
    * @returns {Promise<boolean>} True if restored successfully
    */
@@ -5838,6 +6130,33 @@ class AnalysisRunRepository {
 /**
  * GitHubReviewRepository class for managing GitHub review submission records
  */
+class CommentPostingRepository {
+  constructor(db) { this.db = db; }
+
+  async insertMany(postings) {
+    for (const p of postings) {
+      await run(this.db, `INSERT INTO comment_postings
+        (comment_id, github_review_row_id, comment_body, body, file, line_start,
+         line_end, side, is_file_level, github_comment_id, github_comment_node_id,
+         github_comment_url, backfilled, kind, posted_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))`,
+      [p.comment_id, p.github_review_row_id ?? null, p.comment_body ?? null, p.body,
+        p.file ?? null, p.line_start ?? null, p.line_end ?? null, p.side ?? null,
+        p.is_file_level ? 1 : 0, p.github_comment_id == null ? null : String(p.github_comment_id),
+        p.github_comment_node_id ?? null, p.github_comment_url ?? null,
+        p.backfilled ? 1 : 0, p.kind ?? 'post', p.posted_at ?? null]);
+    }
+  }
+
+  async listByComment(commentId) {
+    return query(this.db, 'SELECT * FROM comment_postings WHERE comment_id = ? ORDER BY id', [commentId]);
+  }
+
+  async listByGitHubReviewRow(rowId) {
+    return query(this.db, 'SELECT * FROM comment_postings WHERE github_review_row_id = ? ORDER BY id', [rowId]);
+  }
+}
+
 class GitHubReviewRepository {
   /**
    * Create a new GitHubReviewRepository instance
@@ -5860,6 +6179,30 @@ class GitHubReviewRepository {
    * @param {string} [data.github_url] - GitHub URL for the review
    * @returns {Promise<Object>} Created github_review record
    */
+  async findByGitHubIdentity(reviewId, { nodeId = null, databaseId = null } = {}) {
+    return queryOne(this.db, `SELECT * FROM github_reviews WHERE review_id = ?
+      AND ((? IS NOT NULL AND github_node_id = ?) OR (? IS NOT NULL AND github_review_id = ?))
+      ORDER BY id DESC LIMIT 1`, [reviewId, nodeId, nodeId, databaseId, databaseId]);
+  }
+
+  async upsertForSubmission(reviewId, data) {
+    const identity = { nodeId: data.github_node_id, databaseId: data.github_review_id };
+    const existing = await this.findByGitHubIdentity(reviewId, identity);
+    if (!existing) return this.create(reviewId, data);
+    const update = { ...data };
+    if (!update.github_url) delete update.github_url;
+    if (data.state === 'pending') delete update.body; // GitHub ignores a replacement draft body.
+    await this.update(existing.id, update);
+    // Preserve legacy duplicate rows, but never leave their linked postings in
+    // an obsolete pending state after the identity has been submitted.
+    await run(this.db, `UPDATE github_reviews SET state = ?, submitted_at = ?, event = ?
+      WHERE review_id = ? AND id != ? AND
+      ((? IS NOT NULL AND github_node_id = ?) OR (? IS NOT NULL AND github_review_id = ?))`,
+    [data.state, data.submitted_at ?? null, data.event ?? null, reviewId, existing.id,
+      identity.nodeId ?? null, identity.nodeId ?? null, identity.databaseId ?? null, identity.databaseId ?? null]);
+    return this.getById(existing.id);
+  }
+
   async create(reviewId, data = {}) {
     const {
       github_review_id = null,
@@ -6593,6 +6936,7 @@ module.exports = {
   getDatabaseStatus,
   getSchemaVersion,
   CURRENT_SCHEMA_VERSION,
+  runVersionedMigrations,
   getDbPath,
   initializeDraftTracking,
   WorktreeRepository,
@@ -6612,7 +6956,10 @@ module.exports = {
   TourRepository,
   generateWorktreeId,
   migrateExistingWorktrees,
+  shapePublication,
+  CommentPostingRepository,
   // Exported for testing only
+  _setupSchema: setupSchema,
   _MIGRATIONS: MIGRATIONS,
   MIGRATIONS
 };

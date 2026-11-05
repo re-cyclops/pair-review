@@ -3,6 +3,7 @@ const { Octokit } = require('@octokit/rest');
 const logger = require('../utils/logger');
 const { GitHubApiError } = require('./errors');
 const pendingReviewOps = require('./operations/pending-review');
+const reviewCommentEditOps = require('./operations/review-comment-edit');
 
 // Defaults used when `GitHubClient` is constructed from a bare token
 // string (i.e. without a resolved binding). These mirror the
@@ -14,8 +15,32 @@ const DEFAULT_FEATURES = Object.freeze({
   pending_review_check: 'graphql',
   stack_walker: 'graphql',
   review_lifecycle: 'graphql',
-  pending_review_comments: 'graphql'
+  pending_review_comments: 'graphql',
+  review_comment_edit: 'graphql'
 });
+
+/**
+ * Fetch for Octokit that keeps a network failure's error code. Native fetch
+ * rejects with `TypeError('fetch failed')` and the code (ECONNREFUSED,
+ * ENOTFOUND, ...) on `cause`; @octokit/request then rewraps it keeping only
+ * the message. Appending the code to the message lets callers tell a
+ * connection that was never made (safe to retry a mutation) from one lost
+ * mid-request. Looks up `globalThis.fetch` per call so test stubs apply.
+ *
+ * @param {...any} args - Arguments for fetch
+ * @returns {Promise<Response>}
+ */
+async function fetchKeepingErrorCode(...args) {
+  try {
+    return await globalThis.fetch(...args);
+  } catch (error) {
+    const code = error && error.cause && error.cause.code;
+    if (typeof code === 'string' && error.message && !error.message.includes(code)) {
+      error.message = `${error.message} (${code})`;
+    }
+    throw error;
+  }
+}
 
 /**
  * Build the `Authorization` header value for a token, mirroring
@@ -152,7 +177,8 @@ class GitHubClient {
   _buildOctokit() {
     const octokit = new Octokit({
       baseUrl: this.apiHost || undefined,
-      userAgent: 'pair-review v1.0.0'
+      userAgent: 'pair-review v1.0.0',
+      request: { fetch: fetchKeepingErrorCode }
     });
 
     // (1) Stamp the live token onto every request. Reads `this.token` at
@@ -388,6 +414,37 @@ class GitHubClient {
   }
 
   /**
+   * Update an existing review comment in place, including a pending draft.
+   * Never creates a comment or retries an update as a create operation.
+   * @param {Object} ref - {owner, repo, pull_number, github_comment_id,
+   *   github_comment_node_id, github_review_id, github_node_id}. The last
+   *   node id identifies the review, not the comment. Only needed fields
+   *   for the chosen transport must be supplied; missing IDs use safe reads.
+   * @param {string} body - Already-formatted wire body; sent unchanged.
+   * @returns {Promise<{github_comment_id: string|null,
+   *   github_comment_node_id: string|null, github_comment_url: string|null, body: string}>}
+   * @throws {Error} code: not_found, forbidden, invalid_ref; other errors
+   *   retain their cause and include operation/transport context.
+   */
+  async updateReviewComment(ref, body) {
+    return reviewCommentEditOps.updateReviewComment(this.octokit, this.features, ref, body);
+  }
+
+  /**
+   * Paginate one review's comments, including the author's pending draft.
+   * @param {Object} ref - Same shape as updateReviewComment; provide a
+   *   github_review_id and/or github_node_id (review node ID).
+   * @returns {Promise<Array<Object>>} REST-shaped candidates (string id,
+   *   node_id, html_url, user.login, in_reply_to_id, path, line, start_line,
+   *   side, start_side, original_line, original_start_line, subject_type,
+   *   body, created_at), plus github_comment_id/github_comment_node_id/
+   *   github_comment_url/author_login aliases. Bodies are never normalized.
+   */
+  async listCommentsForReview(ref) {
+    return reviewCommentEditOps.listCommentsForReview(this.octokit, this.features, ref);
+  }
+
+  /**
    * Validate GitHub token by making a test API call
    * @returns {Promise<boolean>} Whether the token is valid
    */
@@ -524,10 +581,13 @@ class GitHubClient {
    *
    * @param {string} nodeId - GraphQL node id
    * @param {Object} [prContext] - `{ owner, repo, prNumber, reviewId? }`
+   * @param {Object} [options]
+   * @param {boolean} [options.strict=false] - Throw lookup failures other than not found
    */
-  async getReviewById(nodeId, prContext) {
-    return pendingReviewOps.getReviewById(this.octokit, this.features, nodeId, prContext);
+  async getReviewById(nodeId, prContext, options) {
+    return pendingReviewOps.getReviewById(this.octokit, this.features, nodeId, prContext, options);
   }
+
 
 
   /**

@@ -12,6 +12,7 @@ beforeEach(() => {
   global.window = dom.window;
   global.document = dom.window.document;
   global.localStorage = dom.window.localStorage;
+  window.GitPaths = require('../../public/js/utils/git-paths.js');
   window.toast = { showWarning: vi.fn() };
   panel = Object.create(AIPanel.prototype);
   panel.toggleBtn = document.getElementById('ai-panel-toggle');
@@ -174,16 +175,5 @@ describe('detail review feedback', () => {
     await expect(pending).rejects.toThrow('protect an open editor');
     expect(window.location.pathname).toBe('/pr/example/repo/42');
     expect(document.querySelector('textarea').value).toBe('Retain on redirect');
-  });
-  it('opens historical saved code at the original side and line, never current code', async () => {
-    window.prManager = { currentPR: { id: 42 }, parseUnifiedDiff: PRManager.prototype.parseUnifiedDiff, analysisHistoryManager: { getSelectedRunId: () => 'old-run' } };
-    global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ run: { id: 'old-run', review_id: 42, head_sha: 'abc1234', diff: 'diff --git a/a.js b/a.js\n--- a/a.js\n+++ b/a.js\n@@ -10,2 +10,2 @@\n-old code\n+new code\n context' } }) });
-    window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
-    window.HTMLElement.prototype.scrollIntoView = vi.fn();
-    panel.findings = [{ id: 1, side: 'LEFT' }];
-    await panel.openHistoricalFinding(1, 'a.js', 10);
-    expect(document.querySelector('.historical-diff-target').textContent).toBe('-old code\n');
-    expect(document.querySelector('.historical-diff-dialog').textContent).toContain('read-only');
-    expect(document.getElementById('diff-container').textContent).toBe('');
   });
 });

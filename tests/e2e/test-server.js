@@ -282,6 +282,7 @@ async function startTestServer(port) {
   GitHubClient.prototype._buildOctokit = () => hostTransport;
   GitHubClient.prototype.repositoryExists = async () => true;
 
+
   // Mock worktree manager
   GitWorktreeManager.prototype.getWorktreePath = async () => mockWorktreeResponses.getWorktreePath;
   GitWorktreeManager.prototype.worktreeExists = async () => true;

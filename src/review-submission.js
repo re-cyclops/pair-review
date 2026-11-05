@@ -37,7 +37,7 @@ function initializeSubmissionState(db) {
       attempt_id TEXT NOT NULL REFERENCES submission_attempts(id) ON DELETE CASCADE,
       ordinal INTEGER NOT NULL, local_id INTEGER NOT NULL, local_key TEXT NOT NULL,
       state TEXT NOT NULL DEFAULT 'unattempted', remote_id TEXT, remote_database_id TEXT,
-      thread_id TEXT, error TEXT, PRIMARY KEY(attempt_id, ordinal)
+      thread_id TEXT, remote_url TEXT, error TEXT, PRIMARY KEY(attempt_id, ordinal)
     );
     CREATE TRIGGER IF NOT EXISTS review_submission_delete_guard BEFORE DELETE ON reviews
     WHEN EXISTS (SELECT 1 FROM submission_attempts WHERE review_id = OLD.id AND state NOT IN ('submitted', 'superseded'))
@@ -52,7 +52,58 @@ function initializeSubmissionState(db) {
       WHERE i.local_id = OLD.id AND a.review_id = OLD.review_id AND a.state NOT IN ('submitted', 'superseded'))
     BEGIN SELECT RAISE(ABORT, 'Resolve the pending submission before deleting its drafts'); END;
   `);
+  if (!db.prepare('PRAGMA table_info(submission_items)').all().some(column => column.name === 'remote_url')) {
+    db.exec('ALTER TABLE submission_items ADD COLUMN remote_url TEXT');
+  }
 }
+
+// Use upstream's publication model without replacing the durable write protocol.
+// The acknowledged wire text wins over later local edits, including on upgrade.
+function recordPostingHistory(db, attempt) {
+  if (!attempt.remote_id) return;
+  const submitted = attempt.state === 'submitted';
+  const review = db.prepare(`SELECT id FROM github_reviews WHERE review_id = ?
+    AND (github_node_id = ? OR (? IS NOT NULL AND github_review_id = ?))
+    ORDER BY id DESC LIMIT 1`).get(attempt.review_id, attempt.remote_id, attempt.remote_database_id, attempt.remote_database_id);
+  const historyId = review?.id || db.prepare(`INSERT INTO github_reviews
+    (review_id, github_review_id, github_node_id, state, event, body, submitted_at, github_url)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(attempt.review_id, attempt.remote_database_id, attempt.remote_id,
+    submitted ? 'submitted' : 'pending', submitted ? attempt.manifest.event : null,
+    submitted ? attempt.manifest.body : attempt.manifest.pendingBody ?? attempt.manifest.body,
+    submitted ? attempt.updated_at : null, attempt.remote_url).lastInsertRowid;
+  if (submitted) {
+    db.prepare(`UPDATE github_reviews SET state = 'submitted', event = ?, body = ?, submitted_at = ?, github_url = ?
+      WHERE review_id = ? AND (github_node_id = ? OR (? IS NOT NULL AND github_review_id = ?))`)
+      .run(attempt.manifest.event, attempt.manifest.body, attempt.updated_at, attempt.remote_url,
+        attempt.review_id, attempt.remote_id, attempt.remote_database_id, attempt.remote_database_id);
+  }
+  const source = db.prepare('SELECT source, draft_key, ai_run_id FROM comments WHERE id = ? AND review_id = ?');
+  const existing = db.prepare("SELECT id FROM comment_postings WHERE comment_id = ? AND github_review_row_id = ? AND kind = 'post'");
+  const insert = db.prepare(`INSERT INTO comment_postings
+    (comment_id, github_review_row_id, comment_body, body, file, line_start, line_end, side, is_file_level,
+      github_comment_id, github_comment_node_id, github_comment_url, posted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  for (const item of attempt.items) {
+    if (item.state !== 'accepted') continue;
+    const comment = attempt.manifest.comments[item.ordinal];
+    const current = source.get(comment.id, attempt.review_id);
+    if (!current || current.source !== comment.source ||
+      current.source === 'user' && current.draft_key !== comment.key ||
+      current.source === 'ai' && current.ai_run_id !== attempt.manifest.selection?.analysisId) continue;
+    if (existing.get(comment.id, historyId)) continue;
+    const wire = comment.wire;
+    insert.run(comment.id, historyId, comment.body, wire.body, wire.path,
+      wire.start_line ?? wire.line ?? null, wire.line ?? null, wire.side ?? null, Number(wire.isFileLevel),
+      item.remote_database_id, item.remote_id, item.remote_url ?? null, attempt.updated_at);
+  }
+}
+
+function backfillSubmissionHistory(db) {
+  for (const { id } of db.prepare('SELECT id FROM submission_attempts WHERE remote_id IS NOT NULL ORDER BY created_at, id').all()) {
+    recordPostingHistory(db, readAttempt(db, id));
+  }
+}
+
 
 function readAttempt(db, id) {
   const row = db.prepare('SELECT * FROM submission_attempts WHERE id = ?').get(id);
@@ -271,7 +322,9 @@ function matchesRemote(remote, comment) {
 async function inspectRemote(client, attempt) {
   if (!attempt.remote_id) throw fail('Outcome unknown: the host may have created a review but returned no identifier. Blind retry is blocked.');
   const target = attempt.manifest.target;
-  const remote = await client.getReviewById(attempt.remote_id, { owner: target.owner, repo: target.repo, prNumber: target.number, reviewId: attempt.remote_database_id });
+  const remote = await client.getReviewById(attempt.remote_id,
+    { owner: target.owner, repo: target.repo, prNumber: target.number, reviewId: attempt.remote_database_id },
+    { strict: true, includeComments: true });
   if (!remote) throw fail('The recorded remote review is unavailable. Its absence is not permission to replay an uncertain write.');
   if (remote.author?.toLowerCase() !== target.account.login.toLowerCase() || remote.repository?.toLowerCase() !== target.repository.toLowerCase() || remote.prNumber !== target.number || remote.headSha !== target.head) throw fail('The remote review identity or revision differs from this receipt.');
   const expectedBody = remote.state === 'PENDING' ? attempt.manifest.pendingBody : attempt.manifest.body;
@@ -295,10 +348,12 @@ async function inspectRemote(client, attempt) {
 // Acknowledged publication is durable independently of local draft cleanup.
 // Replaying its digest or reconciling it may finish cleanup, never write remotely.
 function finishSubmittedDrafts(db, attempt) {
+  attempt = readAttempt(db, attempt.id);
   try {
     db.transaction(() => {
       const timestamp = now();
-      const update = db.prepare("UPDATE comments SET status = 'submitted', updated_at = ? WHERE id = ? AND review_id = ? AND revision = ? AND body = ? AND deleted_at IS NULL");
+      recordPostingHistory(db, attempt);
+      const update = db.prepare("UPDATE comments SET status = 'submitted', updated_at = ? WHERE id = ? AND review_id = ? AND source = 'ai' AND revision = ? AND body = ? AND deleted_at IS NULL");
       for (const comment of attempt.manifest.comments) {
         const raw = db.prepare('SELECT * FROM comments WHERE id = ? AND review_id = ?').get(comment.id, attempt.review_id);
         if (raw && draftData(raw, attempt.manifest.selection).key === comment.key && draftData(raw, attempt.manifest.selection).body === comment.body) update.run(timestamp, comment.id, attempt.review_id, comment.revision, raw.body);
@@ -325,13 +380,9 @@ function finish(db, attempt, remote, mode) {
     if (!settled.changes) return;
     db.prepare('UPDATE reviews SET status = ?, review_data = ?, submitted_at = ?, updated_at = ? WHERE id = ?')
       .run(submitted ? 'submitted' : 'pending', JSON.stringify(data), data.submitted_at, timestamp, attempt.review_id);
-    const recorded = db.prepare('SELECT id FROM github_reviews WHERE review_id = ? AND github_node_id = ?').get(attempt.review_id, attempt.remote_id);
-    if (recorded) db.prepare('UPDATE github_reviews SET state = ?, event = ?, body = ?, submitted_at = ?, github_url = ? WHERE id = ?')
-      .run(submitted ? 'submitted' : 'pending', submitted ? attempt.manifest.event : null, data.body, data.submitted_at, data.github_url, recorded.id);
-    else db.prepare('INSERT INTO github_reviews (review_id, github_review_id, github_node_id, state, event, body, submitted_at, github_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(attempt.review_id, attempt.remote_database_id, attempt.remote_id, submitted ? 'submitted' : 'pending', submitted ? attempt.manifest.event : null, data.body, data.submitted_at, data.github_url);
   })();
   if (mode === 'submit') return finishSubmittedDrafts(db, attempt);
+  db.transaction(() => recordPostingHistory(db, readAttempt(db, attempt.id)))();
   return receipt(db, attempt.id);
 }
 
@@ -414,10 +465,11 @@ async function publishSubmission(options, confirmedDigest) {
       remote_id, remote_database_id, remote_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'writing', 'ready', ?, ?, ?, ?, ?, ?, ?)`)
       .run(id, manifest.reviewId, targetKey, JSON.stringify(frozenManifest(manifest)), manifest.digest, owner, prior?.id || null,
         prior?.remote_id || null, prior?.remote_database_id || null, prior?.remote_url || manifest.target.url, timestamp, timestamp);
-    const insert = db.prepare('INSERT INTO submission_items (attempt_id, ordinal, local_id, local_key, state, remote_id, remote_database_id, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+    const insert = db.prepare('INSERT INTO submission_items (attempt_id, ordinal, local_id, local_key, state, remote_id, remote_database_id, thread_id, remote_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
     manifest.comments.forEach((comment, ordinal) => {
       const accepted = prior?.items.find(item => item.local_key === comment.key && item.state === 'accepted');
-      insert.run(id, ordinal, comment.id, comment.key, accepted ? 'accepted' : 'unattempted', accepted?.remote_id || null, accepted?.remote_database_id || null, accepted?.thread_id || null);
+      insert.run(id, ordinal, comment.id, comment.key, accepted ? 'accepted' : 'unattempted',
+        accepted?.remote_id || null, accepted?.remote_database_id || null, accepted?.thread_id || null, accepted?.remote_url || null);
     });
     return null;
   })();
@@ -456,8 +508,11 @@ async function publishSubmission(options, confirmedDigest) {
     let attempt = readAttempt(db, id);
     context.reviewId = attempt.remote_database_id;
     const queued = attempt.items.filter(item => item.state === 'unattempted');
-    for (let offset = 0; offset < queued.length; offset += 10) {
-      const batch = queued.slice(offset, offset + 10);
+    // Singular hosts need a fresh head/account check before each individual write.
+    const batchSize = client.features.pending_review_comments === 'host' &&
+      client.features.pending_review_comments_batch === false ? 1 : 10;
+    for (let offset = 0; offset < queued.length; offset += batchSize) {
+      const batch = queued.slice(offset, offset + batchSize);
       await checkpoint('comments');
       db.transaction(() => { for (const item of batch) db.prepare("UPDATE submission_items SET state = 'writing' WHERE attempt_id = ? AND ordinal = ?").run(id, item.ordinal); })();
       const result = await pendingComments.addCommentBatch(client.octokit, client.features, target.nodeId, attempt.remote_id,
@@ -465,12 +520,13 @@ async function publishSubmission(options, confirmedDigest) {
       db.transaction(() => {
         for (const item of batch) {
           const outcome = result.receipts.find(value => value.index === batch.indexOf(item));
-          db.prepare('UPDATE submission_items SET state = ?, remote_id = ?, remote_database_id = ?, thread_id = ?, error = ? WHERE attempt_id = ? AND ordinal = ?')
+          db.prepare('UPDATE submission_items SET state = ?, remote_id = ?, remote_database_id = ?, thread_id = ?, remote_url = ?, error = ? WHERE attempt_id = ? AND ordinal = ?')
             .run(outcome?.state || 'unknown', outcome?.remoteId || null, outcome?.remoteDatabaseId || null, outcome?.threadId || null,
-              outcome?.error || (outcome ? null : 'Host returned no receipt'), id, item.ordinal);
+              outcome?.remoteUrl || null, outcome?.error || (outcome ? null : 'Host returned no receipt'), id, item.ordinal);
         }
         db.prepare("UPDATE submission_attempts SET phase = 'ready', updated_at = ? WHERE id = ? AND owner = ?").run(now(), id, owner);
       })();
+      db.transaction(() => recordPostingHistory(db, readAttempt(db, id)))();
       if (result.receipts.length !== batch.length || result.receipts.some(item => item.state !== 'accepted')) throw fail('Only part of the review has an acknowledged result. Drafts and individual receipts are preserved.');
     }
     attempt = readAttempt(db, id);
@@ -522,4 +578,4 @@ async function reanchorDraft(options, { commentId, draft_key, expected_revision,
   })();
 }
 
-module.exports = { initializeSubmissionState, buildSubmissionManifest, publishSubmission, reconcileSubmission, reanchorDraft, receipt, listReceipts };
+module.exports = { initializeSubmissionState, backfillSubmissionHistory, buildSubmissionManifest, publishSubmission, reconcileSubmission, reanchorDraft, receipt, listReceipts };

@@ -40,6 +40,7 @@ const { registerProvider } = require('./src/ai/provider');
 const { AnalysisRunRepository, CommentRepository, PRMetadataRepository } = require('./src/database');
 const { storePRData } = require('./src/setup/pr-setup');
 const { runExecutableAnalysis } = require('./src/routes/executable-analysis');
+const { listenOnLoopback, closeServer } = require('./tests/utils/loopback-server');
 const cwd = path.join(process.env.HOME, 'checkout with spaces');
 fs.mkdirSync(cwd);
 const git = (...args) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-C', cwd, ...args], {encoding:'utf8'}).trim();
@@ -83,9 +84,10 @@ await runs.update('old-run',{summary:'Historical conclusion'});
 await new CommentRepository(db).bulkInsertAISuggestions(reviewId,'old-run',[{file:'file.js',line_start:1,line_end:1,type:'bug',title:'Saved finding',description:'Old finding body',confidence:0.9}],null);
 const app=express(); app.use(express.json()); app.set('db',db); app.set('config',{});
 app.use(require('./src/routes/reviews'));
+const server = await listenOnLoopback(app);
 for(const body of ['My authored pending draft.','My second authored draft.']) {
- const response=await request(app).post('/api/reviews/'+reviewId+'/comments').send({file:'file.js',line_start:1,line_end:1,side:'RIGHT',commit_sha:base,body});
- if(response.status!==200) throw new Error(JSON.stringify(response.body));
+ const response=await request(server).post('/api/reviews/'+reviewId+'/comments').send({file:'file.js',line_start:1,line_end:1,side:'RIGHT',commit_sha:base,body});
+ if(response.status!==200) throw new Error('Creating recheck draft failed: '+response.status+' '+response.text);
 }
 db.prepare('UPDATE reviews SET summary=?,draft_body=? WHERE id=?').run('Historical conclusion','My authored overall review.',reviewId);
 const before=db.prepare('SELECT id,body,commit_sha FROM comments ORDER BY id').all();
@@ -115,19 +117,20 @@ if(process.env.RECHECK_MODE==='council') {
   {buildContext:()=>({cwd,baseSha:base,headSha:head}),buildHookPayload:()=>({}),onSuccess:async()=>{},logLabel:'Recheck fixture'});
  await terminal; clearTimeout(timer);
 }
-const comments=(await request(app).get('/api/reviews/'+reviewId+'/comments')).body.comments;
-const findings=(await request(app).get('/api/reviews/'+reviewId+'/suggestions?allRuns=true')).body.suggestions;
+const comments=(await request(server).get('/api/reviews/'+reviewId+'/comments')).body.comments;
+const findings=(await request(server).get('/api/reviews/'+reviewId+'/suggestions?allRuns=true')).body.suggestions;
 const after=db.prepare('SELECT id,body,commit_sha FROM comments ORDER BY id').all();
 const guidance=[...comments,...findings].sort((a,b)=>a.id-b.id).map(row=>row.revision_recheck);
 const draft=comments[0];
-const edit=await request(app).put('/api/reviews/'+reviewId+'/comments/'+draft.id).send({body:'Edited since the recheck.',expected_revision:draft.revision,draft_key:draft.draft_key});
-if(edit.status!==200) throw new Error(JSON.stringify(edit.body));
-const edited=(await request(app).get('/api/reviews/'+reviewId+'/comments')).body.comments.find(row=>row.id===draft.id);
+const edit=await request(server).put('/api/reviews/'+reviewId+'/comments/'+draft.id).send({body:'Edited since the recheck.',expected_revision:draft.revision,draft_key:draft.draft_key});
+if(edit.status!==200) throw new Error('Editing rechecked draft failed: '+edit.status+' '+edit.text);
+const edited=(await request(server).get('/api/reviews/'+reviewId+'/comments')).body.comments.find(row=>row.id===draft.id);
 const run=db.prepare('SELECT status,summary FROM analysis_runs WHERE id=?').get(runId);
 const old=db.prepare("SELECT summary,diff FROM analysis_runs WHERE id='old-run'").get();
 const overall=db.prepare('SELECT draft_body FROM reviews WHERE id=?').get(reviewId).draft_body;
 console.log('RECHECK_RESULT '+JSON.stringify({run,before,after,guidance,edited:edited.revision_recheck,mappingCalls,old,overall,
  instructions:JSON.parse(fs.readFileSync(capture,'utf8')).instructions}));
+await closeServer(server);
 closeTestDatabase(db);
 `;
 

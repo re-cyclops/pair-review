@@ -930,7 +930,7 @@ describe('config.js', () => {
 
       const { config } = await loadConfig();
 
-      expect(config.chat).toEqual({ enable_shortcuts: false, enter_to_send: true });
+      expect(config.chat).toEqual({ enable_shortcuts: false, enter_to_send: true, idle_timeout_minutes: 10 });
     });
 
     it('should three-way merge defaults, global, and project for nested objects', async () => {
@@ -941,7 +941,7 @@ describe('config.js', () => {
 
       const { config } = await loadConfig();
 
-      expect(config.chat).toEqual({ enable_shortcuts: false, enter_to_send: true, some_future_key: true });
+      expect(config.chat).toEqual({ enable_shortcuts: false, enter_to_send: true, idle_timeout_minutes: 10, some_future_key: true });
     });
 
     it('should let project config override global for the same nested key', async () => {
@@ -972,7 +972,21 @@ describe('config.js', () => {
 
       const { config } = await loadConfig();
 
-      expect(config.chat).toEqual({ enable_shortcuts: true, enter_to_send: true });
+      expect(config.chat).toEqual({ enable_shortcuts: true, enter_to_send: true, idle_timeout_minutes: 10 });
+    });
+
+    it('should default chat.idle_timeout_minutes to 10', () => {
+      expect(DEFAULT_CONFIG.chat.idle_timeout_minutes).toBe(10);
+    });
+
+    it('should let config override chat.idle_timeout_minutes (0 disables) while keeping other chat defaults', async () => {
+      mockReadFile({
+        global: { chat: { idle_timeout_minutes: 0 } },
+      });
+
+      const { config } = await loadConfig();
+
+      expect(config.chat).toEqual({ enable_shortcuts: true, enter_to_send: true, idle_timeout_minutes: 0 });
     });
 
     // --- config.local.json tests ---
@@ -1029,6 +1043,7 @@ describe('config.js', () => {
       expect(config.chat).toEqual({
         enable_shortcuts: true,  // from DEFAULT_CONFIG
         enter_to_send: true,     // from DEFAULT_CONFIG
+        idle_timeout_minutes: 10, // from DEFAULT_CONFIG
         a: 'global',
         b: 'global-local',
         c: 'project',
@@ -3494,7 +3509,72 @@ describe('config.js', () => {
       expect(make('')).toThrow(/links\.external\.name must be a non-empty string/);
     });
 
+    describe('pending_review_comments_batch request shape', () => {
+      it('accepts false for a host pending-review-comments implementation', () => {
+        expect(() => validateRepoConfig({
+          repos: {
+            'owner/alt': {
+              api_host: 'https://althost.example/api/v3',
+              features: {
+                pending_review_comments: 'host',
+                pending_review_comments_batch: false
+              }
+            }
+          }
+        })).not.toThrow();
+      });
+
+      it('rejects a non-boolean value', () => {
+        expect(() => validateRepoConfig({
+          repos: {
+            'owner/alt': {
+              api_host: 'https://althost.example/api/v3',
+              features: {
+                pending_review_comments: 'host',
+                pending_review_comments_batch: 'false'
+              }
+            }
+          }
+        })).toThrow(/pending_review_comments_batch must be a boolean/);
+      });
+
+      it('rejects the request-shape option outside host mode', () => {
+        expect(() => validateRepoConfig({
+          repos: {
+            'owner/repo': {
+              features: { pending_review_comments_batch: false }
+            }
+          }
+        })).toThrow(/pending_review_comments_batch is only valid when pending_review_comments = "host"/);
+      });
+
+      it('accepts the option on an alt-host that relies on the default "host" mode', () => {
+        expect(() => validateRepoConfig({
+          repos: {
+            'owner/alt': {
+              api_host: 'https://althost.example/api/v3',
+              features: { pending_review_comments_batch: false }
+            }
+          }
+        })).not.toThrow();
+      });
+    });
+
     describe('pending_review_comments_endpoint override (Phase 5)', () => {
+      it('accepts an override on an alt-host that relies on the default "host" mode', () => {
+        expect(() => validateRepoConfig({
+          repos: {
+            'owner/alt': {
+              api_host: 'https://althost.example/api/v3',
+              features: {
+                pending_review_comments_endpoint:
+                  '/repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}/comments'
+              }
+            }
+          }
+        })).not.toThrow();
+      });
+
       it('accepts a valid endpoint override with all four placeholders', () => {
         expect(() => validateRepoConfig({
           repos: {
@@ -3666,6 +3746,20 @@ describe('config.js', () => {
             }
           }
         })).toThrow(/pending_review_commentes_endpoint is not a recognised endpoint override/);
+      });
+
+      it('lists only endpoint overrides in the unknown _endpoint error', () => {
+        expect(() => validateRepoConfig({
+          repos: {
+            'owner/alt': {
+              api_host: 'https://althost.example/api/v3',
+              features: {
+                pending_review_comments: 'host',
+                pending_review_commentes_endpoint: '/repos/x'
+              }
+            }
+          }
+        })).toThrow(/Valid endpoint overrides: pending_review_comments_endpoint, review_comment_edit_endpoint, review_comment_edit_list_endpoint\.$/);
       });
 
       it('accepts the recognised pending_review_comments_endpoint sub-key', () => {
@@ -3960,6 +4054,22 @@ describe('config.js', () => {
         }
       });
       expect(binding.features.pending_review_comments).toBe('rest');
+    });
+
+    it('preserves pending_review_comments_batch for the host implementation', () => {
+      const binding = resolveHostBinding('owner/alt', {
+        repos: {
+          'owner/alt': {
+            api_host: 'https://althost.example/api/v3',
+            token: 'tok',
+            features: {
+              pending_review_comments: 'host',
+              pending_review_comments_batch: false
+            }
+          }
+        }
+      });
+      expect(binding.features.pending_review_comments_batch).toBe(false);
     });
 
     it('validateRepoConfig validates resolved defaults for areas the user did not override (Fix #3)', () => {

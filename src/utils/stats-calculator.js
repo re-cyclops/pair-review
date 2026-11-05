@@ -81,7 +81,11 @@ function getStatsQuery(runId = null) {
 }
 
 // The manifest and all local-work indicators must agree on unfinished comments.
-const USER_DRAFT_CONDITION = "c.source = 'user' AND c.status IN ('active', 'draft') AND c.deleted_at IS NULL";
+const USER_DRAFT_CONDITION = `c.source = 'user' AND c.status IN ('active', 'draft') AND c.deleted_at IS NULL
+  AND (NOT EXISTS (SELECT 1 FROM comment_postings p WHERE p.comment_id = c.id)
+    OR EXISTS (SELECT 1 FROM submission_items i JOIN submission_attempts a ON a.id = i.attempt_id
+      WHERE a.review_id = c.review_id AND a.state NOT IN ('submitted', 'superseded')
+        AND i.local_id = c.id AND i.local_key = c.draft_key AND i.state = 'accepted'))`;
 
 function getDraftStateQuery() {
   return `SELECT r.id AS review_id,

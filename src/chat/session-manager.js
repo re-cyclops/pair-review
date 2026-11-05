@@ -5,10 +5,13 @@
  * Manages active chat sessions, each backed by a provider-specific bridge process.
  * Handles session lifecycle (create, message, close), persistence to SQLite,
  * and event dispatch (delta, complete, tool_use) to registered listeners.
+ * Sessions idle longer than `idleTimeoutMs` have their agent process closed by
+ * the idle reaper; they resume transparently on the next message.
  */
 
 const fs = require('fs');
 const path = require('path');
+const { EventEmitter } = require('events');
 const PiBridge = require('./pi-bridge');
 const OmpBridge = require('./omp-bridge');
 const AcpBridge = require('./acp-bridge');
@@ -37,14 +40,52 @@ const OMP_CHAT_TOOLS = 'read,bash,grep,glob,task';
 const SESSION_BUSY = 'SESSION_BUSY';
 const sessionConflict = message => Object.assign(new Error(message), { statusCode: 409 });
 
-class ChatSessionManager {
+/** Upper bound on how often the idle reaper sweeps. */
+const MAX_REAP_INTERVAL_MS = 60 * 1000;
+/** Lower bound on how often the idle reaper sweeps (guards tiny timeouts). */
+const MIN_REAP_INTERVAL_MS = 1000;
+
+/** Real clock and timer functions; tests override them via `options._deps`. */
+const defaults = {
+  now: () => Date.now(),
+  setInterval: (fn, ms) => setInterval(fn, ms),
+  clearInterval: (handle) => clearInterval(handle),
+};
+
+/**
+ * Normalise an idle timeout into milliseconds. Zero, negative, or non-finite
+ * values disable idle reaping (returns 0).
+ * @param {*} ms
+ * @returns {number}
+ */
+function normalizeIdleTimeoutMs(ms) {
+  const n = Number(ms);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+class ChatSessionManager extends EventEmitter {
   /**
    * @param {Database} db - better-sqlite3 database instance
    * @param {Object} [configOverrides] - Provider config overrides from config.chat_providers
+   * @param {Object} [options]
+   * @param {number} [options.idleTimeoutMs=0] - Close a session's agent process after this
+   *   long without activity (it is resumed transparently on the next message). 0 disables.
+   * @param {Object} [options._deps] - Dependency overrides (now, setInterval, clearInterval)
    */
-  constructor(db, configOverrides = {}) {
+  constructor(db, configOverrides = {}, { idleTimeoutMs = 0, _deps } = {}) {
+    super();
     this._db = db;
-    this._sessions = new Map(); // sessionId -> { bridge, listeners }
+    // sessionId -> { bridge, listeners, lastActivityAt, starting, turnInFlight, ... }
+    this._sessions = new Map();
+    // sessionId -> Promise for closes still waiting on bridge.close(). A resume
+    // for the same id must wait for the old process to exit before spawning.
+    this._closing = new Map();
+    // sessionId -> initialContext an idle close removed before the first message
+    // consumed it; resumeSession puts it back so that message still gets it.
+    this._carriedInitialContext = new Map();
+    this._deps = { ...defaults, ..._deps };
+    this._idleTimeoutMs = normalizeIdleTimeoutMs(idleTimeoutMs);
+    this._reaperHandle = null;
     applyChatConfigOverrides(configOverrides);
   }
 
@@ -118,6 +159,9 @@ class ChatSessionManager {
       initialContext: initialContext || null,
       model: resolvedModel,
       cliModel: resolved.cliModel,
+      lastActivityAt: this._deps.now(),
+      starting: true,
+      turnInFlight: false,
     });
 
     // Wire up bridge events
@@ -125,6 +169,9 @@ class ChatSessionManager {
 
     // Start the bridge process
     await this._startBridge(sessionId, bridge);
+
+    // Starting can take a while; the idle clock starts once the agent is up.
+    this._markStarted(sessionId, bridge);
 
     logger.info(`[ChatSession] Session ${sessionId} active`);
     return { id: sessionId, status: 'active', model: resolvedModel, cliModel: resolved.cliModel };
@@ -148,7 +195,7 @@ class ChatSessionManager {
     if (!session) {
       throw new Error(`Session ${sessionId} not found or not active`);
     }
-    if (session.closePromise) throw sessionConflict('Chat termination is pending. Wait for acknowledgement before sending another message.');
+    if (this._closing.has(sessionId)) throw sessionConflict('Chat termination is pending. Wait for acknowledgement before sending another message.');
 
     if (!session.bridge.isReady()) {
       throw new Error(`Session ${sessionId} bridge is not ready`);
@@ -160,6 +207,8 @@ class ChatSessionManager {
       busy.code = SESSION_BUSY;
       throw busy;
     }
+
+    session.lastActivityAt = this._deps.now();
 
     // Build the message for the agent: initialContext > context > userMessage
     // (broad session context first, then narrow per-message context, then user text)
@@ -225,7 +274,17 @@ class ChatSessionManager {
 
     // Forward to bridge
     logger.debug(`[ChatSession] Session ${sessionId}: forwarding message to bridge (${messageForAgent.length} chars, delta listeners: ${session.listeners.delta.size})`);
-    await session.bridge.sendMessage(messageForAgent);
+    // Tracked here rather than read from bridge.isBusy(): Pi only reports busy
+    // between message_start and message_end, so a turn running tools between
+    // messages would otherwise look idle to the reaper. Cleared on the turn's
+    // 'complete' or 'error' (every bridge's abort path ends in one of them).
+    session.turnInFlight = true;
+    try {
+      await session.bridge.sendMessage(messageForAgent);
+    } catch (err) {
+      if (this._sessions.get(sessionId) === session) session.turnInFlight = false;
+      throw err;
+    }
 
     return { id: messageId };
   }
@@ -322,9 +381,23 @@ class ChatSessionManager {
   /**
    * Close a session and kill the agent process.
    * @param {number} sessionId
+   * @param {Object} [options]
+   * @param {string} [options.reason] - 'idle' when the idle reaper closes the session:
+   *   leaves `updated_at` alone, carries a pending initialContext over to the next
+   *   resume, and emits 'session-idle-closed' once the close completes.
    * @returns {Promise<void>}
    */
-  async closeSession(sessionId) {
+  async closeSession(sessionId, { reason } = {}) {
+    // A close for this id is already waiting on its bridge — share it rather
+    // than racing a second DB write against it.
+    const pending = this._closing.get(sessionId);
+    if (pending) return pending;
+
+    if (reason !== 'idle') {
+      // An explicit close ends the conversation; nothing will resume to claim it.
+      this._carriedInitialContext.delete(sessionId);
+    }
+
     const session = this._sessions.get(sessionId);
     if (!session) {
       const row = this._db.prepare('SELECT status FROM chat_sessions WHERE id = ?').get(sessionId);
@@ -334,23 +407,157 @@ class ChatSessionManager {
       return;
     }
 
-    if (!session.closePromise) {
-      // Keep ownership and the active row until the bridge acknowledges exit.
-      // Deferring the close call also sets the promise before synchronous events.
-      session.closePromise = Promise.resolve().then(async () => {
-        await session.bridge.close();
-        this._db.prepare(`
-          UPDATE chat_sessions SET status = ?, updated_at = CURRENT_TIMESTAMP
-          WHERE id = ?
-        `).run(session.startFailed ? 'error' : 'closed', sessionId);
-        if (this._sessions.get(sessionId) === session) this._sessions.delete(sessionId);
-        logger.info(`[ChatSession] Session ${sessionId} closed`);
-      }).catch(error => {
-        session.closePromise = null;
-        throw error;
-      });
+    // Only a session with a stored agent ref can be resumed to claim it; one
+    // without gets a fresh replacement session (410 path) with its own context.
+    if (reason === 'idle' && session.initialContext && this._hasAgentSessionRef(sessionId)) {
+      this._carriedInitialContext.set(sessionId, session.initialContext);
     }
-    return session.closePromise;
+
+    // Keep ownership until the bridge acknowledges exit. Defer close so even a
+    // synchronous bridge event observes the registered close promise.
+    const closing = Promise.resolve().then(() => this._finishClose(sessionId, session, reason))
+      .finally(() => { this._closing.delete(sessionId); });
+    this._closing.set(sessionId, closing);
+    await closing;
+  }
+
+  /**
+   * Wait for acknowledged exit before releasing ownership or changing status.
+   * A failed close retains the active row and bridge for a safe retry.
+   * No resume can re-add the session meanwhile: it waits on `_closing`.
+   * @param {number} sessionId
+   * @param {Object} session - The owned _sessions entry
+   * @param {string} [reason]
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _finishClose(sessionId, session, reason) {
+    await session.bridge.close();
+    if (!this._ownEntry(sessionId, session.bridge)) return;
+    this._sessions.delete(sessionId);
+    // An idle close must not reorder history as though it were user activity.
+    const status = session.startFailed ? 'error' : 'closed';
+    this._db.prepare(reason === 'idle'
+      ? 'UPDATE chat_sessions SET status = ? WHERE id = ?'
+      : 'UPDATE chat_sessions SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+    ).run(status, sessionId);
+    logger.info(`[ChatSession] Session ${sessionId} closed`);
+    if (reason === 'idle') {
+      try {
+        this.emit('session-idle-closed', { sessionId });
+      } catch (err) {
+        logger.warn(`[ChatSession] session-idle-closed listener error for session ${sessionId}: ${err.message}`);
+      }
+    }
+  }
+
+  /**
+   * Whether idle reaping is enabled for this manager.
+   * @returns {boolean}
+   */
+  get idleTimeoutMs() {
+    return this._idleTimeoutMs;
+  }
+
+  /**
+   * Start the periodic idle-session sweep. No-op when idle reaping is disabled
+   * or the reaper is already running. The timer is unref'd so it never keeps
+   * the process alive.
+   */
+  startIdleReaper() {
+    if (!this._idleTimeoutMs || this._reaperHandle) return;
+    const period = Math.max(
+      MIN_REAP_INTERVAL_MS,
+      Math.min(MAX_REAP_INTERVAL_MS, Math.floor(this._idleTimeoutMs / 2))
+    );
+    this._reaperHandle = this._deps.setInterval(() => {
+      this.reapIdleSessions().catch((err) => {
+        logger.warn(`[ChatSession] Idle reaper sweep failed: ${err.message}`);
+      });
+    }, period);
+    if (this._reaperHandle && typeof this._reaperHandle.unref === 'function') {
+      this._reaperHandle.unref();
+    }
+    logger.debug(`[ChatSession] Idle reaper started (timeout ${this._idleTimeoutMs}ms, sweep every ${period}ms)`);
+  }
+
+  /**
+   * Stop the periodic idle-session sweep (idempotent).
+   */
+  stopIdleReaper() {
+    if (!this._reaperHandle) return;
+    this._deps.clearInterval(this._reaperHandle);
+    this._reaperHandle = null;
+  }
+
+  /**
+   * Close every session idle for at least the idle timeout. Never reaped:
+   * a session still starting, a session mid-turn (manager-tracked turn or
+   * bridge.isBusy()), and a session that has message history but could not be
+   * resumed with it (no stored agent session ref, or a bridge that reports
+   * itself unresumable). A session with no history is reaped either way — the
+   * next message's 410 path creates a fresh session that loses nothing.
+   * @returns {Promise<number[]>} IDs of the sessions whose close completed without error
+   */
+  async reapIdleSessions() {
+    if (!this._idleTimeoutMs) return [];
+    const now = this._deps.now();
+    const idle = [];
+    for (const [sessionId, session] of this._sessions) {
+      const idleFor = now - (session.lastActivityAt ?? now);
+      if (idleFor < this._idleTimeoutMs) continue;
+      if (session.starting || session.turnInFlight) continue;
+      let reapable;
+      try {
+        reapable = !session.bridge.isBusy() && this._canReapWithoutLoss(sessionId, session.bridge);
+      } catch (err) {
+        logger.warn(`[ChatSession] Could not check idle state for session ${sessionId}: ${err.message}`);
+        continue;
+      }
+      if (!reapable) continue;
+      idle.push({ sessionId, idleFor });
+    }
+
+    const closed = [];
+    await Promise.all(idle.map(async ({ sessionId, idleFor }) => {
+      const minutes = Math.round(idleFor / 60000);
+      logger.info(`[ChatSession] Session ${sessionId} idle for ${minutes}m — closing (resumable on next message)`);
+      try {
+        await this.closeSession(sessionId, { reason: 'idle' });
+        closed.push(sessionId);
+      } catch (err) {
+        logger.warn(`[ChatSession] Failed to close idle session ${sessionId}: ${err.message}`);
+      }
+    }));
+    return closed;
+  }
+
+  /**
+   * Whether the session row stores an agent session ref (file path, session id
+   * or thread id) — the prerequisite for resumeSession.
+   * @param {number} sessionId
+   * @returns {boolean}
+   * @private
+   */
+  _hasAgentSessionRef(sessionId) {
+    const row = this._db.prepare('SELECT agent_session_id FROM chat_sessions WHERE id = ?').get(sessionId);
+    return !!row?.agent_session_id;
+  }
+
+  /**
+   * Whether closing this session's process loses nothing: it can be resumed
+   * with its history, or it has no history to lose.
+   * @param {number} sessionId
+   * @param {Object} bridge
+   * @returns {boolean}
+   * @private
+   */
+  _canReapWithoutLoss(sessionId, bridge) {
+    if (this._hasAgentSessionRef(sessionId) && bridge.isResumable()) return true;
+    const history = this._db.prepare(
+      "SELECT 1 FROM chat_messages WHERE session_id = ? AND type = 'message' LIMIT 1"
+    ).get(sessionId);
+    return !history;
   }
 
   /**
@@ -385,7 +592,7 @@ class ChatSessionManager {
    * @returns {boolean}
    */
   isSessionActive(sessionId) {
-    return this._sessions.has(sessionId);
+    return this._sessions.has(sessionId) && !this._closing.has(sessionId);
   }
 
   /**
@@ -448,10 +655,23 @@ class ChatSessionManager {
    * @returns {Promise<{id: number, status: string, model: string|null, cliModel: string|null}>}
    */
   async resumeSession(sessionId, { systemPrompt, cwd, loadSkills } = {}) {
+    // A close for this session is still waiting on its agent process. Let it
+    // finish first: spawning now would resume the same agent session while the
+    // old process is still exiting, and the close's final status write would
+    // land after ours. Errors belong to the closer, not to this resume.
+    const pendingClose = this._closing.get(sessionId);
+    if (pendingClose) {
+      logger.debug(`[ChatSession] Session ${sessionId}: waiting for in-flight close before resuming`);
+      try {
+        await pendingClose;
+      } catch {
+        // closeSession's caller reports its own failure
+      }
+    }
+
     // Already active — return immediately
     if (this._sessions.has(sessionId)) {
       const active = this._sessions.get(sessionId);
-      if (active.closePromise) throw sessionConflict('Chat termination is pending. Wait for acknowledgement before resuming.');
       return {
         id: sessionId,
         status: 'active',
@@ -528,18 +748,25 @@ class ChatSessionManager {
     this._sessions.set(sessionId, {
       bridge,
       listeners,
-      initialContext: null,
+      // An idle close may have removed this session before its first message
+      // consumed the initial context; that message still gets it.
+      initialContext: this._carriedInitialContext.get(sessionId) || null,
       // Canonical, not the raw stored value: a row written before an alias was
       // canonicalised (or one whose model now comes from `chat_providers.<id>.model`)
       // must report the same id the picker shows. See `resolveChatModel`'s `id` contract.
       model: resolved.id ?? null,
       cliModel: resolved.cliModel,
+      lastActivityAt: this._deps.now(),
+      starting: true,
+      turnInFlight: false,
     });
     this._wireBridgeEvents(sessionId, bridge, listeners);
 
     // Start the bridge process
     await this._startBridge(sessionId, bridge);
 
+    this._carriedInitialContext.delete(sessionId);
+    this._markStarted(sessionId, bridge);
 
     logger.info(`[ChatSession] Session ${sessionId} resumed`);
     return { id: sessionId, status: 'active', model: resolved.id ?? null, cliModel: resolved.cliModel };
@@ -731,6 +958,59 @@ class ChatSessionManager {
   }
 
   /**
+   * Record activity on a session, resetting its idle clock. Ignored when the
+   * session map entry belongs to a different bridge (an old process still
+   * emitting after the session was closed and resumed).
+   * @param {number} sessionId
+   * @param {Object} bridge
+   * @private
+   */
+  _touch(sessionId, bridge) {
+    const session = this._ownEntry(sessionId, bridge);
+    if (session) session.lastActivityAt = this._deps.now();
+  }
+
+  /**
+   * The session map entry for this id, but only while it still belongs to
+   * `bridge` (not to a newer bridge after a close and resume).
+   * @param {number} sessionId
+   * @param {Object} bridge
+   * @returns {Object|null}
+   * @private
+   */
+  _ownEntry(sessionId, bridge) {
+    const session = this._sessions.get(sessionId);
+    return session && session.bridge === bridge ? session : null;
+  }
+
+  /**
+   * The bridge finished starting: the entry becomes reapable and its idle clock starts.
+   * @param {number} sessionId
+   * @param {Object} bridge
+   * @private
+   */
+  _markStarted(sessionId, bridge) {
+    const session = this._ownEntry(sessionId, bridge);
+    if (!session) return;
+    session.starting = false;
+    session.lastActivityAt = this._deps.now();
+  }
+
+  /**
+   * The current turn ended ('complete' or 'error'): touch the clock and clear
+   * the manager-tracked turn flag.
+   * @param {number} sessionId
+   * @param {Object} bridge
+   * @private
+   */
+  _endTurn(sessionId, bridge) {
+    const session = this._ownEntry(sessionId, bridge);
+    if (!session) return;
+    session.turnInFlight = false;
+    session.lastActivityAt = this._deps.now();
+  }
+
+  /**
    * Wire up bridge event handlers that dispatch to the session's listener sets
    * and handle DB persistence (e.g., storing assistant messages on completion).
    * @param {number} sessionId
@@ -739,6 +1019,7 @@ class ChatSessionManager {
    */
   _wireBridgeEvents(sessionId, bridge, listeners) {
     bridge.on('delta', (data) => {
+      this._touch(sessionId, bridge);
       for (const cb of listeners.delta) {
         try {
           cb(data);
@@ -749,6 +1030,7 @@ class ChatSessionManager {
     });
 
     bridge.on('complete', (data) => {
+      this._endTurn(sessionId, bridge);
       logger.debug(`[ChatSession] Session ${sessionId} complete: ${(data.fullText || '').length} chars, ${listeners.complete.size} listener(s)`);
       // Store assistant message in DB
       const fullText = data.fullText || '';
@@ -776,6 +1058,7 @@ class ChatSessionManager {
     });
 
     bridge.on('tool_use', (data) => {
+      this._touch(sessionId, bridge);
       for (const cb of listeners.toolUse) {
         try {
           cb(data);
@@ -786,6 +1069,7 @@ class ChatSessionManager {
     });
 
     bridge.on('status', (data) => {
+      this._touch(sessionId, bridge);
       for (const cb of listeners.status) {
         try {
           cb(data);
@@ -796,6 +1080,7 @@ class ChatSessionManager {
     });
 
     bridge.on('error', (data) => {
+      this._endTurn(sessionId, bridge);
       logger.error(`[ChatSession] Bridge error for session ${sessionId}: ${data.error?.message || 'unknown'}`);
       for (const cb of listeners.error) {
         try {
@@ -807,9 +1092,10 @@ class ChatSessionManager {
     });
 
     bridge.on('close', () => {
-      // If the bridge closes unexpectedly (not via closeSession), update DB
-      const current = this._sessions.get(sessionId);
-      if (current?.bridge === bridge && !current.closePromise) {
+      // If the bridge closes unexpectedly (not via closeSession), update DB.
+      // The identity check keeps a late 'close' from an old process (closed,
+      // then the session resumed on a new bridge) from tearing down the new one.
+      if (this._ownEntry(sessionId, bridge) && !this._closing.has(sessionId)) {
         for (const cb of listeners.error) {
           try {
             cb({ message: 'Agent process ended unexpectedly' });
@@ -831,6 +1117,7 @@ class ChatSessionManager {
     });
 
     bridge.on('session', (event) => {
+      this._touch(sessionId, bridge);
       const sessionRef = event.sessionFile || event.sessionId || event.threadId;
       if (sessionRef) {
         try {
@@ -850,10 +1137,18 @@ class ChatSessionManager {
    */
   async closeAll() {
     const sessionIds = [...this._sessions.keys()];
-    if (sessionIds.length === 0) return;
+    const pendingCloses = [...this._closing.values()];
+    if (sessionIds.length === 0 && pendingCloses.length === 0) return;
 
-    logger.info(`[ChatSession] Closing ${sessionIds.length} active session(s)`);
-    await Promise.all(sessionIds.map((id) => this.closeSession(id)));
+    if (sessionIds.length > 0) {
+      logger.info(`[ChatSession] Closing ${sessionIds.length} active session(s)`);
+    }
+    await Promise.all([
+      ...sessionIds.map((id) => this.closeSession(id)),
+      // Closes already in flight (e.g. an idle reap) must finish before shutdown
+      // proceeds; their failures are reported by their own callers.
+      ...pendingCloses.map((p) => p.catch(() => {})),
+    ]);
   }
 }
 

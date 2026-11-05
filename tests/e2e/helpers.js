@@ -362,9 +362,38 @@ async function seedAISuggestions(page, {
   }
 }
 
+async function submitReviewViaManifest(page, reviewId, { event = 'COMMENT', body = 'Review body' } = {}) {
+  const base = `/api/reviews/${reviewId}`;
+  const draftResponse = await page.request.get(`${base}/draft`);
+  if (!draftResponse.ok()) throw new Error(`Reading review draft failed: ${draftResponse.status()}`);
+  const draft = await draftResponse.json();
+  const saved = await page.request.put(`${base}/draft`, { data: {
+    body, event: event === 'DRAFT' ? 'COMMENT' : event, expected_revision: draft.revision
+  } });
+  if (!saved.ok()) throw new Error(`Saving review draft failed: ${saved.status()} ${await saved.text()}`);
+  const preview = await page.request.get(`${base}/manifest?mode=${event === 'DRAFT' ? 'draft' : 'submit'}`);
+  if (!preview.ok()) throw new Error(`Preparing review failed: ${preview.status()} ${await preview.text()}`);
+  const manifest = await preview.json();
+  const published = await page.request.post(`${base}/submit`, { data: { digest: manifest.digest, mode: manifest.mode } });
+  if (!published.ok()) throw new Error(`Publishing review failed: ${published.status()} ${await published.text()}`);
+  return published.json();
+}
+
+async function editReviewComment(page, reviewId, id, body) {
+  const endpoint = `/api/reviews/${reviewId}/comments/${id}`;
+  const current = await page.request.get(endpoint);
+  if (!current.ok()) throw new Error(`Reading comment failed: ${current.status()}`);
+  const comment = await current.json();
+  const saved = await page.request.put(endpoint, { data: { body, expected_revision: comment.revision, draft_key: comment.draft_key } });
+  if (!saved.ok()) throw new Error(`Editing comment failed: ${saved.status()} ${await saved.text()}`);
+  return saved.json();
+}
+
 module.exports = {
   waitForDiffToRender,
   openReviewAuthoring,
+  submitReviewViaManifest,
+  editReviewComment,
   hoverDiffLine,
   openCommentFormOnLine,
   dragResizeHandle,

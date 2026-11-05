@@ -246,25 +246,9 @@ class FileCommentManager {
       // Update count badge
       this.updateCommentCount(zone);
 
-      // Refresh minimize-mode indicators so file-header counts stay current
-      if (this.prManager?.commentMinimizer) {
-        this.prManager.commentMinimizer.refreshIndicators();
-        // Auto-expand so the new comment stays visible in minimize mode
-        const newCard = zone.querySelector(`.file-comment-card[data-comment-id="${commentData.id}"]`);
-        if (newCard) {
-          this.prManager.commentMinimizer.expandForElement(newCard);
-        }
-      }
-
-      // Notify AI Panel if available
-      if (window.aiPanel?.addComment) {
-        window.aiPanel.addComment(commentData);
-      }
-
-      // Update parent comment count
-      if (this.prManager?.updateCommentCount) {
-        this.prManager.updateCommentCount();
-      }
+      // Cache it and refresh the AI panel, counts and minimize-mode indicators
+      this.prManager?.registerUserComment?.(commentData);
+      this.expandNewCardForMinimizer(zone, commentData.id);
 
       window.chatPanel?.queueUserActionHint(`[User Action: created comment ${commentData.id}]`);
 
@@ -284,7 +268,7 @@ class FileCommentManager {
   /**
    * Display a user file-level comment
    * Note: Dismissed comments are never rendered in the diff view per design decision.
-   * They only appear in the AI/Review Panel. This method only receives active comments.
+   * They only appear in the AI/Review Panel. Posted comments can remain visible here.
    * @param {HTMLElement} zone - The file comments zone
    * @param {Object} comment - The comment data
    */
@@ -296,6 +280,7 @@ class FileCommentManager {
     const isAIOrigin = !!comment.parent_id;
     card.className = `file-comment-card user-comment ${isAIOrigin ? 'adopted-comment comment-ai-origin' : 'comment-user-origin'}`;
     card.dataset.commentId = comment.id;
+    window.PostedComment?.stampCommentStatus(card, comment);
 
     const renderedBody = window.renderMarkdown
       ? window.renderMarkdown(comment.body)
@@ -324,6 +309,7 @@ class FileCommentManager {
             ${commentIcon}
           </span>
           <span class="file-comment-badge" title="Comment applies to the entire file">File comment</span>
+          ${window.getPostedCommentIcon?.(comment, { link: true }) || ''}
           ${praiseBadge}
           ${titleHtml}
         </div>
@@ -344,6 +330,7 @@ class FileCommentManager {
         </div>
       </div>
       <div class="user-comment-body" data-original-markdown="${window.escapeHtmlAttribute(comment.body)}">${renderedBody}</div>
+      ${window.PostedComment?.getEditedSincePostedHtml(comment) || ''}
     `;
 
     // Wire up edit/delete buttons
@@ -393,7 +380,10 @@ class FileCommentManager {
     const userComments = this.prManager?.userComments || [];
     const suggestionIdNum = parseInt(suggestion.id);
     const wasAdopted = userComments.some(comment =>
-      comment.parent_id && (comment.parent_id === suggestion.id || comment.parent_id === suggestionIdNum)
+      // A dismissed comment no longer adopts its suggestion (dismissing it
+      // dismisses the suggestion); the cache keeps dismissed comments.
+      comment.status !== 'inactive' && comment.parent_id &&
+        (comment.parent_id === suggestion.id || comment.parent_id === suggestionIdNum)
     );
 
     // Determine if suggestion should be collapsed based on status or adoption
@@ -436,7 +426,7 @@ class FileCommentManager {
             : `<span class="ai-suggestion-badge" data-type="${suggestion.type}" title="AI Suggestion"><svg viewBox="0 0 16 16" fill="currentColor" width="12" height="12"><path d="M9.6 2.279a.426.426 0 0 1 .8 0l.407 1.112a6.386 6.386 0 0 0 3.802 3.802l1.112.407a.426.426 0 0 1 0 .8l-1.112.407a6.386 6.386 0 0 0-3.802 3.802l-.407 1.112a.426.426 0 0 1-.8 0l-.407-1.112a6.386 6.386 0 0 0-3.802-3.802L4.279 8.4a.426.426 0 0 1 0-.8l1.112-.407a6.386 6.386 0 0 0 3.802-3.802L9.6 2.279Zm-4.267 8.837a.178.178 0 0 1 .334 0l.169.464a2.662 2.662 0 0 0 1.584 1.584l.464.169a.178.178 0 0 1 0 .334l-.464.169a2.662 2.662 0 0 0-1.584 1.584l-.169.464a.178.178 0 0 1-.334 0l-.169-.464a2.662 2.662 0 0 0-1.584-1.584l-.464-.169a.178.178 0 0 1 0-.334l.464-.169a2.662 2.662 0 0 0 1.584-1.584l.169-.464ZM2.8.14a.213.213 0 0 1 .4 0l.203.556a3.2 3.2 0 0 0 1.901 1.901l.556.203a.213.213 0 0 1 0 .4l-.556.203a3.2 3.2 0 0 0-1.901 1.901L3.2 5.86a.213.213 0 0 1-.4 0l-.203-.556A3.2 3.2 0 0 0 .696 3.403L.14 3.2a.213.213 0 0 1 0-.4l.556-.203A3.2 3.2 0 0 0 2.597.696L2.8.14Z"/></svg>AI Suggestion</span>`}
           <span class="file-comment-badge" title="Comment applies to the entire file">File comment</span>
           ${categoryLabel ? `<span class="ai-suggestion-category">${this.escapeHtml(categoryLabel)}</span>` : ''}
-          <span class="ai-title">${this.escapeHtml(suggestion.title || '')}</span>
+          <span class="ai-title smart-truncate">${this.escapeHtml(suggestion.title || '')}</span>
         </div>
         <div class="ai-suggestion-header-right">
           ${showReasoningBtn ? `
@@ -450,7 +440,7 @@ class FileCommentManager {
         ${suggestion.type === 'praise'
           ? `<span class="praise-badge" title="Nice Work"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25z"/></svg>Nice Work</span>`
           : `<span class="ai-suggestion-badge collapsed" data-type="${suggestion.type}" title="AI Suggestion"><svg viewBox="0 0 16 16" fill="currentColor" width="10" height="10"><path d="M9.6 2.279a.426.426 0 0 1 .8 0l.407 1.112a6.386 6.386 0 0 0 3.802 3.802l1.112.407a.426.426 0 0 1 0 .8l-1.112.407a6.386 6.386 0 0 0-3.802 3.802l-.407 1.112a.426.426 0 0 1-.8 0l-.407-1.112a6.386 6.386 0 0 0-3.802-3.802L4.279 8.4a.426.426 0 0 1 0-.8l1.112-.407a6.386 6.386 0 0 0 3.802-3.802L9.6 2.279Zm-4.267 8.837a.178.178 0 0 1 .334 0l.169.464a2.662 2.662 0 0 0 1.584 1.584l.464.169a.178.178 0 0 1 0 .334l-.464.169a2.662 2.662 0 0 0-1.584 1.584l-.169.464a.178.178 0 0 1-.334 0l-.169-.464a2.662 2.662 0 0 0-1.584-1.584l-.464-.169a.178.178 0 0 1 0-.334l.464-.169a2.662 2.662 0 0 0 1.584-1.584l.169-.464ZM2.8.14a.213.213 0 0 1 .4 0l.203.556a3.2 3.2 0 0 0 1.901 1.901l.556.203a.213.213 0 0 1 0 .4l-.556.203a3.2 3.2 0 0 0-1.901 1.901L3.2 5.86a.213.213 0 0 1-.4 0l-.203-.556A3.2 3.2 0 0 0 .696 3.403L.14 3.2a.213.213 0 0 1 0-.4l.556-.203A3.2 3.2 0 0 0 2.597.696L2.8.14Z"/></svg>AI Suggestion</span>`}
-        <span class="collapsed-title">${this.escapeHtml(suggestion.title || '')}</span>
+        <span class="collapsed-title smart-truncate">${this.escapeHtml(suggestion.title || '')}</span>
         ${window.SuggestionUI?.buildRevisionWarningHtml?.(suggestion.revision) || ''}
         <div class="ai-suggestion-header-right">
           ${showReasoningBtn ? `
@@ -562,25 +552,9 @@ class FileCommentManager {
       this.displayUserComment(zone, commentData);
       this.updateCommentCount(zone);
 
-      // Refresh minimize-mode indicators so file-header counts stay current
-      if (this.prManager?.commentMinimizer) {
-        this.prManager.commentMinimizer.refreshIndicators();
-        // Auto-expand so the new comment stays visible in minimize mode
-        const newCard = zone.querySelector(`.file-comment-card[data-comment-id="${commentData.id}"]`);
-        if (newCard) {
-          this.prManager.commentMinimizer.expandForElement(newCard);
-        }
-      }
-
-      // Update parent comment count for Preview button
-      if (this.prManager?.updateCommentCount) {
-        this.prManager.updateCommentCount();
-      }
-
-      // Add comment to AI Panel's comment list for navigation and display
-      if (window.aiPanel?.addComment) {
-        window.aiPanel.addComment(commentData);
-      }
+      // Cache it and refresh the AI panel, counts and minimize-mode indicators
+      this.prManager?.registerUserComment?.(commentData);
+      this.expandNewCardForMinimizer(zone, commentData.id);
 
       // Update finding status in AI Panel (mark suggestion as adopted)
       if (window.aiPanel?.updateFindingStatus) {
@@ -837,25 +811,9 @@ class FileCommentManager {
       this.displayUserComment(zone, commentData);
       this.updateCommentCount(zone);
 
-      // Refresh minimize-mode indicators so file-header counts stay current
-      if (this.prManager?.commentMinimizer) {
-        this.prManager.commentMinimizer.refreshIndicators();
-        // Auto-expand so the new comment stays visible in minimize mode
-        const newCard = zone.querySelector(`.file-comment-card[data-comment-id="${commentData.id}"]`);
-        if (newCard) {
-          this.prManager.commentMinimizer.expandForElement(newCard);
-        }
-      }
-
-      // Update parent comment count for Preview button
-      if (this.prManager?.updateCommentCount) {
-        this.prManager.updateCommentCount();
-      }
-
-      // Add comment to AI Panel's comment list for navigation and display
-      if (window.aiPanel?.addComment) {
-        window.aiPanel.addComment(commentData);
-      }
+      // Cache it and refresh the AI panel, counts and minimize-mode indicators
+      this.prManager?.registerUserComment?.(commentData);
+      this.expandNewCardForMinimizer(zone, commentData.id);
 
       // Update finding status in AI Panel (mark suggestion as adopted)
       if (window.aiPanel?.updateFindingStatus) {
@@ -967,6 +925,8 @@ class FileCommentManager {
       bodyEl.innerHTML = renderedBody;
       bodyEl.dataset.originalMarkdown = newBody;
 
+      this.prManager?.patchUserComment?.(commentId, { body: newBody });
+
     } catch (error) {
       console.error('Error updating comment:', error);
       window.reviewDrafts?.showRecovery();
@@ -1006,20 +966,9 @@ class FileCommentManager {
 
       this.updateCommentCount(zone);
 
-      // Refresh minimize-mode indicators so file-header counts stay current
-      if (this.prManager?.commentMinimizer) {
-        this.prManager.commentMinimizer.refreshIndicators();
-      }
-
-      // Update parent comment count
-      if (this.prManager?.updateCommentCount) {
-        this.prManager.updateCommentCount();
-      }
-
-      // Notify AI Panel about the deleted comment
-      if (window.aiPanel?.removeComment) {
-        window.aiPanel.removeComment(commentId);
-      }
+      // Updates the counts, the minimizer, and the AI panel (dismissed styling
+      // when it shows dismissed comments, otherwise removed)
+      this.prManager?.patchUserComment?.(commentId, { status: 'inactive' });
 
       // If a parent suggestion existed, the suggestion card is still collapsed/dismissed in the diff view.
       // Update AIPanel to show the suggestion as 'dismissed' (matching its visual state).
@@ -1055,13 +1004,28 @@ class FileCommentManager {
   }
 
   /**
+   * Expand a newly rendered card in minimize mode so it stays visible
+   * @param {HTMLElement} zone - The file comments zone
+   * @param {number} commentId - The new comment's ID
+   */
+  expandNewCardForMinimizer(zone, commentId) {
+    const minimizer = this.prManager?.commentMinimizer;
+    if (!minimizer) return;
+    const newCard = zone.querySelector(`.file-comment-card[data-comment-id="${commentId}"]`);
+    if (newCard) {
+      minimizer.expandForElement(newCard);
+    }
+  }
+
+  /**
    * Update the zone state based on comment count
    * @param {HTMLElement} zone - The file comments zone
    */
   updateCommentCount(zone) {
     const container = zone.querySelector('.file-comments-container');
 
-    const userComments = container.querySelectorAll('.file-comment-card:not(.ai-suggestion)').length;
+    // Hidden posted comments don't count: the reviewer can't see them
+    const userComments = container.querySelectorAll('.file-comment-card:not(.ai-suggestion):not(.posted-comment-hidden)').length;
     const aiSuggestions = container.querySelectorAll('.file-comment-card.ai-suggestion').length;
     const total = userComments + aiSuggestions;
 
@@ -1103,9 +1067,16 @@ class FileCommentManager {
   }
 
   /**
-   * Load and display file-level comments for all files
-   * @param {Array} comments - Array of file-level comments
-   * @param {Array} suggestions - Array of file-level AI suggestions
+   * Load and display file-level comments for all files.
+   *
+   * Both arguments follow one rule: any array, including an empty one,
+   * replaces that kind of card; null leaves it untouched. A user-comment
+   * reload passes null suggestions, and an AI suggestion display passes null
+   * comments, so neither wipes the other's cards.
+   * @param {Array|null} comments - Replacement list of file-level user
+   *   comments, or null to leave the user comment cards alone
+   * @param {Array|null} suggestions - Replacement list of file-level AI
+   *   suggestions, or null to leave the AI cards alone
    */
   loadFileComments(comments, suggestions) {
     // Group by rendered file comments zone so path variants still attach to the
@@ -1151,17 +1122,19 @@ class FileCommentManager {
       // Selectively clear existing cards based on what we're about to reload
       // This prevents user comments from being cleared when only reloading AI suggestions
       if (container) {
-        // Only clear AI suggestions if we have suggestions to display
-        // (prevents stale suggestions from persisting when reloading or changing levels)
-        if (suggestions && suggestions.length > 0) {
+        // A supplied suggestions list replaces the previous AI cards, even
+        // when it is empty (a new run or level with no file-level findings
+        // must not leave the old cards behind). null leaves them alone.
+        if (suggestions) {
           const existingAISuggestions = container.querySelectorAll('.file-comment-card.ai-suggestion');
           for (const card of existingAISuggestions) {
             card.remove();
           }
         }
 
-        // Only clear user comments if we have comments to display
-        if (comments && comments.length > 0) {
+        // Same rule for user comments: a supplied list replaces them, even
+        // when empty (the last file-level comment was deleted or dismissed).
+        if (comments) {
           const existingUserComments = container.querySelectorAll('.file-comment-card.user-comment');
           for (const card of existingUserComments) {
             card.remove();

@@ -24,6 +24,8 @@ import { listenOnLoopback, closeServer } from '../utils/loopback-server';
 const { GitHubClient } = require('../../src/github/client');
 const { GitWorktreeManager } = require('../../src/git/worktree');
 const configModule = require('../../src/config');
+const ws = require('../../src/ws');
+const { CommentRepository } = require('../../src/database');
 
 // Per-file temp config dir. A fixed path like '/tmp/.pair-review-test' is
 // shared by every test file that mocks getConfigDir the same way — vitest
@@ -559,7 +561,7 @@ describe('PR Management Endpoints', () => {
           'index 1111111..2222222 100644',
           `--- a/${longPath}`,
           `+++ b/${longPath}`,
-          '@@ -1 +1,2 @@',
+          '@@ -1 +1,3 @@',
           ' export const Route = {};',
           '+Route.component = View;',
           '+Route.loader = loader;'
@@ -1628,38 +1630,20 @@ describe('User Comment Endpoints', () => {
       expect(response.body.deletedCount).toBe(2);
     });
 
-    it('should delete comments with active, submitted, and draft statuses', async () => {
-      // Create comments with different statuses that should all be deleted
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, body, status)
-        VALUES (?, 'user', 'file1.js', 10, 'Active comment', 'active')
-      `, [prId]);
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, body, status)
-        VALUES (?, 'user', 'file2.js', 20, 'Submitted comment', 'submitted')
-      `, [prId]);
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, body, status)
-        VALUES (?, 'user', 'file3.js', 30, 'Draft comment', 'draft')
-      `, [prId]);
-      // This inactive comment should NOT be deleted again
-      await run(db, `
-        INSERT INTO comments (review_id, source, file, line_start, body, status)
-        VALUES (?, 'user', 'file4.js', 40, 'Already inactive', 'inactive')
-      `, [prId]);
-
-      const response = await request(server)
-        .delete(`/api/reviews/${prId}/comments`);
-
+    it('clears only pending comments and keeps both draft and published postings', async () => {
+      for (const state of [null, 'submitted', 'pending']) {
+        const c = await run(db, `INSERT INTO comments (review_id, source, file, body, status)
+          VALUES (?, 'user', 'a.js', 'body', 'active')`, [prId]);
+        if (state) {
+          const gr = await run(db, 'INSERT INTO github_reviews (review_id, state) VALUES (?, ?)', [prId, state]);
+          await run(db, 'INSERT INTO comment_postings (comment_id, github_review_row_id, body) VALUES (?, ?, ?)', [c.lastID, gr.lastID, 'body']);
+        }
+      }
+      const response = await request(server).delete(`/api/reviews/${prId}/comments`);
       expect(response.status).toBe(200);
-      expect(response.body.success).toBe(true);
-      expect(response.body.deletedCount).toBe(3); // Only active, submitted, draft
-
-      // Verify all deletable comments are now inactive
-      const comments = await query(db, `
-        SELECT status FROM comments WHERE review_id = ? AND source = 'user' ORDER BY line_start
-      `, [prId]);
-      expect(comments.every(c => c.status === 'inactive')).toBe(true);
+      expect(response.body.deletedCount).toBe(1);
+      const comments = await query(db, "SELECT status FROM comments WHERE review_id = ? AND source = 'user' ORDER BY id", [prId]);
+      expect(comments.map(c => c.status)).toEqual(['inactive', 'active', 'active']);
     });
 
     it('should return dismissedSuggestionIds when bulk deleting adopted comments', async () => {
@@ -2702,6 +2686,7 @@ describe('AI Suggestion Endpoints', () => {
 });
 
 // ============================================================================
+
 // Config Endpoint Tests
 // ============================================================================
 
@@ -7119,7 +7104,7 @@ describe('Share Endpoint', () => {
 
       await run(db, `
         INSERT INTO analysis_runs (id, review_id, provider, model, tier, status, summary, started_at, completed_at)
-        VALUES (?, ?, 'antigravity', 'gemini-3.1-pro-low', 'fast', 'completed', 'Older run', datetime('now', '-10 minutes'), datetime('now', '-9 minutes'))
+        VALUES (?, ?, 'antigravity', 'gemini-3.8-flash-medium', 'fast', 'completed', 'Older run', datetime('now', '-10 minutes'), datetime('now', '-9 minutes'))
       `, [olderRunId, reviewId]);
 
       await run(db, `
@@ -7135,7 +7120,7 @@ describe('Share Endpoint', () => {
       expect(response.body.run).toMatchObject({
         id: olderRunId,
         provider: 'antigravity',
-        model: 'gemini-3.1-pro-low',
+        model: 'gemini-3.8-flash-medium',
         summary: 'Older run'
       });
     });
@@ -7176,7 +7161,7 @@ describe('Share Endpoint', () => {
 
       await run(db, `
         INSERT INTO analysis_runs (id, review_id, provider, model, status, summary, started_at, completed_at)
-        VALUES (?, ?, 'antigravity', 'gemini-3.1-pro-low', 'completed', 'Completed run', datetime('now', '-5 minutes'), datetime('now', '-4 minutes'))
+        VALUES (?, ?, 'antigravity', 'gemini-3.8-flash-medium', 'completed', 'Completed run', datetime('now', '-5 minutes'), datetime('now', '-4 minutes'))
       `, [completedRunId, reviewId]);
 
       // Request the running run specifically
@@ -7203,7 +7188,7 @@ describe('Share Endpoint', () => {
 
       await run(db, `
         INSERT INTO analysis_runs (id, review_id, provider, model, status, started_at)
-        VALUES ('latest-running', ?, 'antigravity', 'gemini-3.1-pro-low', 'running', datetime('now'))
+        VALUES ('latest-running', ?, 'antigravity', 'gemini-3.8-flash-medium', 'running', datetime('now'))
       `, [reviewId]);
 
       const response = await request(server)

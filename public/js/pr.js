@@ -232,6 +232,8 @@ class PRManager {
     // Lazy-instantiated TourBar / TourRenderer; populated on first open.
     this._tourBar = null;
     this._tourRenderer = null;
+    // Re-measures the mounted tour bar; see _trackTourBarHeight().
+    this._tourBarResizeObserver = null;
     // Tri-state mirror of `tours.enabled` in /api/config. Tours are
     // independent of summaries on both the server and the client (see
     // the explanatory comment in setupEventHandlers()).
@@ -411,6 +413,10 @@ class PRManager {
     // Track toolbar height for sticky file headers (they sit below the sticky toolbar)
     this._initToolbarHeightTracking();
 
+    // Wire the file navigator toggles once; the sidebar markup is static, so
+    // this must not wait for (or depend on) a non-empty file list
+    this.setupSidebarToggle();
+
     // Initialize diff options dropdown (gear icon for whitespace toggle).
     // Must happen before init() so the persisted hideWhitespace state is
     // applied before the first loadAndDisplayFiles() call.
@@ -443,7 +449,8 @@ class PRManager {
 
   /**
    * Install a global fetch interceptor that adds X-Client-Id to all
-   * mutation requests (POST/PUT/DELETE) targeting the review API.
+   * mutation requests (POST/PUT/DELETE) targeting the review API, including
+   * manifest-authorized review submission.
    * This is the SINGLE SOURCE of X-Client-Id injection — no individual
    * fetch call site should manually set this header.
    * This ensures that even direct fetch() calls (e.g. from page.evaluate
@@ -462,7 +469,8 @@ class PRManager {
       const url = typeof input === 'string' ? input : input?.url || '';
       const method = (init?.method || 'GET').toUpperCase();
 
-      // Only intercept mutations to the reviews API
+      // Only intercept mutations to the reviews API, plus review submission
+      // (it broadcasts review:comments_changed too)
       if ((method === 'POST' || method === 'PUT' || method === 'DELETE') &&
           url.includes('/api/reviews/') && prManager._clientId) {
         init = init || {};
@@ -501,6 +509,29 @@ class PRManager {
     // Re-measure when toolbar resizes (e.g. analysis dots appear/disappear)
     if (typeof ResizeObserver !== 'undefined') {
       new ResizeObserver(update).observe(toolbar);
+    }
+  }
+
+  /**
+   * Track the mounted tour bar's height (it grows when wrapped). Call after each mount.
+   */
+  _trackTourBarHeight() {
+    const bar = document.querySelector('.tour-bar');
+    if (!bar) return;
+
+    const update = () => {
+      if (bar.offsetHeight) {
+        document.documentElement.style.setProperty(
+          '--tour-bar-rendered-height', bar.offsetHeight + 'px'
+        );
+      }
+    };
+    update();
+
+    if (typeof ResizeObserver !== 'undefined') {
+      this._tourBarResizeObserver?.disconnect();
+      this._tourBarResizeObserver = new ResizeObserver(update);
+      this._tourBarResizeObserver.observe(bar);
     }
   }
 
@@ -632,10 +663,10 @@ class PRManager {
       }
     });
 
-    // Listen for filter dismissed changes from AI panel
-    document.addEventListener('filterDismissedChanged', (e) => {
-      const showDismissed = e.detail?.showDismissed;
-      this.loadUserComments(showDismissed);
+    // Reload user comments when the reviewer changes the comment panel's
+    // filters (show dismissed, show posted). loadUserComments reads them.
+    document.addEventListener('commentFilterChanged', () => {
+      this.loadUserComments();
     });
   }
 
@@ -644,6 +675,17 @@ class PRManager {
    * This avoids memory leaks from attaching listeners to each textarea
    */
   setupCommentFormDelegation() {
+    // "Update on GitHub" on an edited posted comment, in any diff renderer
+    document.addEventListener('click', (e) => {
+      const button = e.target.closest?.('.btn-update-on-host');
+      if (!button || button.disabled) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.updatePostedCommentOnHost(button.dataset.updateCommentId).then(result => {
+        if (result?.ok) window.toast?.showSuccess(`Comment updated on ${window.PostedComment.escapeHtml(window.PostedComment.hostName())}`);
+      });
+    });
+
     document.addEventListener('keydown', (e) => {
       // Check if we're in a comment-related textarea
       const textarea = e.target;
@@ -997,10 +1039,8 @@ class PRManager {
       }
       window.panelGroup?.setPR(`${owner}/${repo}#${number}`);
 
-      // Load saved comments using the restored filter state from AI Panel
-      // If AI Panel has showDismissedComments=true (restored from localStorage), use that
-      const includeDismissed = window.aiPanel?.showDismissedComments || false;
-      await this.loadUserComments(includeDismissed);
+      // Load saved comments: uses the comment panel's filters (restored from localStorage by setPR)
+      await this.loadUserComments();
 
       // Initialize analysis history manager if review ID is available
       // The review ID is needed to fetch analysis runs from the database
@@ -1078,8 +1118,7 @@ class PRManager {
    *   the existing mirror.
    */
   async _rerenderAllOverlays({ syncExternal = false } = {}) {
-    const includeDismissed = window.aiPanel?.showDismissedComments || false;
-    await this.loadUserComments(includeDismissed);
+    await this.loadUserComments();
     await this.loadAISuggestions();
     // Skip external-comment re-rendering entirely when the feature is off.
     // The manager is never populated with rows in that case, so there's
@@ -2327,6 +2366,7 @@ class PRManager {
     // controls stay visible.
     const diffView = document.querySelector('.main-layout .diff-view');
     this._tourBar.mount(diffView || undefined);
+    this._trackTourBarHeight();
     this._tourBar.setStops(this._tourStops);
     this._tourBar.setCompleted(false);
 
@@ -2500,6 +2540,10 @@ class PRManager {
     if (this._tourBar) {
       this._tourBar.unmount();
     }
+    // The measured height is only read under body.tour-active, so a stale
+    // value is harmless; just stop observing the removed bar.
+    this._tourBarResizeObserver?.disconnect();
+    this._tourBarResizeObserver = null;
     this._unregisterTourKeyboardHandlers();
     this._tourActiveIndex = -1;
     // Consume any pending tour stashed by `review:tour_ready` while we
@@ -2927,11 +2971,14 @@ class PRManager {
     for (const part of parts) {
       if (!part.trim()) continue;
 
-      // Extract filename from diff --git line
-      const match = part.match(/^diff --git a\/(.+?) b\/(.+)/);
-      if (match) {
-        const fileName = match[2]; // Use the 'b' path (new file path)
-        filePatchMap.set(fileName, part);
+      // Key by the decoded new path: the `rename to` line when there is one,
+      // otherwise the 'b' side of the diff --git line. Git C-quotes names
+      // containing control characters, `"` or `\` (`"b/tab\tname.js"`), and
+      // the server keys changed_files, comments and suggestions by the
+      // decoded spelling.
+      const paths = window.GitPaths.parsePatchPaths(part);
+      if (paths) {
+        filePatchMap.set(paths.newPath, part);
       }
     }
 
@@ -4166,8 +4213,7 @@ class PRManager {
 
   async _reanchorInlineFeedbackAfterDeferredRender() {
     try {
-      const includeDismissed = window.aiPanel?.showDismissedComments || false;
-      await this.loadUserComments(includeDismissed);
+      await this.loadUserComments();
       await this.loadAISuggestions();
     } catch (err) {
       console.error('Failed to re-anchor inline feedback after deferred diff render:', err);
@@ -6072,8 +6118,7 @@ class PRManager {
         // Remove form annotation
         this.pierreBridge.removeAnnotation(fileName, annotationId);
         // Reload comments to show the new one
-        const includeDismissed = window.aiPanel?.showDismissedComments || false;
-        await this.loadUserComments(includeDismissed);
+        await this.loadUserComments();
 
         // Legacy-path side-effects: clear the dragged range, auto-expand in
         // minimize mode, and notify the AI chat context. Parity with
@@ -6260,10 +6305,7 @@ class PRManager {
       if (editFormEl) editFormEl.remove();
       commentDiv.classList.remove('editing-mode');
 
-      // Notify AI Panel about the updated comment body
-      if (window.aiPanel?.updateComment) {
-        window.aiPanel.updateComment(commentId, { body: editedText });
-      }
+      this.patchUserComment(commentId, { body: editedText });
 
     } catch (error) {
       console.error('Error saving comment:', error);
@@ -6310,14 +6352,10 @@ class PRManager {
 
       const apiResult = await response.json();
 
-      // Check if dismissed comments filter is enabled for AI Panel updates
-      const showDismissed = window.aiPanel?.showDismissedComments || false;
-
       // Always remove the comment from the diff view (design decision: dismissed comments never shown in diff)
       const commentRow = document.querySelector(`[data-comment-id="${commentId}"]`);
       if (commentRow) {
         commentRow.remove();
-        this.updateCommentCount();
       }
 
       // Also handle file-level comment cards
@@ -6328,16 +6366,11 @@ class PRManager {
         if (zone && this.fileCommentManager) {
           this.fileCommentManager.updateCommentCount(zone);
         }
-        this.updateCommentCount();
       }
 
-      // Update AI Panel - transition to dismissed state or remove based on filter
-      if (showDismissed && window.aiPanel?.updateComment) {
-        // Update comment status to 'inactive' so it renders with dismissed styling in AI Panel
-        window.aiPanel.updateComment(commentId, { status: 'inactive' });
-      } else if (window.aiPanel?.removeComment) {
-        window.aiPanel.removeComment(commentId);
-      }
+      // Updates the counts, the minimizer, and the AI panel (dismissed styling
+      // when it shows dismissed comments, otherwise removed)
+      this.patchUserComment(commentId, { status: 'inactive' });
 
       // If a parent suggestion existed, the suggestion card is still collapsed/dismissed in the diff view.
       // Update AIPanel to show the suggestion as 'dismissed' (matching its visual state).
@@ -6353,11 +6386,6 @@ class PRManager {
         if (suggestionDiv) {
           delete suggestionDiv.dataset.hiddenForAdoption;
         }
-      }
-
-      // Refresh minimize-mode indicators so deleted comments no longer show
-      if (this.commentMinimizer) {
-        this.commentMinimizer.refreshIndicators();
       }
 
       // Show success toast
@@ -6389,9 +6417,7 @@ class PRManager {
       if (!response.ok) throw new Error('Failed to restore comment');
 
       // Reload comments to update both the diff view and AI panel
-      // Pass the current filter state from the AI panel
-      const includeDismissed = window.aiPanel?.showDismissedComments || false;
-      await this.loadUserComments(includeDismissed);
+      await this.loadUserComments();
 
       // Show success toast
       if (window.toast) {
@@ -6422,10 +6448,8 @@ class PRManager {
    * Clear all user comments (soft-delete with confirmation for bulk operations)
    */
   async clearAllUserComments() {
-    // Count both line-level and file-level user comments
-    const lineCommentRows = document.querySelectorAll('.user-comment-row:not(.suggestion-edit-pending)');
-    const fileCommentCards = document.querySelectorAll('.file-comment-card.user-comment');
-    const totalComments = lineCommentRows.length + fileCommentCards.length;
+    const totalComments = this.getPendingCommentCount();
+    const hasPosted = (this.userComments || []).some(window.PostedComment.isPostedComment);
 
     if (totalComments === 0) {
       if (window.toast?.showInfo) {
@@ -6441,7 +6465,7 @@ class PRManager {
 
     const dialogResult = await window.confirmDialog.show({
       title: 'Clear All Comments?',
-      message: `This will dismiss all ${totalComments} comment${totalComments !== 1 ? 's' : ''}. You can restore them later.`,
+      message: `This will dismiss all ${totalComments} pending comment${totalComments !== 1 ? 's' : ''}. You can restore them later.${hasPosted ? ' Posted comments are kept.' : ''}`,
       confirmText: 'Clear All',
       confirmClass: 'btn-danger'
     });
@@ -6456,30 +6480,11 @@ class PRManager {
       if (!response.ok) throw new Error('Failed to delete comments');
 
       const result = await response.json();
-      const deletedCount = result.deletedCount || totalComments;
-
-      // Remove line-level comment rows from DOM
-      lineCommentRows.forEach(row => row.remove());
-
-      // Remove file-level comment cards from DOM
-      fileCommentCards.forEach(card => {
-        const zone = card.closest('.file-comments-zone');
-        card.remove();
-
-        // Update the file comment zone header button state
-        if (zone && this.fileCommentManager) {
-          this.fileCommentManager.updateCommentCount(zone);
-        }
-      });
-
-      // Remove line-level and file-level comment elements from diff view
-      // (They have been soft-deleted, so should not appear in the diff panel per design decision)
-      // The comments array will be reloaded below with proper dismissed state.
+      const deletedCount = result.deletedCount ?? totalComments;
 
       // Reload comments to update both internal state and AI Panel
       // This shows dismissed comments in AI Panel if filter is enabled, matching individual deletion behavior
-      const includeDismissed = window.aiPanel?.showDismissedComments || false;
-      await this.loadUserComments(includeDismissed);
+      await this.loadUserComments();
 
       // Update dismissed suggestions in the diff view UI
       // (AI Panel is already updated by loadUserComments via setComments)
@@ -6504,45 +6509,49 @@ class PRManager {
   }
 
   /**
-   * Load user comments from API
-   * @param {boolean} [includeDismissed=false] - Whether to include dismissed (inactive) comments
-   *   When true, dismissed comments are returned by the API so they can be shown in the AI Panel.
-   *   Note: Dismissed comments are NEVER shown in the diff panel per design decision.
+   * Load user comments from API and render them.
+   *
+   * Every user comment is fetched, dismissed ones included, so the cache
+   * matches what live edits leave in it and the hidden-comments notice can
+   * count from data. What shows follows the comment panel's filters
+   * (getCommentFilterState), read at render time, so reloads triggered by
+   * events (live sync, tab becoming visible) keep what the panel shows.
+   * Dismissed comments are NEVER shown in the diff panel (design decision);
+   * they show in the AI Panel when its "Show dismissed" filter is on.
+   * @returns {Promise<boolean|undefined>} true once rendered, false if the
+   *   reload failed, undefined when no PR is loaded. A load overtaken by a
+   *   newer one resolves with the newer load's result.
    */
-  async loadUserComments(includeDismissed = false) {
+  loadUserComments() {
+    const load = this._loadUserComments();
+    this._latestUserCommentsLoad = load;
+    return load;
+  }
+
+  async _loadUserComments() {
     if (!this.currentPR) return;
-    const generation = this._commentLoadGeneration = (this._commentLoadGeneration || 0) + 1;
+    const generation = (this._userCommentsLoadGeneration || 0) + 1;
+    this._userCommentsLoadGeneration = generation;
 
     try {
-      const queryParam = includeDismissed ? '?includeDismissed=true' : '';
-      const response = await fetch(`/api/reviews/${this.currentPR.id}/comments${queryParam}`);
-      if (!response.ok) return;
+      let comments;
+      let fileLevelComments;
+      let lineLevelComments;
+      // A save, edit or dismissal that lands while this load is in flight
+      // isn't in the fetched data. Rendering that data would wipe the new row,
+      // so fetch again (a few times at most) until the cache stood still.
+      for (let attempt = 1; ; attempt++) {
+        const cacheVersion = this._userCommentsVersion || 0;
+        ({ comments, fileLevelComments, lineLevelComments } = await this._fetchUserCommentsForRender());
+        if (generation !== this._userCommentsLoadGeneration) return this._latestUserCommentsLoad;
+        if (cacheVersion === (this._userCommentsVersion || 0) || attempt >= 3) break;
+      }
 
-      const data = await response.json();
-      if (generation !== this._commentLoadGeneration) return;
+      // Assign the cache only now, next to the render: an overtaken or retried
+      // load must not replace data that a save made meanwhile.
       window.reviewDrafts?.captureEditors();
-      this.userComments = data.comments || [];
+      this.userComments = comments;
       window.reviewDrafts?.ingest(this.userComments);
-
-      // Separate file-level and line-level comments for diff view rendering
-      // DESIGN DECISION: Dismissed comments are NEVER shown in the diff panel.
-      // They only appear in the AI/Review Panel when the "show dismissed" filter is ON.
-      // This provides cleaner UX - the diff view shows only active comments, while
-      // the AI Panel serves as the "inbox" where you can optionally see and restore dismissed items.
-      const fileLevelComments = [];
-      const lineLevelComments = [];
-
-      this.userComments.forEach(comment => {
-        // Skip inactive (dismissed) comments - they should not appear in the diff view
-        if (comment.status === 'inactive') {
-          return;
-        }
-        if (comment.is_file_level === 1) {
-          fileLevelComments.push(comment);
-        } else {
-          lineLevelComments.push(comment);
-        }
-      });
 
       // Clear existing comment rows before re-rendering
       document.querySelectorAll('.user-comment-row:not(.suggestion-edit-pending)').forEach(row => row.remove());
@@ -6554,21 +6563,6 @@ class PRManager {
         }
       }
 
-      // Ensure every comment's target line is reachable in the DOM before
-      // rendering. `ensureLinesVisible` handles both engines — for Pierre
-      // files it expands collapsed gaps via `addContextRanges` so the
-      // annotation row exists; for legacy files it expands hidden hunks.
-      // Without this, comments on lines outside the default hunks render
-      // nowhere on reload and "jump to comment" silently fails.
-      if (lineLevelComments.length > 0) {
-        await this.ensureLinesVisible(lineLevelComments.map(c => ({
-          file: c.file,
-          line_start: c.line_start,
-          line_end: c.line_end || c.line_start,
-          side: c.side || 'RIGHT',
-        })));
-      }
-      if (generation !== this._commentLoadGeneration) return;
 
       // Partition line-level comments by rendering engine
       const pierreComments = [];
@@ -6617,25 +6611,22 @@ class PRManager {
         });
       }
 
-      // Load file-level comments into their zones (only active comments reach here)
-      if (this.fileCommentManager && fileLevelComments.length > 0) {
-        this.fileCommentManager.loadFileComments(fileLevelComments, []);
+      // Always pass the list, even when empty, so the cards of a
+      // deleted or dismissed last comment are removed. null suggestions
+      // leaves the file-level AI cards alone.
+      if (this.fileCommentManager) {
+        this.fileCommentManager.loadFileComments(fileLevelComments, null);
       }
 
-      // Populate AI Panel with all comments (including dismissed if requested)
-      if (window.aiPanel?.setComments) {
-        window.aiPanel.setComments(this.userComments);
-      }
+      // Also refreshes the file-comment zones and minimize-mode indicators
+      this.applyPostedCommentVisibility();
 
       this.updateCommentCount();
-
-      // Refresh minimize-mode indicators (no-op when minimize mode is off)
-      if (this.commentMinimizer) {
-        this.commentMinimizer.refreshIndicators();
-      }
       await window.reviewDrafts?.restoreEditors();
+      return true;
     } catch (error) {
       console.error('Error loading user comments:', error);
+      return false;
     }
   }
 
@@ -6681,6 +6672,109 @@ class PRManager {
     if (savedDiff === viewedDiff) return true;
     const savedIdentity = this._localDiffIdentity(savedDiff);
     return savedIdentity !== null && savedIdentity === this._localDiffIdentity(viewedDiff);
+  }
+
+  /**
+   * Fetch the review's user comments, split them for rendering, and make
+   * every line-level comment's target line reachable in the DOM.
+   * @private
+   */
+  async _fetchUserCommentsForRender() {
+    const response = await fetch(`/api/reviews/${this.currentPR.id}/comments?includeDismissed=true`);
+    if (!response.ok) throw new Error('Failed to load comments');
+
+    const data = await response.json();
+    const comments = data.comments || [];
+
+    // Separate file-level and line-level comments for diff view rendering
+    // DESIGN DECISION: Dismissed comments are NEVER shown in the diff panel.
+    // They only appear in the AI/Review Panel when the "show dismissed" filter is ON.
+    // Posted comments remain visible unless the reviewer opts to hide them.
+    const fileLevelComments = [];
+    const lineLevelComments = [];
+    comments.forEach(comment => {
+      if (comment.status === 'inactive') {
+        return;
+      }
+      if (comment.is_file_level === 1) {
+        fileLevelComments.push(comment);
+      } else {
+        lineLevelComments.push(comment);
+      }
+    });
+
+    // Ensure every comment's target line is reachable in the DOM before
+    // rendering. `ensureLinesVisible` handles both engines — for Pierre
+    // files it expands collapsed gaps via `addContextRanges` so the
+    // annotation row exists; for legacy files it expands hidden hunks.
+    // Without this, comments on lines outside the default hunks render
+    // nowhere on reload and "jump to comment" silently fails.
+    if (lineLevelComments.length > 0) {
+      await this.ensureLinesVisible(lineLevelComments.map(c => ({
+        file: c.file,
+        line_start: c.line_start,
+        line_end: c.line_end || c.line_start,
+        side: c.side || 'RIGHT',
+      })));
+    }
+
+    return { comments, fileLevelComments, lineLevelComments };
+  }
+
+  /**
+   * The comment panel's user-comment filters. Falls back to the panel's
+   * show-dismissed flag and this review's posted setting when the panel
+   * predates getCommentFilterState (or is a test stub).
+   * @returns {{includeDismissed: boolean, showPosted: boolean}}
+   */
+  getCommentFilterState() {
+    const state = window.aiPanel?.getCommentFilterState?.();
+    if (state) return state;
+    return {
+      includeDismissed: !!window.aiPanel?.showDismissedComments,
+      showPosted: !(window.PostedComment?.isHidePostedInEffect() ?? false)
+    };
+  }
+
+  /**
+   * How many cached user comments the panel's filters hide, counted from the
+   * comment data (never DOM rows), for the panel's hidden-comments notice.
+   * @param {{includeDismissed: boolean, showPosted: boolean}} [filter]
+   * @returns {{posted: number, dismissed: number}}
+   */
+  getHiddenCommentCounts(filter = this.getCommentFilterState()) {
+    const comments = this.userComments || [];
+    return {
+      posted: window.PostedComment.countHiddenPostedComments(comments, !filter.showPosted),
+      dismissed: filter.includeDismissed ? 0 : comments.filter(c => c.status === 'inactive').length
+    };
+  }
+
+  applyPostedCommentVisibility() {
+    const { shouldHidePostedComment } = window.PostedComment;
+    const filter = this.getCommentFilterState();
+    const hidePosted = !filter.showPosted;
+    document.querySelectorAll('[data-comment-status]').forEach(element => {
+      element.classList.toggle('posted-comment-hidden',
+        shouldHidePostedComment({ status: element.dataset.commentStatus, publication: element.dataset.commentPublication === 'none' ? null : { state: element.dataset.commentPublication } }, hidePosted));
+    });
+    window.aiPanel?.setHiddenCommentCounts?.(this.getHiddenCommentCounts(filter));
+    window.aiPanel?.setComments?.((this.userComments || []).filter(c =>
+      (c.status !== 'inactive' || filter.includeDismissed) &&
+      !shouldHidePostedComment(c, hidePosted)
+    ));
+
+    // Hidden posted comments must not drive the file-comment header state or
+    // the minimize-mode indicators. The minimizer's observer watches childList
+    // only, so a class toggle needs an explicit refresh.
+    if (this.fileCommentManager) {
+      document.querySelectorAll('.file-comments-zone').forEach(zone => {
+        if (zone.querySelector('.file-comments-container')) {
+          this.fileCommentManager.updateCommentCount(zone);
+        }
+      });
+    }
+    this.commentMinimizer?.refreshIndicators();
   }
 
   /**
@@ -6959,9 +7053,7 @@ class PRManager {
    * Notify panels and navigator after a successful adoption
    */
   _notifyAdoption(suggestionId, newComment) {
-    if (window.aiPanel?.addComment) {
-      window.aiPanel.addComment(newComment);
-    }
+    this.registerUserComment(newComment);
 
     if (this.suggestionNavigator?.suggestions) {
       const updatedSuggestions = this.suggestionNavigator.suggestions.map(s =>
@@ -6972,13 +7064,6 @@ class PRManager {
 
     if (window.aiPanel) {
       window.aiPanel.updateFindingStatus(suggestionId, 'adopted');
-    }
-
-    this.updateCommentCount();
-
-    // Refresh minimize-mode indicators so the adopted comment is reflected
-    if (this.commentMinimizer) {
-      this.commentMinimizer.refreshIndicators();
     }
   }
 
@@ -7367,6 +7452,7 @@ class PRManager {
           onPreview: () => this.openPreviewModal(),
           onClear: () => this.clearAllUserComments(),
           onShare: () => this.openSharePage(),
+          onHistory: window.PAIR_REVIEW_LOCAL_MODE ? null : () => this.openReviewHistory(),
           shareUrl: validatedShareUrl,
           shareIcon: shareConfig?.icon || null,
           shareLabel: shareConfig?.label || 'Share',
@@ -7398,6 +7484,17 @@ class PRManager {
   openReviewModal() {
     if (!this.reviewModal) this.reviewModal = window.reviewModal;
     this.reviewModal.show();
+  }
+
+  /**
+   * Open the review history: what this review posted to the host. PR mode only.
+   */
+  openReviewHistory() {
+    if (window.PAIR_REVIEW_LOCAL_MODE || !this.currentPR?.id || !window.ReviewHistoryModal) return;
+    if (!this.reviewHistoryModal) {
+      this.reviewHistoryModal = new window.ReviewHistoryModal();
+    }
+    this.reviewHistoryModal.show(this.currentPR.id);
   }
 
   /**
@@ -7473,7 +7570,144 @@ class PRManager {
     window.open(shareUrl.toString(), '_blank');
   }
 
-  /** Counts use the same server selection as the final preview, never diff DOM. */
+  /**
+   * Record a user comment just created (saved, adopted, or adopted with edit).
+   * Call it once the comment's row or card is in the DOM: it updates the
+   * comment cache, the AI panel, the comment counts and the minimize-mode
+   * indicators.
+   * @param {Object} comment - The new comment; status defaults to 'active'
+   * @returns {Object} The comment as cached
+   */
+  registerUserComment(comment) {
+    const stored = { status: 'active', ...comment };
+    this.userComments = [...(this.userComments || []).filter(c => c.id !== stored.id), stored];
+    // Lets an in-flight loadUserComments see that its data is stale
+    this._userCommentsVersion = (this._userCommentsVersion || 0) + 1;
+    window.aiPanel?.addComment?.(stored);
+    this.updateCommentCount();
+    this.commentMinimizer?.refreshIndicators();
+    return stored;
+  }
+
+  /**
+   * Apply a change to a cached user comment (an edit, or a dismissal) after
+   * the DOM reflects it. Updates the AI panel, the comment counts and the
+   * minimize-mode indicators. A dismissed comment stays in the AI panel only
+   * when it is showing dismissed comments.
+   * @param {number} commentId
+   * @param {Object} updates - e.g. { body } or { status: 'inactive' }
+   */
+  patchUserComment(commentId, updates) {
+    const before = (this.userComments || []).find(c => c.id === commentId);
+    this.userComments = (this.userComments || []).map(c => c.id === commentId ? { ...c, ...updates } : c);
+    // Editing a posted comment changes whether it differs from what was
+    // posted; only the server knows the posted text, so ask it.
+    if (updates.body !== undefined && before && window.PostedComment?.isPostedComment(before)) {
+      window.PostedComment.setUpdateError(commentId, null);
+      this.refreshCommentPublication(commentId);
+    }
+    this._userCommentsVersion = (this._userCommentsVersion || 0) + 1;
+    if (window.aiPanel?.setHiddenCommentCounts) {
+      window.aiPanel.setHiddenCommentCounts(this.getHiddenCommentCounts());
+    }
+    if (updates.status === 'inactive' && !this.getCommentFilterState().includeDismissed) {
+      window.aiPanel?.removeComment?.(commentId);
+    } else {
+      window.aiPanel?.updateComment?.(commentId, updates);
+    }
+    this.updateCommentCount();
+    this.commentMinimizer?.refreshIndicators();
+  }
+
+  /**
+   * Replace a cached comment with the server's copy (fresh publication) and
+   * re-render its edited-since-posted note in place, in every renderer.
+   * @param {Object} comment - Comment from the server
+   */
+  applyServerComment(comment) {
+    if (!comment) return;
+    this.userComments = (this.userComments || []).map(c => c.id === comment.id ? { ...c, ...comment } : c);
+    this._userCommentsVersion = (this._userCommentsVersion || 0) + 1;
+    const cached = this.userComments.find(c => c.id === comment.id) || comment;
+    // @pierre/diffs re-renders annotations from their stored data
+    for (const annotation of this.pierreBridge?.getAnnotations?.(cached.file, 'comment') || []) {
+      if (annotation.metadata?.data?.id === cached.id) Object.assign(annotation.metadata.data, cached);
+    }
+    window.PostedComment?.findRenderedComments(comment.id)
+      .forEach(element => window.PostedComment.syncEditedSincePosted(element, cached));
+    window.aiPanel?.updateComment?.(comment.id, { body: cached.body, publication: cached.publication });
+    if (this.reviewModal?.isVisible) this.reviewModal.updateCount();
+  }
+
+  /** Fetch one comment's publication after an edit. Best effort. */
+  async refreshCommentPublication(commentId) {
+    const reviewId = this.currentPR?.id;
+    if (!reviewId || window.PAIR_REVIEW_LOCAL_MODE) return;
+    try {
+      const response = await fetch(`/api/reviews/${reviewId}/comments/${commentId}`);
+      if (!response.ok) return;
+      this.applyServerComment(await response.json());
+    } catch (error) {
+      console.warn('Could not refresh comment publication:', error);
+    }
+  }
+
+  /**
+   * Update an edited, already-posted comment on the host in place. Never
+   * creates a comment. On failure the comment stays "Edited since posted" and
+   * the server's message is shown beside it.
+   * @param {number|string} commentId
+   * @returns {Promise<{ok: boolean, comment?: Object, error?: Object}>}
+   */
+  async updatePostedCommentOnHost(commentId) {
+    const PostedComment = window.PostedComment;
+    const reviewId = this.currentPR?.id;
+    if (!PostedComment || !reviewId) return { ok: false, error: { message: 'No review loaded' } };
+    const id = Number(commentId);
+    this._hostUpdatesInFlight = this._hostUpdatesInFlight || new Map();
+    if (this._hostUpdatesInFlight.has(id)) return this._hostUpdatesInFlight.get(id);
+
+    const run = (async () => {
+      PostedComment.setUpdateBusy(id, true);
+      const result = await PostedComment.requestHostUpdate(reviewId, id);
+      PostedComment.setUpdateError(id, result.ok ? null : result.error);
+      const comment = result.ok ? result.comment
+        : (this.userComments || []).find(c => c.id === id);
+      // Re-rendering the note also clears the busy state
+      if (comment) {
+        if (result.ok) this.applyServerComment(comment);
+        else PostedComment.findRenderedComments(id).forEach(el => PostedComment.syncEditedSincePosted(el, comment));
+      } else {
+        PostedComment.setUpdateBusy(id, false);
+      }
+      return result;
+    })();
+    this._hostUpdatesInFlight.set(id, run);
+    try {
+      return await run;
+    } finally {
+      this._hostUpdatesInFlight.delete(id);
+    }
+  }
+
+  /** Comments the next submit will post: what "will be submitted" counts. */
+  getPendingCommentCount() {
+    return (this.userComments || []).filter(window.PostedComment.isPendingComment).length;
+  }
+
+  /**
+   * Comments a non-draft submit will publish: the pending ones plus those
+   * already saved to the pending draft review, which GitHub publishes with it.
+   * Used only to decide whether a review has any comments at all.
+   */
+  getSubmittableCommentCount() {
+    return (this.userComments || []).filter(c => window.PostedComment.isPendingComment(c) ||
+      (c.status === 'active' && window.PostedComment.publicationState(c) === 'draft')).length;
+  }
+
+  /**
+   * Update comment count display independently of diff visibility.
+   */
   updateCommentCount() {
     clearTimeout(this._commentCountTimer);
     const generation = this._commentCountGeneration = (this._commentCountGeneration || 0) + 1;
@@ -7743,8 +7977,6 @@ class PRManager {
       const groupElement = this.renderFileGroup(dirPath, dirFiles);
       fileListContainer.appendChild(groupElement);
     }
-
-    this.setupSidebarToggle();
   }
 
   renderFileGroup(dirPath, files) {
@@ -7897,23 +8129,75 @@ class PRManager {
       });
     };
 
+    // Below its breakpoint pr.css hides the docked sidebar and flags that via
+    // --sidebar-overlay-only; the toolbar toggle then opens it as an overlay
+    // drawer instead. Reading the flag keeps the breakpoint in CSS only.
+    const isOverlayMode = () => getComputedStyle(document.documentElement)
+      .getPropertyValue('--sidebar-overlay-only').trim() === '1';
+
+    // --sidebar-width is the room the docked sidebar takes from the layout:
+    // 0 while collapsed, or on slim screens where it only floats.
+    const syncSidebarWidth = () => {
+      const docked = !isOverlayMode() && !sidebar.classList.contains('collapsed');
+      const width = window.PanelResizer?.getSavedWidth('sidebar')
+        || window.PanelResizer?.getDefaultWidth('sidebar')
+        || 260;
+      document.documentElement.style.setProperty('--sidebar-width', docked ? `${width}px` : '0px');
+      // Notify PanelGroup so its docked-vs-floating decision sees the change
+      window.panelGroup?._updateRightPanelGroupWidth();
+    };
+
     // Restore collapsed state from localStorage (synchronous on init is fine)
     const isCollapsed = localStorage.getItem('file-sidebar-collapsed') === 'true';
     if (isCollapsed) {
       sidebar.classList.add('collapsed');
-      document.documentElement.style.setProperty('--sidebar-width', '0px');
-    } else {
-      const savedWidth = window.PanelResizer?.getSavedWidth('sidebar')
-        || window.PanelResizer?.getDefaultWidth('sidebar')
-        || 260;
-      document.documentElement.style.setProperty('--sidebar-width', `${savedWidth}px`);
     }
+    syncSidebarWidth();
+
+    // The drawer state is transient so it never overwrites the persisted
+    // docked (wide-screen) collapsed state.
+    const setOverlayOpen = (open) => {
+      sidebar.classList.toggle('sidebar--overlay-open', open);
+      collapsedBtn.setAttribute('aria-expanded', String(open));
+    };
 
     // Collapse button (X) in sidebar header - collapses sidebar
-    toggleBtn.addEventListener('click', () => toggleSidebar(true));
+    toggleBtn.addEventListener('click', () => {
+      if (isOverlayMode()) {
+        setOverlayOpen(false);
+        return;
+      }
+      toggleSidebar(true);
+    });
 
-    // Expand button in diff toolbar - expands sidebar
-    collapsedBtn.addEventListener('click', () => toggleSidebar(false));
+    // Expand button in diff toolbar - expands sidebar (toggles the drawer on slim screens)
+    collapsedBtn.addEventListener('click', () => {
+      if (isOverlayMode()) {
+        setOverlayOpen(!sidebar.classList.contains('sidebar--overlay-open'));
+        return;
+      }
+      toggleSidebar(false);
+    });
+
+    // Picking a file from the drawer jumps to it, so get the drawer out of the
+    // way of the diff it was covering.
+    sidebar.addEventListener('click', (e) => {
+      if (isOverlayMode() && e.target.closest?.('.file-item')) {
+        setOverlayOpen(false);
+      }
+    });
+
+    // Crossing the breakpoint: leaving slim mode docks the sidebar per its
+    // persisted state, so drop the drawer (it must not reappear when the
+    // viewport narrows again) and re-derive --sidebar-width either way.
+    let wasOverlayMode = isOverlayMode();
+    window.addEventListener('resize', () => {
+      const overlayMode = isOverlayMode();
+      if (overlayMode === wasOverlayMode) return;
+      wasOverlayMode = overlayMode;
+      if (!overlayMode) setOverlayOpen(false);
+      syncSidebarWidth();
+    });
   }
 
   async scrollToFile(filePath) {
@@ -8415,6 +8699,27 @@ class PRManager {
   }
 
   /**
+   * Clear the previous run's AI findings when a new analysis starts: the AI
+   * panel list and, through SuggestionManager.clearAISuggestions, every
+   * suggestion card in the diff (inline rows, Pierre annotations, file-level
+   * cards) and the navigator list. User comments stay. Shared by PR mode
+   * (startAnalysis) and Local mode (startLocalAnalysis in local.js).
+   */
+  clearFindingsForNewAnalysis() {
+    if (typeof window.aiPanel?.clearAllFindings === 'function') {
+      try {
+        // Also clears the diff view
+        window.aiPanel.clearAllFindings();
+        return;
+      } catch (e) {
+        console.warn('Error clearing AI panel findings:', e);
+        // Fall through so the diff view is still cleared
+      }
+    }
+    this.suggestionManager?.clearAISuggestions();
+  }
+
+  /**
    * Start the actual AI analysis with the given config
    * @param {string} owner - Repository owner
    * @param {string} repo - Repository name
@@ -8437,16 +8742,7 @@ class PRManager {
       }
 
       // Clear existing AI suggestions from UI immediately when starting new analysis
-      if (window.aiPanel && typeof window.aiPanel.clearAllFindings === 'function') {
-        try {
-          window.aiPanel.clearAllFindings();
-        } catch (e) {
-          console.warn('Error clearing AI panel findings:', e);
-          // Fall through to manual DOM cleanup
-        }
-      }
-      // Always do manual DOM cleanup as backup
-      document.querySelectorAll('.ai-suggestion-row').forEach(row => row.remove());
+      this.clearFindingsForNewAnalysis();
 
       // Determine endpoint and body based on whether this is a council analysis
       let analyzeUrl, analyzeBody;
@@ -8920,8 +9216,7 @@ class PRManager {
       // comments targeting lines in these files find their DOM targets.
       // loadUserComments() is idempotent (clears existing comment rows first).
       if (newFilesRendered) {
-        const includeDismissed = window.aiPanel?.showDismissedComments || false;
-        await this.loadUserComments(includeDismissed);
+        await this.loadUserComments();
       }
     } catch (error) {
       console.error('Error loading context files:', error);
@@ -9121,6 +9416,7 @@ class PRManager {
     const fileName = document.createElement('span');
     fileName.className = 'd2h-file-name';
     fileName.textContent = contextFile.file;
+    window.DiffRenderer.applyFilePathTruncation(fileName, contextFile.file);
     header.appendChild(fileName);
 
     const contextLabel = document.createElement('span');

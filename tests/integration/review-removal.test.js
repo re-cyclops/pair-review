@@ -204,7 +204,7 @@ describe('review and checkout removal boundaries', () => {
       db.pragma('foreign_keys = ON');
       (async () => {
         try {
-          if (${JSON.stringify(action)} === 'pool') await new WorktreePoolRepository(db).claimByPR(42, 'owner/repo');
+          if (${JSON.stringify(action)} === 'pool') await new WorktreePoolRepository(db).claimByPR(42, 'owner/repo', process.pid);
           else await new AnalysisRunRepository(db).create({ id: 'standalone-admission', reviewId: 1 });
           console.log(JSON.stringify({ admitted: true }));
         } catch (error) {
@@ -257,12 +257,12 @@ describe('review and checkout removal boundaries', () => {
 
   it('keeps the checkout and drafts while its existing-PR refresh claim is outstanding', async () => {
     seedPool('available');
-    await pool.poolRepo.claimByPR(42, 'owner/repo');
+    await pool.poolRepo.claimByPR(42, 'owner/repo', process.pid);
     expect((await request(server).delete('/api/worktrees/1')).status).toBe(409);
     expect((await request(server).delete('/api/repos/owner/repo/worktrees/checkout')).status).toBe(409);
     expectPreserved();
 
-    await pool.poolRepo.markInUse('checkout', 42);
+    await pool.poolRepo.markInUse('checkout', 42, process.pid, 'switching');
     expect((await request(server).delete('/api/repos/owner/repo/worktrees/checkout')).status).toBe(200);
     expect(fs.existsSync(checkout)).toBe(false);
     expect(row('reviews').draft_body).toBe(draftBody);

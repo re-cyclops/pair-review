@@ -9,6 +9,7 @@ const { resolveReview, createMCPServer } = require('../../src/routes/mcp');
 const { activeAnalyses, reviewToAnalysisId } = require('../../src/routes/shared');
 const Analyzer = require('../../src/ai/analyzer');
 const { GitWorktreeManager } = require('../../src/git/worktree');
+const { GitHubClient } = require('../../src/github/client');
 
 describe('resolveReview', () => {
   let db;
@@ -586,8 +587,17 @@ describe('start_analysis tool', () => {
     // Mock GitWorktreeManager prototype methods
     worktreeExistsSpy = vi.spyOn(GitWorktreeManager.prototype, 'worktreeExists').mockResolvedValue(true);
     getWorktreePathSpy = vi.spyOn(GitWorktreeManager.prototype, 'getWorktreePath').mockResolvedValue('/tmp/worktree/test');
+    vi.spyOn(GitHubClient.prototype, 'repositoryExists').mockResolvedValue(true);
+    vi.spyOn(GitHubClient.prototype, 'fetchPullRequest').mockResolvedValue({
+      title: 'Test PR', state: 'open', head_sha: 'a'.repeat(40), base_sha: 'b'.repeat(40),
+      head_branch: 'feature', base_branch: 'main', node_id: 'PR_test'
+    });
+    vi.spyOn(GitWorktreeManager.prototype, 'updateWorktree').mockResolvedValue('/tmp/worktree/test');
+    vi.spyOn(GitWorktreeManager.prototype, 'assertPinnedWorktree').mockResolvedValue(undefined);
+    vi.spyOn(GitWorktreeManager.prototype, 'generateUnifiedDiff').mockResolvedValue('diff');
+    vi.spyOn(GitWorktreeManager.prototype, 'getChangedFiles').mockResolvedValue([{ file: 'test.js' }]);
 
-    mcpServer = createMCPServer(db, { config: { default_provider: 'claude', default_model: 'sonnet' } });
+    mcpServer = createMCPServer(db, { config: { github_token: 'test-token', default_provider: 'claude', default_model: 'sonnet' } });
     client = new Client({ name: 'test-client', version: '1.0.0' });
 
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -654,7 +664,7 @@ describe('start_analysis tool', () => {
       });
       await new RepoSettingsRepository(db).saveRepoSettings('prec-repo', {
         default_provider: 'antigravity',
-        default_model: 'gemini-3.1-pro-low',
+        default_model: 'gemini-3.8-flash-medium',
       });
 
       const result = await client.callTool({
@@ -665,7 +675,7 @@ describe('start_analysis tool', () => {
 
       const run = await new AnalysisRunRepository(db).getById(content.runId);
       expect(run.provider).toBe('antigravity');
-      expect(run.model).toBe('gemini-3.1-pro-low');
+      expect(run.model).toBe('gemini-3.8-flash-medium');
     });
 
     it('prefers a global in-app override (config._globalOverrides) over the config-file default (local mode)', async () => {
@@ -677,7 +687,7 @@ describe('start_analysis tool', () => {
         config: {
           default_provider: 'claude',
           default_model: 'sonnet',
-          _globalOverrides: { default_provider: 'antigravity', default_model: 'gemini-3.1-pro-low' },
+          _globalOverrides: { default_provider: 'antigravity', default_model: 'gemini-3.8-flash-medium' },
         },
       });
       client = new Client({ name: 'test-client', version: '1.0.0' });
@@ -700,7 +710,7 @@ describe('start_analysis tool', () => {
 
       const run = await new AnalysisRunRepository(db).getById(content.runId);
       expect(run.provider).toBe('antigravity');
-      expect(run.model).toBe('gemini-3.1-pro-low');
+      expect(run.model).toBe('gemini-3.8-flash-medium');
     });
 
     it('prefers a repo default over the config default (PR mode)', async () => {
@@ -712,7 +722,7 @@ describe('start_analysis tool', () => {
       `);
       await new RepoSettingsRepository(db).saveRepoSettings('octo/prec', {
         default_provider: 'antigravity',
-        default_model: 'gemini-3.1-pro-low',
+        default_model: 'gemini-3.8-flash-medium',
       });
 
       const result = await client.callTool({
@@ -723,7 +733,7 @@ describe('start_analysis tool', () => {
 
       const analysisRun = await new AnalysisRunRepository(db).getById(content.runId);
       expect(analysisRun.provider).toBe('antigravity');
-      expect(analysisRun.model).toBe('gemini-3.1-pro-low');
+      expect(analysisRun.model).toBe('gemini-3.8-flash-medium');
     });
 
     it('falls back to the config-file default when no repo/override set', async () => {
@@ -810,7 +820,7 @@ describe('start_analysis tool', () => {
   });
 
   it('should pass a githubClient option when a github_token is configured (PR mode)', async () => {
-    // Tear down the default server (which has no token) and rebuild with a token.
+    // Rebuild with an explicit credential to exercise the analyzer's host context.
     await client.close();
     await mcpServer.close();
 

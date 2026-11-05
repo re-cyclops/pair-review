@@ -18,16 +18,22 @@ const express = require('express');
 const request = require('supertest');
 const setupRoutes = require('../../src/routes/setup');
 const { WorktreePoolRepository } = require('../../src/database');
+const { WorktreePoolLifecycle } = require('../../src/git/worktree-pool-lifecycle');
 const { activeSetups } = require('../../src/routes/shared');
 const logger = require('../../src/utils/logger');
 
-function createApp(db, config = { github_token: 'test-token' }, { withPool = false } = {}) {
+/** PID the route's pool lifecycle claims as (never the real process.pid). */
+const SELF_PID = 4242;
+/** PID of a peer pair-review process sharing the database. */
+const PEER_PID = 5151;
+
+function createApp(db, config = { github_token: 'test-token' }, { withPool = false, poolLifecycle = null } = {}) {
   const app = express();
   app.use(express.json());
   app.set('db', db);
   app.set('config', config);
   if (withPool) {
-    app.set('poolLifecycle', { poolRepo: new WorktreePoolRepository(db) });
+    app.set('poolLifecycle', poolLifecycle || new WorktreePoolLifecycle(db, {}, { pid: SELF_PID }));
   }
   app.use(setupRoutes);
   return app;

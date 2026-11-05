@@ -160,6 +160,33 @@ async function addCommentBatch(octokit, features, prContext, reviewId, comments)
   // Pin every inline/file comment to the publisher's confirmed revision.
   const commitId = prContext.headSha;
   const wireComments = comments.map((c) => toWireComment(c, commitId));
+  if (features.pending_review_comments_batch === false) {
+    const receipts = [];
+    for (let index = 0; index < wireComments.length; index++) {
+      try {
+        const { data } = await octokit.request(`POST ${endpoint}`, {
+          headers: { 'content-type': 'application/json', accept: 'application/json' },
+          data: wireComments[index]
+        });
+        receipts.push({ index, state: 'accepted',
+          remoteId: data?.node_id || null,
+          remoteDatabaseId: data?.id == null ? null : String(data.id),
+          remoteUrl: data?.html_url || null });
+      } catch (error) {
+        const status = error.status || error.statusCode;
+        const rejected = status === 400 || status === 422;
+        receipts.push({ index, state: rejected ? 'rejected' : 'unknown', error: error.message });
+        if (!rejected) {
+          for (let skipped = index + 1; skipped < wireComments.length; skipped++) {
+            receipts.push({ index: skipped, state: 'unattempted', error: 'Not sent after a host failure' });
+          }
+          break;
+        }
+      }
+    }
+    return { receipts };
+  }
+
 
   let result;
   try {

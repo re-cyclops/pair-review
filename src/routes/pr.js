@@ -20,7 +20,7 @@ const { GitHubClient } = require('../github/client');
 const { PRArgumentParser } = require('../github/parser');
 const { getGeneratedFilePatterns } = require('../git/gitattributes');
 const { getShaAbbrevLength, DEFAULT_SHA_ABBREV_LENGTH } = require('../git/sha-abbrev');
-const { normalizeRepository, resolveRenamedFile, resolveRenamedFileOld } = require('../utils/paths');
+const { normalizeRepository } = require('../utils/paths');
 const { mergeInstructions } = require('../utils/instructions');
 const { captureRunProtocol } = require('../utils/review-protocol');
 const Analyzer = require('../ai/analyzer');
@@ -36,12 +36,14 @@ const { resolveHostName } = require('../links/repo-links');
 const { resolveHostListText } = require('../links/host-names');
 const { backgroundQueue } = require('../ai/background-queue');
 const logger = require('../utils/logger');
+
 const { broadcastReviewEvent } = require('../events/review-events');
 const { fireHooks, hasHooks } = require('../hooks/hook-runner');
 const { buildReviewStartedPayload, buildReviewLoadedPayload, buildAnalysisStartedPayload, buildAnalysisCompletedPayload, getCachedUser } = require('../hooks/payloads');
 const simpleGit = require('simple-git');
-const { GIT_DIFF_FLAGS_ARRAY, GIT_DIFF_SUMMARY_FLAGS_ARRAY } = require('../git/diff-flags');
+const { GIT_DIFF_FLAGS_ARRAY, SIMPLE_GIT_PATH_OPTIONS } = require('../git/diff-flags');
 const { walkPRStack, DEFAULT_TRUNK_BRANCHES } = require('../github/stack-walker');
+const { updatePostedComment } = require('../github/update-posted-comment');
 const summaryGenerator = require('../ai/summary-generator');
 const tourGenerator = require('../ai/tour-generator');
 const {
@@ -56,10 +58,10 @@ const {
   registerProcess: registerProcessForCancellation
 } = require('./shared');
 const { safeParseJson } = require('../utils/safe-parse-json');
-const { mergeChangedFilesWithDiff, parseUnifiedDiffPatches } = require('../utils/diff-file-list');
+const { mergeChangedFilesWithDiff, parseUnifiedDiffPatches, buildChangedFileEntries } = require('../utils/diff-file-list');
 const { parseHunks } = require('../utils/diff-hunks');
 const { hashHunk } = require('../ai/hunk-hashing');
-const { resolveOriginalFileContentSpecs } = require('../utils/diff-file-content');
+const { getPRFileContentSpecs, invalidatePRFileBlobCache } = require('../utils/pr-file-blob-cache');
 const { validateCouncilConfig, normalizeCouncilConfig } = require('./councils');
 const { resolveReviewConfig } = require('../review-config');
 const { TIERS, TIER_ALIASES, VALID_TIERS, resolveTier } = require('../ai/prompts/config');
@@ -169,6 +171,66 @@ router.get('/api/pr/:owner/:repo/:number/snapshot', async (req, res) => {
 
 
 /**
+ * Resolve stale drafts before opening a short local transaction. Errors are
+ * retried on the next load; a confirmed missing review is treated as dismissed,
+ * never requeued. Postings stay intact and derive their state from these rows.
+ * @returns {Promise<boolean>} Whether any pending record changed state
+ */
+async function reconcileStalePendingRecords(githubReviewRepo, records, githubClient, prContext,
+  { keepPendingOnError = true } = {}) {
+  const updates = [];
+  const lookups = new Map();
+  for (const record of records) {
+    let actualState = 'dismissed';
+    let data = null;
+    const lookupId = record.github_node_id || record.github_review_id;
+    if (githubClient && lookupId) {
+      const key = record.github_review_id || lookupId;
+      try {
+        if (!lookups.has(key)) {
+          const context = prContext ? { ...prContext, reviewId: record.github_review_id } : null;
+          lookups.set(key, githubClient.getReviewById(lookupId, context, { strict: true }));
+        }
+        data = await lookups.get(key);
+        if (data) {
+          actualState = data.state === 'PENDING' ? 'pending'
+            : data.state === 'DISMISSED' ? 'dismissed' : 'submitted';
+        }
+      } catch (error) {
+        logger.warn(`Error querying GitHub for old review ${lookupId}: ${error.message}`);
+        if (keepPendingOnError) continue;
+      }
+    } else if (keepPendingOnError) {
+      // Without a usable client/identity absence cannot be confirmed.
+      continue;
+    }
+    if (actualState === 'pending') continue;
+    const update = { state: actualState };
+    if (actualState === 'submitted' && data?.submittedAt) update.submitted_at = data.submittedAt;
+    updates.push({ record, update });
+  }
+  if (!updates.length) return false;
+
+  const changedReviews = new Set();
+  let changed = false;
+  await withTransaction(githubReviewRepo.db, async () => {
+    for (const { record, update } of updates) {
+      // A submit may have completed while the network lookups were in flight.
+      const current = await githubReviewRepo.getById(record.id);
+      if (current?.state !== 'pending') continue;
+      await githubReviewRepo.update(record.id, update);
+      changed = true;
+      if (record.review_id != null) changedReviews.add(record.review_id);
+    }
+  });
+  // Include the requesting tab: its initial comments fetch may have raced us.
+  for (const reviewId of changedReviews) {
+    broadcastReviewEvent(reviewId, { type: 'review:comments_changed' });
+  }
+  return changed;
+}
+
+/**
  * Sync pending draft review from GitHub with local database
  *
  * Handles three scenarios:
@@ -198,10 +260,15 @@ async function syncPendingDraftFromGitHub(githubReviewRepo, reviewId, githubPend
   const githubDbIdStr = (githubPendingReview.databaseId !== undefined && githubPendingReview.databaseId !== null)
     ? String(githubPendingReview.databaseId)
     : null;
-  const matchingRecord = existingPendingRecords.find(r =>
+  const matchesCurrentDraft = r =>
     (r.github_node_id && r.github_node_id === githubPendingReview.id) ||
-    (githubDbIdStr !== null && r.github_review_id === githubDbIdStr)
-  );
+    (githubDbIdStr !== null && r.github_review_id === githubDbIdStr);
+  const matchingRecord = existingPendingRecords.find(matchesCurrentDraft);
+  // Older drafts can remain stale even when we already know the current one.
+  // Exclude every duplicate of the current identity, not just the chosen row.
+  await reconcileStalePendingRecords(githubReviewRepo,
+    existingPendingRecords.filter(r => !matchesCurrentDraft(r)), githubClient, prContext,
+    { keepPendingOnError: false });
 
   let pendingDraft;
   if (matchingRecord) {
@@ -215,60 +282,6 @@ async function syncPendingDraftFromGitHub(githubReviewRepo, reviewId, githubPend
     pendingDraft = await githubReviewRepo.getById(matchingRecord.id);
   } else {
     // New draft from GitHub - create new record
-    // Query GitHub for the actual state of old pending records
-    for (const oldRecord of existingPendingRecords) {
-      let actualState = 'dismissed'; // Default if we can't determine
-      let githubReviewData = null;
-
-      // On the GraphQL path the node id is the canonical identifier; on
-      // the REST path the numeric id (`github_review_id`) is the only
-      // value we may have. Run the lookup whenever we have either —
-      // otherwise mark the record as dismissed without querying.
-      const oldLookupId = oldRecord.github_node_id || oldRecord.github_review_id;
-      if (githubClient && (oldRecord.github_node_id || oldRecord.github_review_id)) {
-        try {
-          // prContext carries the REST review id when available. The
-          // GraphQL path ignores it. The github_review_id column holds
-          // the numeric REST id we received when the draft was created.
-          const reviewPrContext = prContext
-            ? { ...prContext, reviewId: oldRecord.github_review_id }
-            : null;
-          githubReviewData = await githubClient.getReviewById(oldLookupId, reviewPrContext);
-
-          if (githubReviewData) {
-            // Map GitHub state to our local state
-            // GitHub states: PENDING, APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED
-            // Our states: local, pending, submitted, dismissed
-            if (githubReviewData.state === 'PENDING') {
-              // This shouldn't happen (we have a different pending review now), but handle it
-              actualState = 'pending';
-            } else if (githubReviewData.state === 'DISMISSED') {
-              actualState = 'dismissed';
-            } else {
-              // APPROVED, CHANGES_REQUESTED, COMMENTED all mean it was submitted
-              actualState = 'submitted';
-            }
-            logger.debug(`Old review ${oldLookupId} actual state from GitHub: ${githubReviewData.state} -> ${actualState}`);
-          } else {
-            // Review not found on GitHub - treat as dismissed
-            logger.debug(`Old review ${oldLookupId} not found on GitHub, marking as dismissed`);
-            actualState = 'dismissed';
-          }
-        } catch (error) {
-          // On error, default to dismissed (most likely scenario)
-          logger.warn(`Error querying GitHub for old review ${oldLookupId}: ${error.message}, marking as dismissed`);
-          actualState = 'dismissed';
-        }
-      }
-
-      // Update the old record with the actual state and submitted_at if available
-      const updateData = { state: actualState };
-      if (actualState === 'submitted' && githubReviewData?.submittedAt) {
-        updateData.submitted_at = githubReviewData.submittedAt;
-      }
-      await githubReviewRepo.update(oldRecord.id, updateData);
-    }
-
     pendingDraft = await githubReviewRepo.create(reviewId, {
       github_review_id: String(githubPendingReview.databaseId),
       github_node_id: githubPendingReview.id,
@@ -371,6 +384,10 @@ router.get('/api/pr/:owner/:repo/:number', async (req, res) => {
               githubClient,
               { owner: repoOwner, repo: repoName, prNumber }
             );
+          } else {
+            await reconcileStalePendingRecords(githubReviewRepo,
+              await githubReviewRepo.findPendingByReviewId(review.id), githubClient,
+              { owner: repoOwner, repo: repoName, prNumber });
           }
         } catch (githubError) {
           // Log the error but don't fail the request - draft info is supplementary
@@ -533,7 +550,7 @@ router.post('/api/pr/:owner/:repo/:number/refresh', async (req, res) => {
 
     // Check if PR exists in database
     const existingPR = await queryOne(db, `
-      SELECT id FROM pr_metadata
+      SELECT id, pr_data FROM pr_metadata
       WHERE pr_number = ? AND repository = ? COLLATE NOCASE
     `, [prNumber, repository]);
 
@@ -954,6 +971,10 @@ router.get('/api/pr/:owner/:repo/:number/github-drafts', async (req, res) => {
           githubClient,
           { owner, repo, prNumber }
         );
+      } else {
+        await reconcileStalePendingRecords(githubReviewRepo,
+          await githubReviewRepo.findPendingByReviewId(review.id), githubClient,
+          { owner, repo, prNumber });
       }
     } catch (githubError) {
       // Log the error but don't fail the request - return local data only
@@ -1078,7 +1099,7 @@ router.get('/api/pr/:owner/:repo/:number/diff', async (req, res) => {
       try {
         const worktreePath = worktreeRecord.path;
         await fs.access(worktreePath);
-        const git = simpleGit(worktreePath);
+        const git = simpleGit(worktreePath, SIMPLE_GIT_PATH_OPTIONS);
 
         const baseSha = prData.base_sha;
         const headSha = prData.head_sha;
@@ -1087,25 +1108,8 @@ router.get('/api/pr/:owner/:repo/:number/diff', async (req, res) => {
           const diffArgs = [`${baseSha}...${headSha}`, '--unified=3', ...GIT_DIFF_FLAGS_ARRAY, '-w'];
           diffContent = await git.diff(diffArgs);
 
-          const summaryArgs = [`${baseSha}...${headSha}`, ...GIT_DIFF_SUMMARY_FLAGS_ARRAY, '-w'];
-          const diffSummary = await git.diffSummary(summaryArgs);
           gitattributes = await getGeneratedFilePatterns(worktreePath);
-          changedFiles = diffSummary.files.map(file => {
-            const resolvedFile = resolveRenamedFile(file.file);
-            const isRenamed = resolvedFile !== file.file;
-            const result = {
-              file: resolvedFile,
-              insertions: file.insertions,
-              deletions: file.deletions,
-              changes: file.changes,
-              generated: gitattributes.isGenerated(resolvedFile)
-            };
-            if (isRenamed) {
-              result.renamed = true;
-              result.renamedFrom = resolveRenamedFileOld(file.file);
-            }
-            return result;
-          });
+          changedFiles = buildChangedFileEntries(diffContent, gitattributes);
         }
       } catch (wsError) {
         logger.warn(`Could not generate diff for PR #${prNumber}: ${wsError.message}`);
@@ -1301,17 +1305,7 @@ router.get('/api/file-content-original/:fileName(*)', async (req, res) => {
     // Prefer the exact blob from the cached diff snapshot. If that is unavailable,
     // fall back to repo-wide base_sha and finally the worktree filesystem.
     const repository = normalizeRepository(owner, repo);
-    const prRecord = await queryOne(db, `
-      SELECT pr_data FROM pr_metadata
-      WHERE pr_number = ? AND repository = ? COLLATE NOCASE
-    `, [prNumber, repository]);
-
-    const prData = safeParseJson(prRecord?.pr_data, null);
-    if (prRecord?.pr_data && !prData) {
-      logger.warn('Could not parse pr_data for file-content route');
-    }
-
-    const contentSpecs = resolveOriginalFileContentSpecs(prData, fileName);
+    const contentSpecs = getPRFileContentSpecs(db, repository, prNumber, fileName);
 
     if (contentSpecs.length > 0) {
       try {
@@ -1378,6 +1372,35 @@ router.get('/api/file-content-original/:fileName(*)', async (req, res) => {
     res.status(500).json({
       error: 'Internal server error while retrieving file content'
     });
+  }
+});
+
+
+router.post('/api/reviews/:id/comments/:commentId/update-on-github', async (req, res) => {
+  try {
+    const db = req.app.get('db');
+    const comment = await new CommentRepository(db).getComment(Number(req.params.commentId), 'user');
+    if (!comment || comment.review_id !== Number(req.params.id)) return res.status(404).json({ error: 'Comment not found' });
+    const review = await new ReviewRepository(db).getReview(comment.review_id);
+    if (!review?.pr_number || !review.repository) return res.status(400).json({ error: 'Updating on GitHub is only available in PR mode' });
+    const [owner, repo] = review.repository.split('/');
+    // Reuse the PR-aware resolver, including recorded alt-host evidence.
+    const resolved = await resolveBindingForRequest({ app: req.app, params: { number: String(review.pr_number) } }, review.repository);
+    if (!resolved) return res.status(401).json({ error: 'GitHub token not configured' });
+    const updated = await updatePostedComment(db, { commentId: comment.id, owner, repo,
+      pull_number: review.pr_number, githubClient: new GitHubClient(resolved.binding) },
+    reviewId => broadcastReviewEvent(reviewId, { type: 'review:comments_changed' }, { sourceClientId: req.get('X-Client-Id') }));
+    res.json({ success: true, comment: updated });
+  } catch (error) {
+    logger.error('Error updating posted comment:', error);
+    const code = error.code === 'unresolved_identity' || error.code === 'pending_submission' ? error.code
+      : error.status === 404 || error.code === 'not_found' ? 'not_found_on_github'
+        : [403, 422].includes(error.status) || error.code === 'forbidden' ? 'forbidden' : 'update_failed';
+    const status = error.status || (code === 'unresolved_identity' ? 409 : code === 'not_found_on_github' ? 404 : code === 'forbidden' ? 403 : 500);
+    const message = code === 'not_found_on_github' ? 'The host could not find this comment. Nothing was posted.'
+      : code === 'forbidden' ? 'The host refused this update. Check your permissions or whether the conversation is locked. Nothing was posted.'
+        : error.message;
+    res.status(status).json({ error: message, code, review_url: error.review_url });
   }
 });
 
@@ -2403,5 +2426,6 @@ module.exports = router;
 // absent) can be exercised directly without spinning up the route.
 module.exports._internals = {
   syncPendingDraftFromGitHub,
+  reconcileStalePendingRecords,
   resolveBindingForRequest
 };

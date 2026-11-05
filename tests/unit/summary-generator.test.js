@@ -5,8 +5,13 @@ import { createTestDatabase, closeTestDatabase, seedTestReview } from '../utils/
 
 const {
   generateSummariesForReview,
-  kickOffSummaryJob
+  kickOffSummaryJob,
+  countAddedLines
 } = require('../../src/ai/summary-generator.js');
+const { parseUnifiedDiffHunks } = require('../../src/utils/diff-hunks.js');
+const {
+  LOOKALIKE_DIFF, LOOKALIKE_STATS, CR_CONTEXT_DIFF, CR_CONTEXT_STATS
+} = require('../utils/diff-stat-fixtures.js');
 const { HunkSummaryRepository } = require('../../src/database.js');
 
 const REVIEW_ID = 42;
@@ -106,6 +111,35 @@ function makeDeps({ repo, provider, isGenerated, depsOverride } = {}) {
     }
   };
 }
+
+describe('countAddedLines', () => {
+  it('counts added lines that look like a `+++` file header', () => {
+    const hunks = parseUnifiedDiffHunks(LOOKALIKE_DIFF);
+    expect(countAddedLines(new Map([['q.sql', hunks.get('q.sql')]])))
+      .toBe(LOOKALIKE_STATS['q.sql'].additions);
+  });
+
+  it('leaves real headers, `\\ No newline` markers and binary sections uncounted', () => {
+    const total = Object.values(LOOKALIKE_STATS).reduce((sum, s) => sum + s.additions, 0);
+    expect(countAddedLines(parseUnifiedDiffHunks(LOOKALIKE_DIFF))).toBe(total);
+  });
+
+  it('stops counting once a hunk has delivered the lines its header declares', () => {
+    const hunks = new Map([['x.sql', [
+      { header: '@@ -1 +1,2 @@', lines: ['--- gone', '+++ here', '+++ again', '+beyond'] }
+    ]]]);
+    expect(countAddedLines(hunks)).toBe(2);
+  });
+
+  it('counts a hunk whose `@@` context contains a carriage return', () => {
+    expect(countAddedLines(parseUnifiedDiffHunks(CR_CONTEXT_DIFF)))
+      .toBe(CR_CONTEXT_STATS['f.js'].additions);
+  });
+
+  it('returns 0 for no hunks', () => {
+    expect(countAddedLines(new Map())).toBe(0);
+  });
+});
 
 describe('generateSummariesForReview', () => {
   let db;

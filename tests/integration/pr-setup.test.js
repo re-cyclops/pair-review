@@ -835,7 +835,7 @@ describe('pool-enabled PR setup', () => {
       worktreePath: poolWorktreePath,
       worktreeId: poolWorktreeId,
     });
-    worktreePoolLifecycleModule.WorktreePoolLifecycle.prototype.releaseAfterHeadless.mockResolvedValue(undefined);
+    worktreePoolLifecycleModule.WorktreePoolLifecycle.prototype.releaseAfterHeadless.mockResolvedValue(true);
     worktreePoolLifecycleModule.WorktreePoolLifecycle.prototype.setReviewOwner.mockResolvedValue(undefined);
 
     // GitWorktreeManager prototype spies
@@ -1050,4 +1050,3 @@ describe('pool-enabled PR setup', () => {
     expect(worktreePoolLifecycleModule.WorktreePoolLifecycle.prototype.releaseAfterHeadless).not.toHaveBeenCalled();
   });
 });
-

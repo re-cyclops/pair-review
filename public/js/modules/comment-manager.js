@@ -458,7 +458,7 @@ class CommentManager {
   /**
    * Display a user comment inline
    * Note: Dismissed comments are never rendered in the diff view per design decision.
-   * They only appear in the AI/Review Panel. This method only receives active comments.
+   * They only appear in the AI/Review Panel. Posted comments can remain visible here.
    * @param {Object} comment - Comment data
    * @param {HTMLElement} targetRow - Row to insert after
    */
@@ -466,6 +466,7 @@ class CommentManager {
     const commentRow = document.createElement('tr');
     commentRow.className = 'user-comment-row';
     commentRow.dataset.commentId = comment.id;
+    window.PostedComment?.stampCommentStatus(commentRow, comment);
     // Store file/line/side data for editing
     commentRow.dataset.file = comment.file;
     commentRow.dataset.lineStart = comment.line_start;
@@ -539,6 +540,7 @@ class CommentManager {
               ${commentIcon}
             </span>
             <span class="user-comment-line-info">${lineInfo}</span>
+            ${window.getPostedCommentIcon?.(comment, { link: true }) || ''}
             ${expandedContextIndicator}
             ${metadataHTML}
           </div>
@@ -559,6 +561,7 @@ class CommentManager {
           </div>
         </div>
         <div class="user-comment-body" data-original-markdown="${window.escapeHtmlAttribute(comment.body)}">${window.renderMarkdown ? window.renderMarkdown(comment.body) : escapeHtml(comment.body)}</div>
+        ${window.PostedComment?.getEditedSincePostedHtml(comment) || ''}
       </div>
     `;
 

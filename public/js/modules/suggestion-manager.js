@@ -206,8 +206,81 @@ class SuggestionManager {
   }
 
   /**
-   * Display AI suggestions inline with diff
-   * Uses a concurrency guard to prevent multiple simultaneous executions
+   * Remove every rendered AI suggestion card: inline rows (legacy renderer),
+   * Pierre `suggestion` annotations and file-level AI cards. User comment
+   * cards are untouched. The navigator list is left alone; see
+   * clearAISuggestions for the full clear.
+   * @returns {number} Number of inline rows removed
+   * @private
+   */
+  _removeRenderedSuggestions() {
+    const existingSuggestionRows = document.querySelectorAll('.ai-suggestion-row');
+    existingSuggestionRows.forEach(row => row.remove());
+
+    // Replace suggestion annotations, but preserve expanded context. These
+    // ranges are shared with user comments, external threads and navigation;
+    // clearing them here can leave those cards without a rendered anchor.
+    const pierreBridge = this.prManager?.pierreBridge;
+    if (pierreBridge) {
+      for (const [fileName] of pierreBridge.files) {
+        pierreBridge.removeAnnotationsByType(fileName, 'suggestion');
+      }
+    }
+
+    // An empty suggestions list clears the file-level AI cards; null
+    // comments leaves the user's file-level comment cards alone.
+    this.prManager?.fileCommentManager?.loadFileComments(null, []);
+
+    return existingSuggestionRows.length;
+  }
+
+  /**
+   * Remove every displayed AI suggestion: the rendered cards (inline rows,
+   * Pierre annotations, file-level cards) and the navigator list. Used when a
+   * new analysis starts, so nothing from the previous run stays on screen
+   * while it runs. User comments are untouched.
+   *
+   * An interrupted display cannot reinstall findings after a clear.
+   */
+  clearAISuggestions() {
+    this._activeSuggestionRender = null;
+    this._closeReasoningPopover();
+    const removed = this._removeRenderedSuggestions();
+    console.log(`[UI] Cleared AI suggestions (${removed} inline rows)`);
+
+    const navigator = this.prManager?.suggestionNavigator;
+    if (navigator) {
+      navigator.updateSuggestions([]);
+      this._syncNavigatorLayout([]);
+    }
+  }
+
+  /**
+   * Reserve room for the navigator only while it has visible suggestions
+   * and is not collapsed.
+   * @param {Array} suggestions - The suggestions the navigator now shows
+   * @private
+   */
+  _syncNavigatorLayout(suggestions) {
+    const mainContent = document.querySelector('.main-content');
+    if (mainContent && this.prManager?.suggestionNavigator) {
+      const visibleSuggestions = suggestions.filter(s => s.status !== 'dismissed');
+      // Only add navigator-visible if we have suggestions AND the navigator is not collapsed
+      if (visibleSuggestions.length > 0 && !this.prManager.suggestionNavigator.isCollapsed) {
+        mainContent.classList.add('navigator-visible');
+      } else {
+        mainContent.classList.remove('navigator-visible');
+      }
+    }
+  }
+
+  /**
+   * Display AI suggestions inline with diff.
+   *
+   * Every asynchronous expansion belongs to its review, run and diff identity.
+   * Only the newest display can install cards or replace navigator findings.
+   * Clearing the display invalidates outstanding work without queuing an older
+   * list behind the currently selected run.
    * @param {Array} suggestions - Array of suggestions to display
    */
   async displayAISuggestions(suggestions) {
@@ -230,10 +303,11 @@ class SuggestionManager {
       this._closeReasoningPopover();
       console.log(`[UI] Displaying ${suggestions.length} AI suggestions`);
 
-      // Clear existing AI suggestion rows before displaying new ones
-      const existingSuggestionRows = document.querySelectorAll('.ai-suggestion-row');
-      existingSuggestionRows.forEach(row => row.remove());
-      console.log(`[UI] Removed ${existingSuggestionRows.length} existing suggestion rows`);
+      // Clear the previous set's cards before displaying new ones. The
+      // navigator keeps its list (and selection) until the new list replaces
+      // it below.
+      const removedRows = this._removeRenderedSuggestions();
+      console.log(`[UI] Removed ${removedRows} existing suggestion rows`);
 
       // Only inline (line-targeted) suggestions need the diff body rendered
       // ahead of time. File-level findings (is_file_level === 1 or no
@@ -258,15 +332,6 @@ class SuggestionManager {
         }
       }
 
-      // Replace suggestion annotations, but preserve expanded context. These
-      // ranges are shared with user comments, external threads and navigation;
-      // clearing them here can leave those cards without a rendered anchor.
-      if (this.prManager.pierreBridge) {
-        for (const [fileName] of this.prManager.pierreBridge.files) {
-          this.prManager.pierreBridge.removeAnnotationsByType(fileName, 'suggestion');
-        }
-      }
-
       const lineTargets = suggestions
         .filter(suggestion =>
           suggestion.file
@@ -284,6 +349,8 @@ class SuggestionManager {
         await this.prManager.ensureLinesVisible(lineTargets);
         if (!isCurrent()) return;
       }
+
+      if (!isCurrent()) return;
 
       // For files rendered by @pierre/diffs, use annotation-based display.
       // Deferred files may have been materialized by ensureLinesVisible() above,
@@ -344,16 +411,7 @@ class SuggestionManager {
       }
 
       // Adjust main content layout when navigator is visible
-      const mainContent = document.querySelector('.main-content');
-      if (mainContent && this.prManager?.suggestionNavigator) {
-        const visibleSuggestions = suggestions.filter(s => s.status !== 'dismissed');
-        // Only add navigator-visible if we have suggestions AND the navigator is not collapsed
-        if (visibleSuggestions.length > 0 && !this.prManager.suggestionNavigator.isCollapsed) {
-          mainContent.classList.add('navigator-visible');
-        } else {
-          mainContent.classList.remove('navigator-visible');
-        }
-      }
+      this._syncNavigatorLayout(suggestions);
 
       // Separate file-level and line-level suggestions
       const fileLevelSuggestions = [];
@@ -367,10 +425,12 @@ class SuggestionManager {
         }
       });
 
-      // Handle file-level suggestions via FileCommentManager
-      if (fileLevelSuggestions.length > 0 && this.prManager?.fileCommentManager) {
+      // Handle file-level suggestions via FileCommentManager. The list
+      // replaces the previous AI cards even when it is empty; null comments
+      // leaves the user's file-level comment cards alone.
+      if (this.prManager?.fileCommentManager) {
         console.log('[UI] Routing file-level suggestions to FileCommentManager:', fileLevelSuggestions.length);
-        this.prManager.fileCommentManager.loadFileComments([], fileLevelSuggestions);
+        this.prManager.fileCommentManager.loadFileComments(null, fileLevelSuggestions);
       }
 
       // Group line-level suggestions by file, line, and side
@@ -482,6 +542,7 @@ class SuggestionManager {
     }
   }
 
+
   /**
    * Create a suggestion row for display
    * @param {Array} suggestions - Suggestions for this location
@@ -532,7 +593,10 @@ class SuggestionManager {
 
       // Check if this suggestion was adopted by looking for user comments with matching parent_id
       const wasAdopted = userComments.some(comment =>
-        comment.parent_id && (comment.parent_id === suggestion.id || comment.parent_id === suggestionIdNum)
+        // A dismissed comment no longer adopts its suggestion (dismissing it
+        // dismisses the suggestion); the cache keeps dismissed comments.
+        comment.status !== 'inactive' && comment.parent_id &&
+          (comment.parent_id === suggestion.id || comment.parent_id === suggestionIdNum)
       );
 
       // Log when a suggestion is detected as adopted
@@ -577,7 +641,7 @@ class SuggestionManager {
             ${suggestion.severity ? `<span class="severity-badge severity-${suggestion.severity}">${escapeHtml(suggestion.severity.toUpperCase())}</span>` : ''}
             ${categoryLabel ? `<span class="ai-suggestion-category">${escapeHtml(categoryLabel)}</span>` : ''}
             ${window.SuggestionUI?.buildRevisionWarningHtml?.(suggestion.revision) || ''}
-            <span class="ai-title">${escapeHtml(suggestion.title || '')}</span>
+            <span class="ai-title smart-truncate">${escapeHtml(suggestion.title || '')}</span>
           </div>
           <div class="ai-suggestion-header-right">
             ${showReasoningBtn ? `
@@ -593,7 +657,7 @@ class SuggestionManager {
             : `<span class="ai-suggestion-badge collapsed" data-type="${suggestion.type}" title="${this.getTypeDescription(suggestion.type)}"><svg viewBox="0 0 16 16" fill="currentColor" width="10" height="10"><path d="M9.6 2.279a.426.426 0 0 1 .8 0l.407 1.112a6.386 6.386 0 0 0 3.802 3.802l1.112.407a.426.426 0 0 1 0 .8l-1.112.407a6.386 6.386 0 0 0-3.802 3.802l-.407 1.112a.426.426 0 0 1-.8 0l-.407-1.112a6.386 6.386 0 0 0-3.802-3.802L4.279 8.4a.426.426 0 0 1 0-.8l1.112-.407a6.386 6.386 0 0 0 3.802-3.802L9.6 2.279Zm-4.267 8.837a.178.178 0 0 1 .334 0l.169.464a2.662 2.662 0 0 0 1.584 1.584l.464.169a.178.178 0 0 1 0 .334l-.464.169a2.662 2.662 0 0 0-1.584 1.584l-.169.464a.178.178 0 0 1-.334 0l-.169-.464a2.662 2.662 0 0 0-1.584-1.584l-.464-.169a.178.178 0 0 1 0-.334l.464-.169a2.662 2.662 0 0 0 1.584-1.584l.169-.464ZM2.8.14a.213.213 0 0 1 .4 0l.203.556a3.2 3.2 0 0 0 1.901 1.901l.556.203a.213.213 0 0 1 0 .4l-.556.203a3.2 3.2 0 0 0-1.901 1.901L3.2 5.86a.213.213 0 0 1-.4 0l-.203-.556A3.2 3.2 0 0 0 .696 3.403L.14 3.2a.213.213 0 0 1 0-.4l.556-.203A3.2 3.2 0 0 0 2.597.696L2.8.14Z"/></svg>AI Suggestion</span>`}
           ${suggestion.severity ? `<span class="severity-badge severity-${suggestion.severity}">${escapeHtml(suggestion.severity.toUpperCase())}</span>` : ''}
           ${window.SuggestionUI?.buildRevisionWarningHtml?.(suggestion.revision) || ''}
-          <span class="collapsed-title">${escapeHtml(suggestion.title || '')}</span>
+          <span class="collapsed-title smart-truncate">${escapeHtml(suggestion.title || '')}</span>
           <div class="ai-suggestion-header-right">
             ${showReasoningBtn ? `
             <button class="btn-reasoning-toggle collapsed-reasoning" title="View reasoning" data-suggestion-id="${suggestion.id}" data-reasoning="${reasoningDataAttr}" data-dismissal-reason="${dismissalReasonAttr}">

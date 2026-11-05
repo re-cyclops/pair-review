@@ -1,5 +1,98 @@
 # Changelog
 
+## 5.4.1
+
+### Patch Changes
+
+- 9e36e8f: Speed up file content loading on large PRs: the file-content endpoints now cache each PR's per-file diff blob info instead of re-parsing the whole stored diff on every request
+- 1a23763: Copilot, Cursor Agent and OpenCode now pass provider and per-model `env` config to the LLM JSON-extraction fallback, matching analysis runs and the other providers.
+- 300a0e4: Syntax-highlight ERB, Scala and Dockerfile lines in context files and legacy diff rendering by loading their Highlight.js grammars, and drop the `.sass` and `.vim` mappings that never highlighted. Lines in a language whose grammar isn't loaded now fall back to plain text without a console warning per line.
+- 7e7ddef: Stop the help modal popping up after deleting the last PR review on the home page. It now appears only on the initial page load for users with no reviews yet; emptying the list shows the empty-state message instead.
+- 9e94946: A pair-review process starting up, or going idle, no longer frees or reassigns a pool worktree that another running pair-review process is preparing or using for a different PR.
+- 1f826d0: Recover AI responses whose JSON contains an unescaped `"` inside a string value (e.g. a description that quotes a word without escaping it). Previously one such quote made every JSON extraction strategy fail, so a whole consolidation response could be discarded; extraction now escapes the offending quotes at the offsets the JSON parser reports and retries.
+- 49f245f: Fix reopening refreshed PR reviews after their worktree has been removed. Preserve PR metadata during refresh and recover missing branch and title fields from stored columns when restoring older reviews.
+
+## 5.4.0
+
+### Minor Changes
+
+- 303bccb: Replace the comment panel's eye toggle with a filter menu: a funnel button opens labeled "Show dismissed" and "Show posted" options, with a dot when either differs from its default. "Show posted" overrides "Hide comments after posting" for the current review only. When filters hide user comments, a line at the end of the list says how many (e.g. "3 posted · 2 dismissed hidden") with a Show button that reveals them.
+- efa4492: Record each comment posted to GitHub separately from its active or dismissed lifecycle. Restoring a dismissed posted comment no longer queues it for another submission, and Clear All keeps posted comments. Posted indicators link to the GitHub comment (or review), and drafts submitted or discarded directly on GitHub reconcile on reload.
+
+  Existing posted comments are backfilled with approximate review links. Comments dismissed before this upgrade cannot be backfilled because their old posted status was already lost. Review history browsing and explicit re-posting are coming separately.
+
+- 6739f4c: Browse review history as a list of submissions, then open one to read its summary and posted comments. Use Back or Escape to return to the list while keeping your place.
+- d75127e: Editing a posted comment can now update the existing GitHub comment in place, including comments in pending draft reviews. Missing comment identities are recovered only by an exact match; failed updates never create duplicate comments. The submit dialog can also update edited comments after submission. A PR-only review history shows original sent text and subsequent edits.
+
+  Discarded drafts remain non-pending until authoritative deletion provenance is available. Dismissing a posted comment remains local-only.
+
+### Patch Changes
+
+- 86d5460: Make `pnpm-lock.yaml` the only lock file. The generated npm `package-lock.json` (and `scripts/generate-package-lock.sh`) is gone: packagers should build from `pnpm-lock.yaml`, which is what CI tests. Also bump `@pierre/diffs` to `^1.6.2` (with `@pierre/theming` 1.0.2), so the tested diff renderer matches what users install, and keep inline comment and suggestion cards in place when 1.6 re-renders a file (clicking a finding whose range reaches outside the visible hunk now scrolls to its card again).
+- 2ff0ec8: Show pending comment counts and edited-comment updates below the review summary, and render review history comments with normal card spacing and code suggestion styling.
+
+## 5.3.7
+
+### Patch Changes
+
+- d6173cd: Submitting a review or saving a draft now tells other open tabs on the same review to reload their comments, so they stop counting the posted comments as pending. Comment reloads triggered from outside the tab (another tab, the chat agent, a hidden tab becoming visible) keep dismissed comments in the panel when "show dismissed" is on.
+- 374c9e7: Stop duplicate review comments on GitHub when a submit request fails after GitHub may already have added the comments (a timeout, dropped connection or server error). Pair-review now re-sends a batch of comments only when GitHub cannot have applied it, such as a refused connection or an error GitHub returned before running the request.
+- dfab0fa: Mark comments saved to a draft review as posted once that review is submitted, so "Hide comments after posting" hides them too. Let Request Changes go through when the pending draft holds the only comments. Hidden posted comments no longer leave minimize-mode pills, file-header indicators or empty file-comment strips behind. A comment saved while comments are reloading no longer disappears from the diff.
+- a4dcf01: Count only pending comments in the review button and submit dialog, and mark posted comments with a small indicator. Add an optional preference to hide comments after posting.
+
+## 5.3.6
+
+### Patch Changes
+
+- 8ea8e9f: Shut down chat agent processes after 10 idle minutes (configurable via `chat.idle_timeout_minutes`, `0` disables) so closed browser tabs no longer leave agents running; the conversation resumes transparently on the next message.
+- c786b3f: Add a `pending_review_comments_batch` option for alt-host repositories whose pending-review comments endpoint accepts one comment per request. Setting it to `false` sends each comment in its own request instead of a single `{ "comments": [...] }` batch, which such hosts reject. A comment the host rejects with a 400 or 422 fails on its own; any other error stops the submission and reports the remaining comments as skipped. Batch requests remain the default.
+
+  `pending_review_comments_endpoint` (and the new option) no longer fail startup validation on an alt-host that leaves `pending_review_comments` at its default `"host"` mode.
+
+## 5.3.5
+
+### Patch Changes
+
+- 7ebd8ef: Add Muse Wonder and Muse Wonder Full models to the Muse provider (thorough tier, high and max reasoning effort). Wonder Full requires a Muse Code Power Usage or Maximum Usage subscription. Every Wonder entry runs with contributor mode off.
+- d8f7b3b: Update the Antigravity (`agy`) provider's built-in models to match agy 1.3.5: add Gemini 4 Argon (thorough tier; Google AI Ultra and eligible Gemini Enterprise plans only) and Gemini 3.8 Flash (Medium) as the balanced tier, and remove the retired Gemini 3.1 Pro (High/Low) models, which agy no longer offers. Gemini 3.8 Flash (High) remains the default.
+
+  Switching providers in the analysis dialog or repository settings now keeps the new provider's default model when it is in the same tier as the previous selection, instead of taking that tier's first model, which could be one your plan cannot run.
+
+  Cursor's default model is now Composer 1.5 (previously Claude 4.6 Sonnet (Thinking)).
+
+- e37f228: Fix diffs with removed lines starting with `--` or added lines starting with `++` (such as SQL or Lua comments)
+
+  - These lines no longer shift the line numbers after them. Comments on the file are submitted to GitHub as inline comments on the right line, and the annotated diff the AI reads has the right line numbers.
+  - Added and deleted line counts now include these lines.
+  - A hunk is no longer skipped when the function name shown in its `@@` header contains a carriage return. Its lines are counted and numbered.
+
+- c9e0405: Fix several small review issues. File-level AI suggestion cards from a previous analysis run or level no longer linger when the new results have no file-level findings, reloading user comments leaves the current AI cards in place, and the card of a deleted or dismissed last file-level comment is removed. Starting a new analysis now clears the previous run's file-level AI cards and the suggestion navigator list along with the inline suggestions, in Local mode as well as PR mode. When suggestions are reloaded several times in quick succession, the latest list is the one shown. The suggestion navigator keeps its selection when suggestions refresh (for example after adopting or dismissing one), and shows an error when a finding cannot be shown in the diff instead of doing nothing, but not while suggestions are being reloaded. Headless `--ai-draft` / `--ai-review` submissions now map findings the same way as submitting from the web UI: findings on deleted lines go to the LEFT side of the diff instead of always RIGHT, multi-line findings are posted as ranges, file-level findings are posted as file comments instead of being dropped, and a finding on a line outside the diff hunks is posted as a file comment with a "(Ref Line N)" prefix instead of failing the submission. Headless submissions to a GitHub-compatible alternate host now send the PR head commit with each inline comment, as the web UI does, so the host no longer rejects them with a "commit_id missing" error. A multi-line comment whose ends fall in different diff hunks, or whose lines are given in reverse order, no longer makes GitHub reject the whole review: a reversed range is put in order, and a range that cannot be one thread is posted on its first line, or as a file comment with a "(Ref Lines N-M)" prefix when that line is outside the diff. Multi-line comments on deleted lines now start on the LEFT side instead of GitHub's default RIGHT.
+- 154ebdd: Handle non-ASCII and quoted file paths. Files with accented, CJK or emoji names, and files whose names contain quotes or backslashes, now show their real names in the file list and diff, keep their patches, and anchor comments and AI suggestions in both PR and Local reviews, including inline comments submitted to GitHub. Inline comments on files whose names contain a space are no longer turned into file-level comments when the review is submitted. Sparse-checkout directories with non-ASCII names are recognized, so they are no longer re-added on every PR setup or shown escaped to the AI. The code-critic plugin's annotated diff names these files the same way. Renamed files are recorded as renames even when the old and new paths share nothing, and a file literally named like a rename (`a => b.md`) is no longer mistaken for one. Refresh an existing review to respell paths it cached before this fix.
+- 0e99d77: Fix the Review, Chat and file navigator panels being unreachable on slim screens
+
+  - Below 900px (1200px for the file navigator) the panels were hidden, but their toolbar
+    toggles stayed visible and did nothing. The panels now open as drawers over the diff,
+    just below the toolbar, so the toggles keep working and the diff keeps its full width.
+  - Wider than 900px, Review and Chat also float over the diff instead of sitting beside it
+    when that would leave the diff too narrow to read (for example both panels at ~950px).
+  - On very narrow screens, Review and Chat open together stack one above the other instead
+    of squeezing side by side, and the layout picker only offers the stacked layouts. Your
+    chosen layout is kept and comes back when the window is wide enough.
+  - The file navigator drawer closes when you pick a file and doesn't change whether the
+    navigator is collapsed on wider screens.
+  - With the file navigator collapsed, the Review and Chat panels can now be resized wider.
+    The size limit no longer reserves room for the hidden navigator.
+  - The toolbar no longer overlaps the guided-tour bar when the bar's text wraps on narrow
+    screens.
+  - At 768px and narrower the page no longer runs 16px past the bottom of the window, which
+    cut off the bottom of the diff and of the panels, including the Chat input.
+
+- 49f18d7: Keep long file paths and AI suggestion titles on one line in narrow panes
+
+  - Long file paths in diff headers no longer wrap onto several lines. They truncate from the front, GitHub-style ("…/deep/folder/file.js"), so the file name stays visible.
+  - AI suggestion titles truncate at the end, and shrink before the badges next to them. The "AI Suggestion" badge is no longer clipped and "Nice Work" no longer wraps while the title still has room.
+  - Hovering truncated text shows the full text in the browser's tooltip. Text that fits gets no tooltip of its own, so a collapsed suggestion still shows its "Dismissed" or "Adopted" tooltip.
+
 ## 5.3.4
 
 ### Patch Changes

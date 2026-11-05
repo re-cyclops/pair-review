@@ -18,6 +18,12 @@ Count unfinished comments consistently with the submission manifest, excluding d
 
 Record submission intent and per-comment remote receipts between batches. Revalidate before writes, preserve unrelated remote drafts, reconcile lost responses read-only, and block blind retries for ambiguous outcomes. Keep intentional headless publishing on the same manifest and receipt path.
 
+Reconcile upstream 5.4.1's posting history, explicit edit-in-place actions, responsive drawers, process holders and idle chat reaper with the latest-revision workflow. Keep one manifest-authorized publisher: project acknowledged per-comment receipts into history without replaying them, preserve submitted acknowledgements across local cleanup failures, and block edits underneath an unfinished owned pending review. Retry only proven pre-execution rejections or never-connected requests, never partial or ambiguous writes.
+
+Let upstream own responsive panel docking and stacking instead of the fork's obsolete full-pane overrides. Keep drawer toggles reachable, restore the file navigator independently of its saved desktop collapsed state, and preserve revision labels while inline finding titles truncate.
+
+Bridge the colliding upstream 56–59 and fork 56–62 database histories atomically at schema 63, retaining draft revisions, exact saved wire bodies, publication identities and checkout ownership. Create an online SQLite backup before upgrading an existing versioned database.
+
 Send explicitly confirmed empty review bodies as empty strings, including when replacing an earlier pending summary before approval.
 
 Carry persisted local PR associations through publication preflight. Retire acknowledged published editors without clearing excluded text or newer edits, so completed comments do not remain in draft recovery.

@@ -4817,6 +4817,47 @@ describe('ChatPanel', () => {
   // -----------------------------------------------------------------------
   // open() concurrency guard — race condition fix
   // -----------------------------------------------------------------------
+  describe('open() PanelGroup visibility notification', () => {
+    let savedPanelGroup;
+    beforeEach(() => {
+      savedPanelGroup = global.window.panelGroup;
+      global.window.panelGroup = { _onChatVisibilityChanged: vi.fn() };
+    });
+    afterEach(() => {
+      global.window.panelGroup = savedPanelGroup;
+    });
+
+    it('notifies PanelGroup before awaiting the session restore', async () => {
+      chatPanel.reviewId = 1;
+      clearActiveTab(chatPanel);
+      let resolveMRU;
+      vi.spyOn(chatPanel, '_loadMRUSession').mockImplementation(() => new Promise((resolve) => { resolveMRU = resolve; }));
+
+      const opening = chatPanel.open({ suppressFocus: true });
+      // Still inside the restore, yet PanelGroup already knows Chat is visible
+      expect(global.window.panelGroup._onChatVisibilityChanged).toHaveBeenCalledWith(true);
+
+      resolveMRU();
+      await opening;
+      expect(global.window.panelGroup._onChatVisibilityChanged).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not overwrite a close() that happens during the restore', async () => {
+      chatPanel.reviewId = 1;
+      clearActiveTab(chatPanel);
+      let resolveMRU;
+      vi.spyOn(chatPanel, '_loadMRUSession').mockImplementation(() => new Promise((resolve) => { resolveMRU = resolve; }));
+
+      const opening = chatPanel.open({ suppressFocus: true });
+      chatPanel.close();
+      resolveMRU();
+      await opening;
+
+      const calls = global.window.panelGroup._onChatVisibilityChanged.mock.calls;
+      expect(calls[calls.length - 1]).toEqual([false]);
+    });
+  });
+
   describe('open() concurrency guard', () => {
     it('should serialize concurrent open() calls', async () => {
       chatPanel.reviewId = 1;
@@ -9010,6 +9051,100 @@ describe('ChatPanel', () => {
       expect(tab.status).toBe('error');
       expect(tab.errorMessage).toBe('bad');
       expect(tab.isStreaming).toBe(false);
+    });
+
+    it('session_closed on an idle background tab clears sessionWarm and changes nothing visible', () => {
+      chatPanel.currentSessionId = 'bg-1';
+      const tab = chatPanel._getActiveTab();
+      chatPanel.isOpen = false;
+      tab.sessionWarm = true;
+      tab.isStreaming = false;
+      tab.errorMessage = null;
+      tab.messages = [{ role: 'user', content: 'hi' }];
+      const statusBefore = tab.status;
+      const showErrorSpy = vi.spyOn(chatPanel, '_showError');
+      const finalizeSpy = vi.spyOn(chatPanel, 'finalizeStreamingMessage');
+
+      chatPanel._handleChatMessageForTab(tab, { type: 'session_closed', reason: 'idle', sessionId: 'bg-1' });
+
+      expect(tab.sessionWarm).toBe(false);
+      expect(tab.errorMessage).toBeNull();
+      expect(tab.status).toBe(statusBefore);
+      expect(tab.messages).toEqual([{ role: 'user', content: 'hi' }]);
+      expect(showErrorSpy).not.toHaveBeenCalled();
+      expect(finalizeSpy).not.toHaveBeenCalled();
+      showErrorSpy.mockRestore();
+      finalizeSpy.mockRestore();
+    });
+
+    it('session_closed on an idle foreground tab clears sessionWarm and changes nothing visible', () => {
+      chatPanel.currentSessionId = 'fg-1';
+      const tab = chatPanel._getActiveTab();
+      chatPanel.isOpen = true;
+      tab.sessionWarm = true;
+      tab.isStreaming = false;
+      tab.errorMessage = null;
+      const statusBefore = tab.status;
+      chatPanel.stopBtn.style.display = 'none';
+      chatPanel.sendBtn.style.display = '';
+      const showErrorSpy = vi.spyOn(chatPanel, '_showError');
+      const finalizeSpy = vi.spyOn(chatPanel, 'finalizeStreamingMessage');
+
+      chatPanel._handleChatMessageForTab(tab, { type: 'session_closed', reason: 'idle', sessionId: 'fg-1' });
+
+      expect(tab.sessionWarm).toBe(false);
+      expect(chatPanel._sessionWarm).toBe(false);
+      expect(tab.errorMessage).toBeNull();
+      expect(tab.status).toBe(statusBefore);
+      expect(chatPanel.stopBtn.style.display).toBe('none');
+      expect(chatPanel.sendBtn.style.display).toBe('');
+      expect(showErrorSpy).not.toHaveBeenCalled();
+      expect(finalizeSpy).not.toHaveBeenCalled();
+      showErrorSpy.mockRestore();
+      finalizeSpy.mockRestore();
+    });
+
+    it('session_closed on a streaming foreground tab ends the stream and hides Stop', () => {
+      chatPanel.currentSessionId = 'fg-1';
+      const tab = chatPanel._getActiveTab();
+      chatPanel.isOpen = true;
+      tab.sessionWarm = true;
+      tab.messages = [{ role: 'user', content: 'hi' }];
+      chatPanel._handleChatMessageForTab(tab, { type: 'status', status: 'working', sessionId: 'fg-1' });
+      chatPanel._handleChatMessageForTab(tab, { type: 'delta', text: 'partial', sessionId: 'fg-1' });
+      expect(tab.isStreaming).toBe(true);
+      expect(chatPanel.stopBtn.style.display).toBe('');
+
+      chatPanel._handleChatMessageForTab(tab, { type: 'session_closed', reason: 'idle', sessionId: 'fg-1' });
+
+      expect(tab.isStreaming).toBe(false);
+      expect(tab.streamingMsgEl).toBeNull();
+      expect(tab.status).toBe('idle');
+      expect(chatPanel.stopBtn.style.display).toBe('none');
+      expect(chatPanel.sendBtn.style.display).toBe('');
+      expect(tab.sessionWarm).toBe(false);
+      expect(tab.messages).toContainEqual({ role: 'assistant', content: 'partial', id: null });
+    });
+
+    it('session_closed on a streaming background tab ends the stream and hides Stop', () => {
+      chatPanel.currentSessionId = 'bg-1';
+      const tab = chatPanel._getActiveTab();
+      chatPanel.isOpen = false;
+      tab.sessionWarm = true;
+      tab.messages = [{ role: 'user', content: 'hi' }];
+      chatPanel._handleChatMessageForTab(tab, { type: 'status', status: 'working', sessionId: 'bg-1' });
+      chatPanel._handleChatMessageForTab(tab, { type: 'delta', text: 'partial', sessionId: 'bg-1' });
+      expect(tab.isStreaming).toBe(true);
+      expect(tab.status).toBe('streaming');
+      chatPanel.stopBtn.style.display = '';
+
+      chatPanel._handleChatMessageForTab(tab, { type: 'session_closed', reason: 'idle', sessionId: 'bg-1' });
+
+      expect(tab.isStreaming).toBe(false);
+      expect(tab.streamingMsgEl).toBeNull();
+      expect(tab.status).toBe('idle');
+      expect(chatPanel.stopBtn.style.display).toBe('none');
+      expect(tab.sessionWarm).toBe(false);
     });
   });
 

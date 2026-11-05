@@ -29,12 +29,13 @@ const { includesBranch, parseScopeArg, VALID_SCOPE_RANGES, EMPTY_SCOPE_MESSAGE }
 const { storePRData, resolvePrHostBinding, registerRepositoryLocation, findRepositoryPath, withPRPreparation } = require('./setup/pr-setup');
 const { resolvePreflightBinding, setupHostParam, bindingRepositoryForHost } = require('./utils/host-resolution');
 const { fireReviewStartedHook } = require('./hooks/payloads');
-const { normalizeRepository, resolveRenamedFile, resolveRenamedFileOld } = require('./utils/paths');
+const { normalizeRepository } = require('./utils/paths');
 const { rejectUrlLikeLocalReviewPath } = require('./utils/local-path-input');
 const logger = require('./utils/logger');
 const simpleGit = require('simple-git');
 const { getGeneratedFilePatterns } = require('./git/gitattributes');
-const { GIT_DIFF_FLAGS_ARRAY, GIT_DIFF_SUMMARY_FLAGS_ARRAY } = require('./git/diff-flags');
+const { GIT_DIFF_FLAGS_ARRAY, SIMPLE_GIT_PATH_OPTIONS } = require('./git/diff-flags');
+const { buildChangedFileEntries } = require('./utils/diff-file-list');
 const { buildSubmissionManifest, publishSubmission } = require('./review-submission');
 const open = (...args) => process.env.PAIR_REVIEW_NO_OPEN ? Promise.resolve() : import('open').then(({default: open}) => open(...args));
 const { registerProtocolHandler, unregisterProtocolHandler } = require('./protocol-handler');
@@ -1326,6 +1327,47 @@ async function startServerOnly(config, poolLifecycle = null, flags = {}) {
 
 
 /**
+ * Load the final AI suggestions a headless (--ai-draft / --ai-review) review
+ * submits: active, orchestrated, non-raw findings from the requested run.
+ * The manifest verifies their current revision and exact publication anchors.
+ * Invalid paths/lines are reported rather than converted to a different anchor.
+ *
+ * @param {Object} db - Database instance
+ * @param {number} reviewId - reviews.id the findings belong to
+ * @param {string|null} analysisId - Restrict publication to the completed run
+ * @returns {Promise<Array<Object>>} Submittable suggestion rows, ordered by file and line
+ */
+async function loadHeadlessSuggestions(db, reviewId, analysisId = null) {
+  const rows = await query(db, `
+    SELECT
+      id,
+      file,
+      line_start,
+      line_end,
+      body,
+      diff_position,
+      side,
+      title,
+      type,
+      is_file_level
+    FROM comments
+    WHERE review_id = ? AND source = 'ai' AND ai_level IS NULL AND (is_raw = 0 OR is_raw IS NULL)
+      AND (? IS NULL OR ai_run_id = ?) AND ${CommentRepository.pendingCommentSql('comments')}
+    ORDER BY file, line_start
+  `, [reviewId, analysisId, analysisId]);
+
+  return rows.filter(suggestion => {
+    const hasValidPath = typeof suggestion.file === 'string' && suggestion.file.trim() !== '';
+    const hasValidLine = suggestion.is_file_level === 1 || suggestion.line_start > 0;
+    if (!hasValidPath || !hasValidLine) {
+      logger.warn(`Skipping suggestion for ${suggestion.file || 'unknown file'}:${suggestion.line_start || 'unknown line'} - missing valid line or path information`);
+      return false;
+    }
+    return true;
+  });
+}
+
+/**
  * Shared implementation for headless (non-interactive) review modes.
  * Used by both --ai-draft and --ai-review.
  *
@@ -1336,7 +1378,6 @@ async function startServerOnly(config, poolLifecycle = null, flags = {}) {
  * @param {Object} options - Mode-specific options
  * @param {string} options.mode - 'draft' or 'review'
  * @param {string} options.reviewEvent - 'DRAFT' or 'COMMENT'
- * @param {string} options.commentStatus - 'draft' or 'submitted'
  * @param {string} options.modeLabel - Display label for log messages (e.g., 'draft mode', 'action review mode')
  * @param {import('../git/worktree-pool-lifecycle').WorktreePoolLifecycle} [externalPoolLifecycle] - Shared pool lifecycle instance (avoids creating a fresh singleton)
  */
@@ -1429,7 +1470,7 @@ async function performPinnedHeadlessReview(args, config, db, flags, options, ext
 
       // Generate diff directly from current checkout
       console.log('Generating unified diff from checkout...');
-      const git = simpleGit(worktreePath);
+      const git = simpleGit(worktreePath, SIMPLE_GIT_PATH_OPTIONS);
 
       // Ensure we have the base SHA available (fetch if needed)
       try {
@@ -1449,30 +1490,9 @@ async function performPinnedHeadlessReview(args, config, db, flags, options, ext
         ...GIT_DIFF_FLAGS_ARRAY
       ]);
 
-      // Get changed files
-      const diffSummary = await git.diffSummary([
-        `${prData.base_sha}...${prData.head_sha}`,
-        ...GIT_DIFF_SUMMARY_FLAGS_ARRAY
-      ]);
+      // Build changed files from the diff (one source of path spelling)
       const gitattributes = await getGeneratedFilePatterns(worktreePath);
-
-      changedFiles = diffSummary.files.map(file => {
-        const resolvedFile = resolveRenamedFile(file.file);
-        const isRenamed = resolvedFile !== file.file;
-        const result = {
-          file: resolvedFile,
-          insertions: file.insertions,
-          deletions: file.deletions,
-          changes: file.changes,
-          binary: file.binary || false,
-          generated: gitattributes.isGenerated(resolvedFile)
-        };
-        if (isRenamed) {
-          result.renamed = true;
-          result.renamedFrom = resolveRenamedFileOld(file.file);
-        }
-        return result;
-      });
+      changedFiles = buildChangedFileEntries(diff, gitattributes);
     } else {
       // Use worktree approach - only use cwd if it matches the target repo
       const currentDir = parser.getCurrentDirectory();
@@ -1560,7 +1580,7 @@ async function performPinnedHeadlessReview(args, config, db, flags, options, ext
       console.log('Generating unified diff...');
       await worktreeManager.assertPinnedWorktree(worktreePath, prData);
       diff = await worktreeManager.generateUnifiedDiff(worktreePath, prData);
-      changedFiles = await worktreeManager.getChangedFiles(worktreePath, prData);
+      changedFiles = await worktreeManager.getChangedFiles(worktreePath, diff);
     }
 
     // Store PR data in database
@@ -1671,9 +1691,7 @@ async function performPinnedHeadlessReview(args, config, db, flags, options, ext
 
     // Explicit headless publishing selects this run only, never unrelated
     // human drafts or active findings from an older analysis.
-    const aiSuggestions = await query(db, `SELECT id FROM comments WHERE review_id = ? AND ai_run_id = ?
-      AND source = 'ai' AND ai_level IS NULL AND COALESCE(is_raw, 0) = 0 AND status = 'active'
-      ORDER BY file, line_start, side, id`, [review.id, analysisRunId]);
+    const aiSuggestions = await loadHeadlessSuggestions(db, review.id, analysisRunId);
 
     console.log(`Found ${aiSuggestions.length} AI suggestions to submit`);
 
@@ -1728,8 +1746,12 @@ async function performPinnedHeadlessReview(args, config, db, flags, options, ext
     // so the pool slot must be freed immediately.
     if (poolWorktreeId && poolLifecycle) {
       try {
-        await poolLifecycle.releaseAfterHeadless(poolWorktreeId);
-        logger.info(`Released pool worktree ${poolWorktreeId} after headless review`);
+        const released = await poolLifecycle.releaseAfterHeadless(poolWorktreeId);
+        if (released) {
+          logger.info(`Released pool worktree ${poolWorktreeId} after headless review`);
+        } else {
+          logger.info(`Pool worktree ${poolWorktreeId} not released after headless review: no longer held by this process`);
+        }
       } catch (releaseErr) {
         logger.error(`Failed to release pool worktree ${poolWorktreeId}: ${releaseErr.message}`);
       }
@@ -1932,7 +1954,7 @@ async function preparePinnedPrHeadless(db, config, flags, externalPoolLifecycle,
     console.log(`Using current checkout at ${worktreePath}`);
 
     console.log('Generating unified diff from checkout...');
-    const git = simpleGit(worktreePath);
+    const git = simpleGit(worktreePath, SIMPLE_GIT_PATH_OPTIONS);
     try {
       await fetchNoTags(git, ['origin', prData.base_sha]);
     } catch (fetchError) {
@@ -1947,28 +1969,8 @@ async function preparePinnedPrHeadless(db, config, flags, externalPoolLifecycle,
       '--unified=3',
       ...GIT_DIFF_FLAGS_ARRAY
     ]);
-    const diffSummary = await git.diffSummary([
-      `${prData.base_sha}...${prData.head_sha}`,
-      ...GIT_DIFF_SUMMARY_FLAGS_ARRAY
-    ]);
     const gitattributes = await getGeneratedFilePatterns(worktreePath);
-    changedFiles = diffSummary.files.map(file => {
-      const resolvedFile = resolveRenamedFile(file.file);
-      const isRenamed = resolvedFile !== file.file;
-      const result = {
-        file: resolvedFile,
-        insertions: file.insertions,
-        deletions: file.deletions,
-        changes: file.changes,
-        binary: file.binary || false,
-        generated: gitattributes.isGenerated(resolvedFile)
-      };
-      if (isRenamed) {
-        result.renamed = true;
-        result.renamedFrom = resolveRenamedFileOld(file.file);
-      }
-      return result;
-    });
+    changedFiles = buildChangedFileEntries(diff, gitattributes);
   } else {
     const currentDir = parser.getCurrentDirectory();
     const isMatchingRepo = await parser.isMatchingRepository(currentDir, prInfo.owner, prInfo.repo);
@@ -2045,7 +2047,7 @@ async function preparePinnedPrHeadless(db, config, flags, externalPoolLifecycle,
     console.log('Generating unified diff...');
     await worktreeManager.assertPinnedWorktree(worktreePath, prData);
     diff = await worktreeManager.generateUnifiedDiff(worktreePath, prData);
-    changedFiles = await worktreeManager.getChangedFiles(worktreePath, prData);
+    changedFiles = await worktreeManager.getChangedFiles(worktreePath, diff);
   }
 
   console.log('Storing pull request data...');
@@ -2119,8 +2121,12 @@ async function preparePinnedPrHeadless(db, config, flags, externalPoolLifecycle,
     // logged, not allowed to mask the original failure.
     if (poolWorktreeId && poolLifecycle) {
       try {
-        await poolLifecycle.releaseAfterHeadless(poolWorktreeId);
-        logger.info(`Released pool worktree ${poolWorktreeId} after headless prep failure`);
+        const released = await poolLifecycle.releaseAfterHeadless(poolWorktreeId);
+        if (released) {
+          logger.info(`Released pool worktree ${poolWorktreeId} after headless prep failure`);
+        } else {
+          logger.info(`Pool worktree ${poolWorktreeId} not released after headless prep failure: no longer held by this process`);
+        }
       } catch (releaseErr) {
         logger.error(`Failed to release pool worktree ${poolWorktreeId} after prep failure: ${releaseErr.message}`);
       }
@@ -2385,8 +2391,12 @@ async function handleHeadlessAnalysis(prArgs, config, db, flags, poolLifecycle) 
       // pool slot isn't leaked per headless run. Local mode has no pool.
       if (prep.poolWorktreeId && prep.poolLifecycle) {
         try {
-          await prep.poolLifecycle.releaseAfterHeadless(prep.poolWorktreeId);
-          logger.info(`Released pool worktree ${prep.poolWorktreeId} after headless analysis`);
+          const released = await prep.poolLifecycle.releaseAfterHeadless(prep.poolWorktreeId);
+          if (released) {
+            logger.info(`Released pool worktree ${prep.poolWorktreeId} after headless analysis`);
+          } else {
+            logger.info(`Pool worktree ${prep.poolWorktreeId} not released after headless analysis: no longer held by this process`);
+          }
         } catch (releaseErr) {
           logger.error(`Failed to release pool worktree ${prep.poolWorktreeId}: ${releaseErr.message}`);
         }
@@ -2558,7 +2568,6 @@ async function handleDraftModeReview(args, config, db, flags = {}, poolLifecycle
   await performHeadlessReview(args, config, db, flags, {
     mode: 'draft',
     reviewEvent: 'DRAFT',
-    commentStatus: 'draft',
     modeLabel: 'draft mode'
   }, poolLifecycle);
 }
@@ -2577,7 +2586,6 @@ async function handleActionReview(args, config, db, flags = {}, poolLifecycle = 
   await performHeadlessReview(args, config, db, flags, {
     mode: 'review',
     reviewEvent: 'COMMENT',
-    commentStatus: 'submitted',
     modeLabel: 'action review mode'
   }, poolLifecycle);
 }
@@ -2872,4 +2880,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { main, parseArgs, detectPRFromGitHubEnvironment, printCouncilList, handleHeadlessAnalysis, handleHeadlessDelegated, runHeadlessAnalysis, buildHeadlessJson, buildHeadlessErrorJson, emitHeadlessResult, resolveCliInstructions, resolveCliBindingRepository, startPoolBackgroundFetches, isPoolEntryDueForFetch, POOL_FETCH_TICK_MS, MAX_POOL_FETCH_BACKOFF_MS };
+module.exports = { main, parseArgs, detectPRFromGitHubEnvironment, printCouncilList, handleHeadlessAnalysis, handleHeadlessDelegated, runHeadlessAnalysis, buildHeadlessJson, buildHeadlessErrorJson, emitHeadlessResult, loadHeadlessSuggestions, resolveCliInstructions, resolveCliBindingRepository, startPoolBackgroundFetches, isPoolEntryDueForFetch, POOL_FETCH_TICK_MS, MAX_POOL_FETCH_BACKOFF_MS };

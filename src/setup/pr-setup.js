@@ -20,6 +20,7 @@ const { findMainGitRoot } = require('../local-review');
 const { getConfigDir, getRepoPath, resolveRepoOptions, resolvePoolConfig, getRepoResetScript, resolveHostBinding, resolveBindingRepositoryFromPR, getRepoConfig, DEFAULT_CHECKOUT_TIMEOUT_MS } = require('../config');
 const { storedHostToOption, isDualHostRepoConfig, resolveRecordedHost, bindingRepositoryForHost } = require('../utils/host-resolution');
 const logger = require('../utils/logger');
+const { invalidatePRFileBlobCache } = require('../utils/pr-file-blob-cache');
 const { fireReviewStartedHook } = require('../hooks/payloads');
 const simpleGit = require('simple-git');
 const fs = require('fs').promises;
@@ -242,6 +243,10 @@ async function storePRData(db, prInfo, prData, diff, changedFiles, worktreePath,
     await run(db, 'ROLLBACK');
     logger.error('Error storing PR data:', error);
     throw new Error(`Failed to store PR data: ${error.message}`);
+  } finally {
+    // pr_data may have changed (or a lookup may have cached uncommitted rows
+    // mid-transaction), so drop the file-content blob cache once it settles.
+    invalidatePRFileBlobCache(db, repository, prInfo.number);
   }
 }
 
@@ -707,6 +712,7 @@ async function setupPinnedPRReview({ db, owner, repo, prNumber, githubToken, bin
   }
 
 
+
   // ------------------------------------------------------------------
   // Step: sparse - Expand sparse-checkout before generating diff
   // ------------------------------------------------------------------
@@ -748,7 +754,7 @@ async function setupPinnedPRReview({ db, owner, repo, prNumber, githubToken, bin
   progress({ step: 'diff', status: 'running', message: 'Generating unified diff...' });
   await worktreeManager.assertPinnedWorktree(worktreePath, prData);
   const diff = await worktreeManager.generateUnifiedDiff(worktreePath, prData);
-  const changedFiles = await worktreeManager.getChangedFiles(worktreePath, prData);
+  const changedFiles = await worktreeManager.getChangedFiles(worktreePath, diff);
   progress({ step: 'diff', status: 'completed', message: 'Diff generated.' });
 
   // ------------------------------------------------------------------
@@ -799,8 +805,12 @@ async function setupPinnedPRReview({ db, owner, repo, prNumber, githubToken, bin
     // mechanism can never fire to reclaim it.
     if (poolWorktreeId && poolLifecycle) {
       try {
-        await poolLifecycle.releaseAfterHeadless(poolWorktreeId);
-        logger.info(`Released pool worktree ${poolWorktreeId} after setup failure`);
+        const released = await poolLifecycle.releaseAfterHeadless(poolWorktreeId);
+        if (released) {
+          logger.info(`Released pool worktree ${poolWorktreeId} after setup failure`);
+        } else {
+          logger.info(`Pool worktree ${poolWorktreeId} not released after setup failure: no longer held by this process`);
+        }
       } catch (releaseErr) {
         logger.error(`Failed to release pool worktree ${poolWorktreeId} after setup failure: ${releaseErr.message}`);
       }
@@ -827,7 +837,7 @@ async function refreshPinnedPRReview({ db, config = {}, owner, repo, prNumber, g
   const worktreePath = await manager.updateWorktree(owner, repo, prNumber, resolved.prData);
   await manager.assertPinnedWorktree(worktreePath, resolved.prData);
   const diff = await manager.generateUnifiedDiff(worktreePath, resolved.prData);
-  const changedFiles = await manager.getChangedFiles(worktreePath, resolved.prData);
+  const changedFiles = await manager.getChangedFiles(worktreePath, diff);
   await storePRData(db, { owner, repo, number: prNumber }, resolved.prData, diff, changedFiles, worktreePath, { host: resolved.binding.host });
   const prMetadata = await new PRMetadataRepository(db).getByPR(prNumber, repository);
   return { prData: resolved.prData, prMetadata, worktreePath, diff, changedFiles, githubClient: resolved.githubClient };

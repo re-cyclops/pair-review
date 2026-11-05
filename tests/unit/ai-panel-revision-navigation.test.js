@@ -106,6 +106,24 @@ describe('historical finding workflow', () => {
     expect(document.querySelector('button[type="submit"]').disabled).toBe(true);
     expect(panel.comments[0].body).toBe('My edited text');
   });
+  it('keeps recovery visible when a matched line cannot be painted after closing the Review pane', async () => {
+    const wrapper = document.createElement('div');
+    document.getElementById('diff-container').append(wrapper);
+    window.prManager.findFileElement = () => wrapper;
+    window.prManager.pierreBridge = {
+      files: new Map([[finding.file, {}]]),
+      isLineVisible: () => true,
+      scrollToLine: () => false
+    };
+    panel._revealDiffForNavigation = () => panel.collapse();
+    await panel.scrollToFinding(1, finding.file, 2);
+    expect(panel.panel.classList.contains('collapsed')).toBe(true);
+    const notice = document.querySelector('.diff-navigation-guidance');
+    expect(notice).not.toBeNull();
+    expect(notice.closest('#ai-panel')).toBeNull();
+    expect(notice.textContent).toContain('current line could not be displayed');
+    expect([...notice.querySelectorAll('button')].map(button => button.textContent)).toContain('Open current file');
+  });
   it('ignores semantic guidance from a different head', () => {
     panel.showNavigationGuidance({ ...finding, revision_recheck: { head_sha: 'wrong', status: 'checked', reason: 'Do not trust this' } }, { message: 'Unverified' });
     expect(document.body.textContent).not.toContain('Do not trust this');

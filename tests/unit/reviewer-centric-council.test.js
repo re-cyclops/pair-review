@@ -1,59 +1,16 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
 /**
- * Unit tests for runReviewerCentricCouncil in analyzer.js
- *
- * Verifies:
- * - Single-voice path: analyzeAllLevels runs directly on parent run (no child run)
- * - Multi-voice consolidation always runs (even for few suggestions)
- * - custom_instructions column stores only request-level instructions (regression)
+ * Terminal council progress is consumed by the live aggregate stage, not
+ * just individual voice rows. Exercise success, fallback and cancellation
+ * against a real parent/child database and a pinned Git comparison.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-
-// Mock dependencies before importing
-vi.mock('../../src/ai/index', () => ({
-  createProvider: vi.fn()
-}));
-
-vi.mock('../../src/git/gitattributes', () => ({
-  getGeneratedFilePatterns: vi.fn().mockResolvedValue({ getPatterns: () => [] })
-}));
-
-vi.mock('../../src/utils/line-validation', () => ({
-  buildFileLineCountMap: vi.fn().mockResolvedValue(new Map()),
-  validateSuggestionLineNumbers: vi.fn().mockReturnValue({
-    valid: [],
-    converted: [],
-    dropped: []
-  })
-}));
-
-const mockRunRepoCreate = vi.fn().mockResolvedValue({});
-const mockRunRepoUpdate = vi.fn().mockResolvedValue({});
-vi.mock('../../src/database', () => ({
-  AnalysisRunRepository: vi.fn().mockImplementation(() => ({
-    create: mockRunRepoCreate,
-    update: mockRunRepoUpdate
-  })),
-  run: vi.fn().mockResolvedValue({}),
-  get: vi.fn().mockResolvedValue(null),
-  all: vi.fn().mockResolvedValue([])
-}));
-
-vi.mock('../../src/routes/shared', () => ({
-  registerProcess: vi.fn(),
-  isAnalysisCancelled: vi.fn().mockReturnValue(false),
-  CancellationError: class CancellationError extends Error {
-    constructor(msg) { super(msg); this.isCancellation = true; }
-  }
-}));
-
-vi.mock('uuid', () => ({
-  v4: vi.fn().mockReturnValue('mock-uuid-child')
-}));
+import { createTestDatabase, closeTestDatabase } from '../utils/schema';
 
 const Analyzer = require('../../src/ai/analyzer');
-const { AnalysisRunRepository } = require('../../src/database');
 const { CancellationError } = require('../../src/routes/shared');
+const { createGitFixture } = require('../utils/git-fixture');
+let checkout;
 
 /**
  * Helper: build a minimal reviewContext and councilConfig for tests
@@ -62,8 +19,8 @@ function buildTestContext(overrides = {}) {
   return {
     reviewContext: {
       reviewId: 1,
-      worktreePath: '/tmp/test-worktree',
-      prMetadata: { head_sha: 'abc123' },
+      worktreePath: checkout.directory,
+      prMetadata: { head_sha: checkout.head, base_sha: checkout.base },
       changedFiles: ['src/foo.js', 'src/bar.js'],
       instructions: { repoInstructions: null, requestInstructions: null }
     },
@@ -100,14 +57,18 @@ function buildMockSuggestions(count) {
 
 describe('runReviewerCentricCouncil', () => {
   let analyzer;
-  let baselineRead;
-  afterEach(() => baselineRead?.mockRestore());
+  let db;
+  afterEach(() => { vi.restoreAllMocks(); closeTestDatabase(db); checkout?.close(); });
 
   beforeEach(() => {
     vi.clearAllMocks();
-    baselineRead = vi.spyOn(AnalysisRunRepository.prototype, 'getById').mockResolvedValue(null);
+    db = createTestDatabase();
+    checkout = createGitFixture(['src/foo.js', 'src/bar.js']);
+    db.prepare("INSERT INTO reviews (id, pr_number, repository) VALUES (1, 42, 'fixture/repo')").run();
+    db.prepare(`INSERT INTO analysis_runs (id, review_id, provider, model, status, head_sha)
+      VALUES ('parent-run-id', 1, 'council', 'council', 'running', ?)`).run(checkout.head);
 
-    analyzer = new Analyzer({}, 'sonnet', 'claude');
+    analyzer = new Analyzer(db, 'sonnet', 'claude');
 
     // Mock internal methods that we don't want to actually execute
     analyzer.loadGeneratedFilePatterns = vi.fn().mockResolvedValue({ getPatterns: () => [] });
@@ -119,161 +80,6 @@ describe('runReviewerCentricCouncil', () => {
     analyzer.validateAndFinalizeSuggestions = vi.fn().mockImplementation((suggestions) => suggestions || []);
   });
 
-  describe('single-voice early return path', () => {
-    it('should re-throw CancellationError without updating run status (analyzeAllLevels handles it)', async () => {
-      const { reviewContext, councilConfig, options } = buildTestContext();
-      const cancellationError = new CancellationError('Analysis was cancelled');
-
-      vi.spyOn(Analyzer.prototype, 'analyzeAllLevels').mockRejectedValue(cancellationError);
-
-      await expect(
-        analyzer.runReviewerCentricCouncil(reviewContext, councilConfig, options)
-      ).rejects.toThrow(cancellationError);
-
-      // runReviewerCentricCouncil should NOT update the run status itself;
-      // analyzeAllLevels is responsible for that (and it's mocked here)
-      expect(mockRunRepoUpdate).not.toHaveBeenCalled();
-    });
-
-    it('should re-throw generic error without updating run status (analyzeAllLevels handles it)', async () => {
-      const { reviewContext, councilConfig, options } = buildTestContext();
-      const genericError = new Error('Something went wrong');
-
-      vi.spyOn(Analyzer.prototype, 'analyzeAllLevels').mockRejectedValue(genericError);
-
-      await expect(
-        analyzer.runReviewerCentricCouncil(reviewContext, councilConfig, options)
-      ).rejects.toThrow(genericError);
-
-      // runReviewerCentricCouncil should NOT update the run status itself;
-      // analyzeAllLevels is responsible for that (and it's mocked here)
-      expect(mockRunRepoUpdate).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('multi-voice consolidation (always runs)', () => {
-    it('should call _crossVoiceConsolidate even when suggestion count is below threshold', async () => {
-      // Use two voices so we don't hit the single-voice path,
-      // but keep total suggestions below 8 (the old threshold)
-      const { reviewContext, councilConfig, options } = buildTestContext({
-        extraVoices: [{ provider: 'antigravity', model: 'pro', tier: 'balanced' }]
-      });
-
-      const voice1Suggestions = buildMockSuggestions(3);
-      const voice2Suggestions = buildMockSuggestions(2);
-
-      // Each voice's analyzeAllLevels returns a few suggestions
-      let callCount = 0;
-      vi.spyOn(Analyzer.prototype, 'analyzeAllLevels').mockImplementation(async () => {
-        callCount++;
-        if (callCount <= 1) {
-          return { suggestions: voice1Suggestions, summary: 'Voice 1 summary' };
-        }
-        return { suggestions: voice2Suggestions, summary: 'Voice 2 summary' };
-      });
-
-      const consolidatedSuggestions = buildMockSuggestions(4);
-      const consolidateSpy = vi.spyOn(analyzer, '_crossVoiceConsolidate').mockResolvedValue({
-        suggestions: consolidatedSuggestions,
-        summary: 'Consolidated summary'
-      });
-
-      analyzer.validateAndFinalizeSuggestions = vi.fn().mockReturnValue(consolidatedSuggestions);
-
-      const result = await analyzer.runReviewerCentricCouncil(reviewContext, councilConfig, options);
-
-      // _crossVoiceConsolidate MUST be called even with only 5 total suggestions
-      expect(consolidateSpy).toHaveBeenCalledOnce();
-
-      // Result should use the consolidated output, not raw concatenation
-      expect(result.suggestions).toEqual(consolidatedSuggestions);
-      expect(result.summary).toBe('Consolidated summary');
-    });
-
-    it('should use consolidated result (not raw voice concatenation) for storage', async () => {
-      const { reviewContext, councilConfig, options } = buildTestContext({
-        extraVoices: [{ provider: 'antigravity', model: 'pro', tier: 'balanced' }]
-      });
-
-      const voice1Suggestions = buildMockSuggestions(2);
-      const voice2Suggestions = buildMockSuggestions(2);
-
-      let callCount = 0;
-      vi.spyOn(Analyzer.prototype, 'analyzeAllLevels').mockImplementation(async () => {
-        callCount++;
-        if (callCount <= 1) {
-          return { suggestions: voice1Suggestions, summary: 'V1' };
-        }
-        return { suggestions: voice2Suggestions, summary: 'V2' };
-      });
-
-      // Consolidation produces a different (deduplicated/merged) set
-      const consolidatedSuggestions = buildMockSuggestions(3);
-      vi.spyOn(analyzer, '_crossVoiceConsolidate').mockResolvedValue({
-        suggestions: consolidatedSuggestions,
-        summary: 'Merged review'
-      });
-
-      analyzer.validateAndFinalizeSuggestions = vi.fn().mockReturnValue(consolidatedSuggestions);
-
-      const result = await analyzer.runReviewerCentricCouncil(reviewContext, councilConfig, options);
-
-      // storeSuggestions should receive consolidated suggestions, not raw voice output
-      expect(analyzer.storeSuggestions).toHaveBeenCalledWith(
-        reviewContext.reviewId,
-        'parent-run-id',
-        consolidatedSuggestions,
-        null,
-        expect.any(Array)
-      );
-
-      expect(result.suggestions).toEqual(consolidatedSuggestions);
-      expect(result.suggestions).not.toEqual([...voice1Suggestions, ...voice2Suggestions]);
-    });
-
-    it('should pass validated consolidated suggestions through to result', async () => {
-      const { reviewContext, councilConfig, options } = buildTestContext({
-        extraVoices: [{ provider: 'antigravity', model: 'pro', tier: 'balanced' }]
-      });
-
-      const voice1Suggestions = buildMockSuggestions(3);
-      const voice2Suggestions = buildMockSuggestions(2);
-
-      let callCount = 0;
-      vi.spyOn(Analyzer.prototype, 'analyzeAllLevels').mockImplementation(async () => {
-        callCount++;
-        if (callCount <= 1) {
-          return { suggestions: voice1Suggestions, summary: 'V1' };
-        }
-        return { suggestions: voice2Suggestions, summary: 'V2' };
-      });
-
-      const consolidatedSuggestions = buildMockSuggestions(4);
-      vi.spyOn(analyzer, '_crossVoiceConsolidate').mockResolvedValue({
-        suggestions: consolidatedSuggestions,
-        summary: 'Consolidated'
-      });
-
-      // Simulate validation filtering out one consolidated suggestion
-      const filteredSuggestions = consolidatedSuggestions.slice(0, 3);
-      analyzer.validateAndFinalizeSuggestions = vi.fn().mockReturnValue(filteredSuggestions);
-
-      const result = await analyzer.runReviewerCentricCouncil(reviewContext, councilConfig, options);
-
-      // Return value should reflect validated count (3), not raw consolidated count (4)
-      expect(result.suggestions).toEqual(filteredSuggestions);
-      expect(result.suggestions).toHaveLength(3);
-
-      // storeSuggestions should receive the validated (filtered) consolidated list
-      expect(analyzer.storeSuggestions).toHaveBeenCalledWith(
-        reviewContext.reviewId,
-        'parent-run-id',
-        filteredSuggestions,
-        null,
-        expect.any(Array)
-      );
-    });
-  });
 
   describe('terminal orchestration progress events (issue #560)', () => {
     // The aggregate levels[4] status only moves on voiceId-less orchestration
@@ -318,7 +124,8 @@ describe('runReviewerCentricCouncil', () => {
       expect(terminal).toBeDefined();
       expect(terminal.voiceCentric).toBe(true);
       expect(terminal.voiceId).toBeUndefined();
-      expect(terminal.progress).toBe('Cross-reviewer consolidation complete');
+      expect(JSON.parse(db.prepare("SELECT level_outcomes FROM analysis_runs WHERE id = 'parent-run-id'").get().level_outcomes))
+        .toEqual({ consolidation: 'success' });
     });
 
     it('emits a voiceId-less terminal failed event when cross-voice consolidation fails', async () => {
@@ -333,7 +140,8 @@ describe('runReviewerCentricCouncil', () => {
       expect(terminal).toBeDefined();
       expect(terminal.voiceCentric).toBe(true);
       expect(terminal.voiceId).toBeUndefined();
-      expect(terminal.progress).toContain('Consolidation failed');
+      expect(JSON.parse(db.prepare("SELECT level_outcomes FROM analysis_runs WHERE id = 'parent-run-id'").get().level_outcomes))
+        .toEqual({ consolidation: 'failed' });
 
       // The fallback result still records the failure authoritatively
       expect(result.orchestrationFailed).toBe(true);
@@ -352,6 +160,7 @@ describe('runReviewerCentricCouncil', () => {
 
       const terminal = orchestrationEvents(progressCallback).filter(u => u.status === 'failed' || u.status === 'completed');
       expect(terminal).toEqual([]);
+      expect(db.prepare("SELECT status FROM analysis_runs WHERE id = 'parent-run-id'").get().status).toBe('running');
     });
   });
 

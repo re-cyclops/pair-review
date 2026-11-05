@@ -55,6 +55,14 @@ const REVIEW_BY_ID_QUERY = `
   }
 `;
 
+const REVIEW_STATE_QUERY = `
+  query($nodeId: ID!) {
+    node(id: $nodeId) {
+      ... on PullRequestReview { id state submittedAt url }
+    }
+  }
+`;
+
 /**
  * GitHub allows only ONE pending review per user per PR, so this returns
  * either the single pending review or null if none exists.
@@ -123,22 +131,28 @@ async function getPendingReviewForUser(octokit, owner, repo, prNumber) {
  *
  * @param {Object} octokit - Octokit instance (must expose .graphql)
  * @param {string} nodeId - GraphQL node ID for the review
+ * @param {Object} [options]
+ * @param {boolean} [options.strict=false] - Throw errors other than confirmed absence
+ * @param {boolean} [options.includeComments=false] - Verify all comment pages for publication
  * @returns {Promise<Object|null>} Review data or null if not found
  */
-async function getReviewById(octokit, nodeId) {
+async function getReviewById(octokit, nodeId, { strict = false, includeComments = false } = {}) {
   let cursor = null;
-  let review = null;
   const comments = [];
   for (let page = 0; page < 100; page++) {
     let result;
     try {
-      result = await octokit.graphql(REVIEW_BY_ID_QUERY, { nodeId, cursor });
+      result = await octokit.graphql(includeComments ? REVIEW_BY_ID_QUERY : REVIEW_STATE_QUERY,
+        includeComments ? { nodeId, cursor } : { nodeId });
     } catch (error) {
-      if (error.status === 404 || error.errors?.some(item => item.type === 'NOT_FOUND')) return null;
-      throw error;
+      if (error.status === 404 || error.errors?.length && error.errors.every(item => item.type === 'NOT_FOUND')) return null;
+      if (strict) throw error;
+      logger.warn(`Error fetching review ${nodeId}: ${error.message}`);
+      return null;
     }
-    if (!result.node) return null;
-    review = result.node;
+    const review = result.node;
+    if (!review) return null;
+    if (!includeComments) return { id: review.id, state: review.state, submittedAt: review.submittedAt, url: review.url };
     const connection = review.comments;
     if (!Array.isArray(connection?.nodes) || !connection.pageInfo) throw new Error('Remote review comments are unavailable');
     for (const comment of connection.nodes) {

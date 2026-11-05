@@ -1456,12 +1456,33 @@
   z-index: 4;
 }
 
+/* Truncation also comes from .smart-truncate; kept here in case JS doesn't apply it */
 .d2h-file-name {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 1.4;
+}
+
+/* Smart truncation (js/utils/smart-truncate.js) */
+.smart-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* Front truncation: RTL box clips on the left; isolated LTR text keeps order */
+.smart-truncate--start {
+  direction: rtl;
+  text-align: left;
+}
+
+.smart-truncate--start > .smart-truncate__text {
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 
 /* File header comment button and file header chat button */
@@ -1835,10 +1856,6 @@ body:not(.tour-active) #diff-container [data-annotation-slot] {
     display: flex !important;
   }
 
-  #pr-container {
-    padding: 16px;
-  }
-  
   .pr-header {
     flex-direction: column;
     align-items: stretch;
@@ -2101,6 +2118,8 @@ tr.newly-expanded .d2h-code-line-ctn {
   font-weight: 600;
   background: var(--ai-subtle, rgba(245, 158, 11, 0.1));
   color: var(--ai-primary, #f59e0b);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .ai-suggestion.ai-type-praise .praise-badge svg {
@@ -2196,13 +2215,12 @@ tr.newly-expanded .d2h-code-line-ctn {
   border-left-color: var(--category-security);
 }
 
+/* Truncation comes from .smart-truncate. Titles (which show the full text on
+   hover) shrink before the badges beside them. */
 .ai-title {
   font-weight: 600;
   color: var(--color-text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
+  flex-shrink: 1000;
 }
 
 /* Confidence display removed to match cleaner prototype design (issue pair_review-7g5) */
@@ -2660,13 +2678,10 @@ tr.newly-expanded .d2h-code-line-ctn {
   position: relative;
 }
 
+/* Truncation comes from .smart-truncate; shrinks first, like .ai-title */
 .collapsed-title {
-  flex: 0 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  flex: 0 1000 auto;
   color: var(--color-text-secondary);
-  min-width: 0;
   font-size: 13px;
 }
 
@@ -5343,6 +5358,311 @@ div.external-comment-row {
   font-size: 14px;
 }
 
+.review-modal-body .hide-posted-comments-option {
+  margin-top: 0;
+  color: var(--color-text-secondary, #57606a);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.hide-posted-override-hint {
+  margin-left: 4px;
+  font-size: 12px;
+  color: var(--color-text-tertiary, #6e7781);
+}
+
+.posted-comment-hidden {
+  display: none !important;
+}
+
+.posted-comment-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--color-text-secondary, #57606a);
+  opacity: 0.7;
+}
+
+a.posted-comment-icon:hover,
+a.posted-comment-icon:focus-visible {
+  opacity: 1;
+  color: var(--color-accent-fg, #0969da);
+}
+
+/* "Edited since posted" note and "Update on GitHub" action */
+.posted-comment-edited {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary, #57606a);
+}
+
+.editing-mode .posted-comment-edited {
+  display: none;
+}
+
+.posted-comment-edited-label {
+  font-style: italic;
+}
+
+.btn-update-on-host {
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 18px;
+  border: 1px solid var(--color-border-primary, #d0d7de);
+  border-radius: 6px;
+  background: var(--color-bg-secondary, #f6f8fa);
+  color: var(--color-text-primary, #24292f);
+  cursor: pointer;
+}
+
+.btn-update-on-host:hover:not(:disabled) {
+  background: var(--color-bg-tertiary, #eaeef2);
+}
+
+.btn-update-on-host:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.posted-comment-update-error {
+  flex-basis: 100%;
+  color: var(--color-danger, #cf222e);
+}
+
+.review-modal-body .update-edited-comments-option {
+  margin-top: 0;
+  color: var(--color-text-secondary, #57606a);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.update-edited-comments-option[hidden],
+.hide-posted-comments-option[hidden] {
+  display: none;
+}
+
+/* Keep these toggle-styled checkboxes keyboard accessible. */
+.review-modal-body .update-edited-comments-option input,
+.review-modal-body .hide-posted-comments-option input {
+  display: block;
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+}
+
+.review-modal-body .update-edited-comments-option input:focus-visible + .toggle-switch,
+.review-modal-body .hide-posted-comments-option input:focus-visible + .toggle-switch {
+  outline: 2px solid var(--color-accent-fg, #0969da);
+  outline-offset: 2px;
+}
+
+/* Review history modal */
+.review-history-modal-container {
+  background: var(--color-bg-primary, white);
+  border-radius: 16px;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(0, 0, 0, 0.05);
+  max-width: 760px;
+  width: 90%;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.review-history-body {
+  overflow-y: auto;
+  padding: 16px 24px 24px;
+}
+
+.review-history-list,
+.review-history-comments {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.review-history-submission {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--color-border-secondary, #d8dee4);
+}
+
+.review-history-submission:last-child {
+  border-bottom: none;
+}
+
+.review-history-row {
+  position: relative;
+  padding: 0;
+}
+
+.review-history-row-button {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  padding: 16px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-primary, #24292f);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.review-history-row-button:hover {
+  background: var(--color-bg-secondary, #f6f8fa);
+}
+
+.review-history-row-button:focus-visible,
+.review-history-back:focus-visible {
+  outline: 2px solid var(--color-text-link, #0969da);
+  outline-offset: -2px;
+}
+
+.review-history-row .review-history-link {
+  position: absolute;
+  right: 12px;
+  top: 20px;
+}
+
+.review-history-row .review-history-submission-header {
+  padding-right: 110px;
+}
+
+.review-history-counts {
+  font-size: 12px;
+  color: var(--color-text-secondary, #57606a);
+}
+
+.review-history-summary-preview {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+}
+
+.review-history-back {
+  border: 0;
+  background: transparent;
+  color: var(--color-text-link, #0969da);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  margin-right: 12px;
+  padding: 6px;
+}
+
+.review-history-submission-header,
+.review-history-comment-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.review-history-time {
+  color: var(--color-text-secondary, #57606a);
+  font-size: 12px;
+}
+
+.review-history-link {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--color-text-link, #0969da);
+}
+
+.review-history-chip {
+  display: inline-block;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 20px;
+  border: 1px solid var(--color-border-primary, #d0d7de);
+  background: var(--color-bg-secondary, #f6f8fa);
+  color: var(--color-text-primary, #24292f);
+}
+
+.review-history-chip-approve {
+  border-color: var(--color-success, #1a7f37);
+  color: var(--color-success, #1a7f37);
+}
+
+.review-history-chip-request-changes {
+  border-color: var(--color-danger, #cf222e);
+  color: var(--color-danger, #cf222e);
+}
+
+.review-history-chip-edited,
+.review-history-chip-dismissed,
+.review-history-chip-draft {
+  color: var(--color-text-secondary, #57606a);
+}
+
+.review-history-summary {
+  margin-top: 8px;
+  font-size: 14px;
+}
+
+.review-history-comments {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.review-history-comment {
+  padding: 16px;
+  border: 1px solid var(--color-border-secondary, #d8dee4);
+  border-radius: 8px;
+}
+
+.review-history-comment[data-jump-comment-id] {
+  cursor: pointer;
+}
+
+.review-history-comment[data-jump-comment-id]:hover,
+.review-history-comment[data-jump-comment-id]:focus-visible {
+  background: var(--color-bg-secondary, #f6f8fa);
+}
+
+.review-history-comment-file {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.review-history-comment-line,
+.review-history-no-comments,
+.review-history-empty,
+.review-history-loading {
+  color: var(--color-text-secondary, #57606a);
+  font-size: 12px;
+}
+
+.review-history-comment-body {
+  margin-top: 16px;
+}
+
+.review-history-comment-body > :last-child {
+  margin-bottom: 0;
+}
+
+.review-history-error {
+  color: var(--color-danger, #cf222e);
+}
+
+[data-theme="dark"] .review-history-modal-container {
+  background: #0d1117;
+  box-shadow: 0 16px 32px rgba(0, 0, 0, 0.5);
+}
+
 .review-modal-footer {
   padding: 16px 24px;
   border-top: 1px solid #d1d9e0;
@@ -6028,6 +6348,11 @@ div.external-comment-row {
   --sidebar-width: 260px;
   --ai-panel-width: 320px;
   --chat-panel-width: 0px;
+
+  /* Set to 1 by the breakpoints below when a panel can only float as a drawer.
+     Read by PRManager.setupSidebarToggle / PanelGroup, so breakpoints stay in CSS. */
+  --sidebar-overlay-only: 0;
+  --right-panel-group-overlay-only: 0;
 
   /* Transitions */
   --transition-fast: 0.1s ease;
@@ -7140,6 +7465,11 @@ body:not([data-theme="dark"]) .theme-icon-light {
   z-index: 11;
 }
 
+/* Open comment filter menu must overlay the sections below the segment row */
+.ai-panel > .segment-control.comment-filter-open {
+  z-index: 11;
+}
+
 /* Prevent text selection during drag */
 body.resizing {
   user-select: none;
@@ -7169,13 +7499,8 @@ body.resizing * {
   display: flex;
 }
 
-/* Ensure toggle buttons show when panels are collapsed via responsive rules */
-@media (max-width: 900px) {
-  #ai-panel-toggle,
-  #chat-toggle-btn {
-    display: flex;
-  }
-}
+/* While the panels float as an overlay drawer both toggles stay visible
+   (see "Overlay Drawers" in the responsive section) */
 
 /* --------------------------------------------------------------------------
    Right Panel Group (Review + Chat)
@@ -7195,12 +7520,6 @@ body.resizing * {
   display: contents;
 }
 
-/* When both panels are hidden */
-.right-panel-group.group-collapsed {
-  width: 0;
-  overflow: hidden;
-}
-
 /* Horizontal layouts */
 .right-panel-group.layout-h-review-chat { flex-direction: row; }
 .right-panel-group.layout-h-review-chat .ai-panel { order: 1; }
@@ -7218,6 +7537,13 @@ body.resizing * {
   width: max(var(--ai-panel-width), var(--chat-panel-width));
 }
 
+/* When both panels are hidden. Must follow the vertical layout rules above:
+   same specificity, so a later width there would win and leave an empty box. */
+.right-panel-group.group-collapsed {
+  width: 0;
+  overflow: hidden;
+}
+
 .right-panel-group.layout-v-review-chat .ai-panel { order: 0; }
 .right-panel-group.layout-v-review-chat .panel-group-divider { order: 1; }
 .right-panel-group.layout-v-review-chat .chat-panel { order: 2; }
@@ -7231,6 +7557,18 @@ body.resizing * {
   width: 100% !important;
   flex: 1 1 0;
   min-height: 0;
+}
+
+/* Short stacks need one scroll surface: fixed controls and revision notices
+   must not shrink the findings viewport to zero. Open menus still escape
+   their anchors instead of being clipped by that scroll surface. */
+.right-panel-group[class*="layout-v-"] .ai-panel:not(:has(.analysis-context.open, .comment-filter-open)) {
+  overflow-y: auto;
+}
+
+.right-panel-group[class*="layout-v-"] .ai-panel:not(:has(.analysis-context.open, .comment-filter-open)) :is(.findings-summary, .findings-list) {
+  flex: 0 0 auto;
+  overflow: visible;
 }
 
 /* In vertical mode, chat panel has top border instead of left */
@@ -8750,8 +9088,15 @@ body.resizing * {
   display: none;
 }
 
-/* Filter Toggle Button - shows dismissed user comments */
-.filter-toggle-btn {
+/* Comment filter menu: a funnel at the right of the segment row that opens
+   labeled options for user comments (show dismissed, show posted). */
+.comment-filter {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.comment-filter-btn {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -8764,28 +9109,105 @@ body.resizing * {
   color: var(--color-text-tertiary);
   cursor: pointer;
   transition: var(--transition-ui-fast);
-  flex-shrink: 0;
 }
 
-.filter-toggle-btn:hover {
+.comment-filter-btn:hover,
+.comment-filter-btn[aria-expanded="true"] {
   color: var(--color-text-secondary);
   background: var(--color-bg-tertiary);
   border-color: var(--color-border-secondary);
 }
 
-.filter-toggle-btn.active {
-  color: var(--comment-primary);
-  background: var(--comment-subtle);
-  border-color: var(--comment-border);
+.comment-filter-btn svg {
+  width: 14px;
+  height: 14px;
 }
 
-.filter-toggle-btn.hidden {
+/* Flat dot: some filter option differs from its default */
+.comment-filter-dot {
+  display: none;
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--comment-primary);
+}
+
+.comment-filter-btn.has-active-filter {
+  color: var(--comment-primary);
+}
+
+.comment-filter-btn.has-active-filter .comment-filter-dot {
+  display: block;
+}
+
+.comment-filter-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 100;
+  min-width: 160px;
+  padding: 6px 0;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border-primary);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+
+.comment-filter-menu[hidden] {
   display: none;
 }
 
-.filter-toggle-btn svg {
-  width: 14px;
-  height: 14px;
+.comment-filter-menu-title {
+  padding: 2px 12px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.comment-filter-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 13px;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.comment-filter-option:hover {
+  background: var(--color-bg-tertiary);
+}
+
+.comment-filter-option input {
+  margin: 0;
+  accent-color: var(--comment-primary);
+}
+
+/* Muted line at the end of the user comment list when filters hide some */
+.hidden-comments-notice {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  text-align: center;
+}
+
+.hidden-comments-show {
+  padding: 0;
+  background: none;
+  border: none;
+  font: inherit;
+  color: var(--color-text-link, var(--comment-primary));
+  cursor: pointer;
+}
+
+.hidden-comments-show:hover {
+  text-decoration: underline;
 }
 
 /* Level Filter Pills */
@@ -9645,8 +10067,8 @@ body.resizing * {
 
    Standard Breakpoints:
    - 1400px: Large desktop - reduce AI panel width
-   - 1200px: Desktop - hide sidebar, show collapsed toggle
-   - 900px:  Small desktop/large tablet - hide AI panel and header center
+   - 1200px: Desktop - file navigator only opens as a drawer (.sidebar--overlay-open)
+   - 900px:  Small desktop/large tablet - Review/Chat always float as a drawer; hide header center
    - 768px:  Tablet - hide breadcrumb, simplify toolbar (hide separator/commit)
    - 480px:  Mobile - (reserved for future mobile-specific styles)
 
@@ -9660,6 +10082,10 @@ body.resizing * {
 }
 
 @media (max-width: 1200px) {
+  :root {
+    --sidebar-overlay-only: 1;
+  }
+
   .main-layout {
     --sidebar-width: 0px;
   }
@@ -9671,17 +10097,41 @@ body.resizing * {
   .diff-toolbar .sidebar-toggle-collapsed {
     display: flex;
   }
+
+  /* File navigator drawer (transient, see PRManager.setupSidebarToggle). Overrides
+     the display:none above, the 768px .files-sidebar rule and .collapsed. */
+  .main-layout .sidebar.sidebar--overlay-open {
+    display: flex;
+    position: absolute;
+    top: var(--overlay-drawer-top);
+    bottom: 0;
+    left: 0;
+    /* Above the Review/Chat drawer (25): it's transient, so it's the one in use */
+    z-index: 26;
+    width: min(300px, calc(100% - 48px));
+    padding: 0;
+    border-right: 1px solid var(--color-border-primary);
+    box-shadow: 8px 0 24px rgba(0, 0, 0, 0.12);
+    overflow: hidden;
+  }
+
+  /* Drawer width is fixed; drag-resizing only applies to the docked sidebar */
+  .main-layout .sidebar.sidebar--overlay-open > .resize-handle {
+    display: none;
+  }
+
+  [data-theme="dark"] .main-layout .sidebar.sidebar--overlay-open {
+    box-shadow: 8px 0 24px rgba(0, 0, 0, 0.45);
+  }
 }
 
 @media (max-width: 900px) {
-  .main-layout {
-    --right-panel-group-width: 0px;
+  :root {
+    --right-panel-group-overlay-only: 1;
   }
 
-  .right-panel-group,
-  .ai-panel,
-  .chat-panel {
-    display: none;
+  .main-layout {
+    --right-panel-group-width: 0px;
   }
 
   .header-center {
@@ -9701,6 +10151,85 @@ body.resizing * {
   .header {
     justify-content: space-between;
   }
+}
+
+/* Overlay Drawers: panels that can't dock float over the diff, below the toolbar
+   (.sidebar--overlay-open, .right-panel-group--overlay set by PanelGroup).
+   z-index: drawers 25/26 < toolbar 27 (so its dropdowns paint on top) < tour bar 28. */
+:root {
+  --overlay-drawer-top: var(--toolbar-height, 57px);
+}
+
+body.tour-active {
+  --overlay-drawer-top: calc(var(--toolbar-height, 57px) + var(--tour-bar-offset));
+}
+
+/* Containing block for the drawers */
+.main-layout:has(> .sidebar--overlay-open),
+.main-layout:has(> .right-panel-group--overlay) {
+  position: relative;
+}
+
+/* Out-specify the base rules (.tour-bar is declared later at z-index 6) */
+.main-layout:has(> .sidebar--overlay-open) .diff-toolbar,
+.main-layout:has(> .right-panel-group--overlay) .diff-toolbar {
+  z-index: 27;
+}
+
+.main-layout:has(> .sidebar--overlay-open) .tour-bar,
+.main-layout:has(> .right-panel-group--overlay) .tour-bar {
+  z-index: 28;
+}
+
+/* Review/Chat drawer */
+.right-panel-group.right-panel-group--overlay {
+  position: absolute;
+  top: var(--overlay-drawer-top);
+  right: 0;
+  bottom: 0;
+  height: auto;
+  max-width: 100%;
+  z-index: 25;
+  background: var(--color-bg-primary);
+}
+
+.right-panel-group--overlay:not(.group-collapsed) {
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.12);
+}
+
+[data-theme="dark"] .right-panel-group--overlay:not(.group-collapsed) {
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.45);
+}
+
+/* A forced stack is a temporary display state: resizing it would overwrite the
+   saved side-by-side widths (the group handle sets both panels to one width) */
+.right-panel-group.right-panel-group--forced-stack .panel-group-resize-handle {
+  display: none;
+}
+
+/* Side-by-side panels shrink to share the drawer instead of overflowing */
+.right-panel-group--overlay .ai-panel,
+.right-panel-group--overlay .chat-panel {
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+/* Keep both toggles visible while floating so they can close the drawer too
+   (disabled chat still hides #chat-toggle-btn via an !important rule) */
+.main-layout:has(> .right-panel-group--overlay) #ai-panel-toggle,
+.main-layout:has(> .right-panel-group--overlay) #chat-toggle-btn {
+  display: flex;
+}
+
+/* ...and give the Review toggle an active state like Chat's */
+.main-layout:has(> .right-panel-group--overlay .ai-panel:not(.collapsed)) #ai-panel-toggle {
+  background: var(--ai-subtle, rgba(217, 119, 6, 0.08));
+  border-color: var(--ai-primary, #d97706);
+}
+
+[data-theme="dark"] .main-layout:has(> .right-panel-group--overlay .ai-panel:not(.collapsed)) #ai-panel-toggle {
+  background: var(--ai-subtle, rgba(245, 158, 11, 0.1));
+  border-color: var(--ai-primary, #f59e0b);
 }
 
 @media (max-width: 768px) {
@@ -9763,7 +10292,7 @@ body.resizing * {
    Zone is invisible when empty - styling only applied when has content via :has() */
 
 /* Conditional styling - only show background/border when zone has actual content */
-.file-comments-zone:has(.file-comment-card),
+.file-comments-zone:has(.file-comment-card:not(.posted-comment-hidden)),
 .file-comments-zone:has(.file-comment-form),
 .file-comments-zone:has(.external-comment-row) {
   background: var(--file-comment-bg);
@@ -9778,7 +10307,7 @@ body.resizing * {
 }
 
 /* Only add padding when container has visible content */
-.file-comments-container:has(.file-comment-card),
+.file-comments-container:has(.file-comment-card:not(.posted-comment-hidden)),
 .file-comments-container:has(.file-comment-form),
 .file-comments-container:has(.external-comment-row) {
   padding: 12px 16px;
@@ -12241,13 +12770,6 @@ body.resizing * {
   border-color: rgba(248, 81, 73, 0.2);
 }
 
-/* Responsive: narrower on small screens */
-@media (max-width: 768px) {
-  .chat-panel {
-    width: 100% !important;
-  }
-}
-
 /* ==========================================================================
    Context Files
    Pinned non-diff file ranges shown below the diff for review context
@@ -12305,12 +12827,9 @@ body.resizing * {
   font-size: 14px;
 }
 
-/* Don't grow (keeps badge next to text), shrink for long paths, clip from the left so the filename stays visible */
+/* Don't grow (keeps badge next to text), shrink for long paths */
 .context-file-header .d2h-file-name {
   flex: 0 1 auto;
-  direction: rtl;
-  unicode-bidi: plaintext;
-  text-overflow: ellipsis;
 }
 
 /* Push viewed checkbox (and everything after it) to the right */
@@ -13652,6 +14171,9 @@ body.tour-active .tour-annotation-row.active-stop .tour-annotation {
      vertical padding). The bar also sets `min-height: var(--tour-bar-height)`
      so its actual rendered height never drops below this value. */
   --tour-bar-height: 56px;
+  /* Live bar height (it grows when contents wrap), published by
+     PRManager._trackTourBarHeight. Kept out of min-height so the bar can shrink. */
+  --tour-bar-offset: var(--tour-bar-rendered-height, var(--tour-bar-height));
 }
 
 /* While a tour is active, push the sticky `.diff-toolbar` and the
@@ -13659,13 +14181,13 @@ body.tour-active .tour-annotation-row.active-stop .tour-annotation {
    below it instead of overlapping. The bar itself is `position: sticky;
    top: 0` inside the same scroll container (.main-layout .diff-view),
    so all three pin in order: tour bar (top: 0), diff toolbar (top:
-   --tour-bar-height), file header (top: --toolbar-height + --tour-bar-height). */
+   --tour-bar-offset), file header (top: --toolbar-height + --tour-bar-offset). */
 body.tour-active .diff-toolbar {
-  top: var(--tour-bar-height);
+  top: var(--tour-bar-offset);
 }
 
 body.tour-active .d2h-file-header {
-  top: calc(var(--toolbar-height, 0px) + var(--tour-bar-height));
+  top: calc(var(--toolbar-height, 0px) + var(--tour-bar-offset));
 }
 
 .tour-bar {
@@ -14126,34 +14648,8 @@ diffs-container {
   .finding-reanchor-form select { min-height: 44px; }
 }
 
-/* On narrow detail screens findings occupy the main pane, not a hidden rail. */
+/* Keep narrow-screen toolbar controls readable; PanelGroup owns drawers. */
 @media (max-width: 900px) {
-  .main-layout:has(.ai-panel:not(.collapsed)) > .diff-view {
-    display: none;
-  }
-  .main-layout .right-panel-group:has(.ai-panel:not(.collapsed)) {
-    display: flex;
-    flex: 1 1 100%;
-    width: 100%;
-    min-width: 0;
-    max-width: 100%;
-    height: 100%;
-    overflow: hidden;
-  }
-  .main-layout .right-panel-group .ai-panel:not(.collapsed) {
-    display: flex;
-    flex: 1 1 100%;
-    width: 100%;
-    min-width: 0;
-    max-width: 100%;
-    height: 100%;
-    min-height: 0;
-    overflow: hidden;
-    border-left: 0;
-  }
-  .main-layout .right-panel-group:has(.ai-panel:not(.collapsed)) :is(.panel-group-divider, .panel-group-resize-handle, .resize-handle, .chat-panel) {
-    display: none;
-  }
   #ai-panel-close {
     min-width: 44px;
     min-height: 44px;

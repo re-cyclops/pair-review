@@ -1,7 +1,9 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
-import { describe, it, expect } from 'vitest';
-import { execSync } from 'child_process';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { execSync, execFileSync, spawnSync } from 'child_process';
 import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
 
 const {
   annotateDiff,
@@ -74,6 +76,17 @@ describe('diff-annotator', () => {
       expect(parseHunkHeader('@@invalid@@')).toBeNull();
       expect(parseHunkHeader('')).toBeNull();
     });
+
+    it('should parse a header whose context contains a carriage return', () => {
+      // git keeps a lone `\r` inside the function-context line.
+      expect(parseHunkHeader('@@ -3,2 +3,2 @@ function foo() {\r  // x')).toEqual({
+        oldStart: 3,
+        oldCount: 2,
+        newStart: 3,
+        newCount: 2,
+        context: 'function foo() {\r  // x'
+      });
+    });
   });
 
   describe('formatLineNum', () => {
@@ -134,6 +147,30 @@ describe('diff-annotator', () => {
   });
 
   describe('annotateDiff', () => {
+    it('labels files with decoded paths when git quoted the headers', () => {
+      const { QUOTEPATH_FALSE_DIFF, QUOTEPATH_TRUE_DIFF } = require('../utils/git-path-fixtures');
+
+      const current = annotateDiff(QUOTEPATH_FALSE_DIFF);
+      expect(current).toContain('=== quo"te.js ===');
+      expect(current).toContain('=== x b/y.js ===');
+      expect(current).toContain('=== a => b.md ===');
+      expect(current).toContain('=== lib/moved.js -> ñew dir/moved é.js ===');
+      expect(current).not.toContain('\t ===');
+
+      const cached = annotateDiff(QUOTEPATH_TRUE_DIFF);
+      expect(cached).toContain('=== src/café.js ===');
+      expect(cached).toContain('=== lib/moved.js -> ñew dir/moved é.js ===');
+      expect(cached).not.toContain('\\303');
+    });
+
+    it('labels a rename out of a path containing " b/" with its rename lines', () => {
+      const { B_SLASH_RENAME_DIFF } = require('../utils/git-path-fixtures');
+
+      const annotated = annotateDiff(B_SLASH_RENAME_DIFF);
+      expect(annotated).toContain('=== x b/y.js -> z.js ===');
+      expect(annotated).not.toContain('y.js b/z.js');
+    });
+
     it('should return empty string for empty input', () => {
       expect(annotateDiff('')).toBe('');
       expect(annotateDiff('   ')).toBe('');
@@ -758,6 +795,368 @@ index abc123..def456 100644
         context: 'function example() {'
       });
     });
+  });
+});
+
+describe('annotateDiff: hunk bodies that look like file headers', () => {
+  // Same real-git fixture as tests/unit/diff-line-set.test.js. `annotateDiff`
+  // shares `parseFileHeader` with `buildDiffLineSet` and had the identical
+  // ordering bug: header parsing ran BEFORE the `!inHunk` guard, so a deleted
+  // `-- x` line (emitted as `--- x`) and an added `++ x` (emitted as `+++ x`)
+  // were swallowed as headers — dropped from the output entirely and, worse,
+  // never counted, so every later line number in the file was off by one.
+  const rawDiff = [
+    'diff --git a/notes.md b/notes.md',
+    'index c332251ce08631f085ed4b4552e8b906ccff3fb1..ab9c79d312d0e50e0e15be7e62344cbf4112def1 100644',
+    '--- a/notes.md',
+    '+++ b/notes.md',
+    '@@ -1,4 +1,5 @@',
+    ' line one',
+    '--- deleted marker',
+    '+++ added marker',
+    ' line three',
+    '+++i;',
+    ' line four',
+    ''
+  ].join('\n');
+
+  it('titles the section with the real path, not a fragment of the body', () => {
+    const result = annotateDiff(rawDiff);
+    expect(result).toContain('=== notes.md ===');
+    expect(result).not.toContain('=== added marker ===');
+  });
+
+  it('emits the disguised lines as content with correct numbering', () => {
+    const parsed = parseAnnotatedDiff(annotateDiff(rawDiff));
+    expect(parsed.length).toBe(1);
+    expect(parsed[0].path).toBe('notes.md');
+
+    const content = parsed[0].lines.filter(l => l.type !== 'hunk');
+    expect(content).toEqual([
+      { oldLineNum: 1, newLineNum: 1, type: 'context', content: 'line one' },
+      { oldLineNum: 2, newLineNum: null, type: 'delete', content: '-- deleted marker' },
+      { oldLineNum: null, newLineNum: 2, type: 'add', content: '++ added marker' },
+      { oldLineNum: 3, newLineNum: 3, type: 'context', content: 'line three' },
+      { oldLineNum: null, newLineNum: 4, type: 'add', content: '++i;' },
+      { oldLineNum: 4, newLineNum: 5, type: 'context', content: 'line four' }
+    ]);
+  });
+
+  it('keeps annotating the next file after such a body', () => {
+    const twoFiles = `${rawDiff}${[
+      'diff --git a/after.js b/after.js',
+      '--- a/after.js',
+      '+++ b/after.js',
+      '@@ -10,2 +10,3 @@',
+      ' keep',
+      '+added',
+      ' tail',
+      ''
+    ].join('\n')}`;
+    const parsed = parseAnnotatedDiff(annotateDiff(twoFiles));
+    expect(parsed.map(f => f.path)).toEqual(['notes.md', 'after.js']);
+    const added = parsed[1].lines.find(l => l.type === 'add');
+    expect(added).toEqual({
+      oldLineNum: null, newLineNum: 11, type: 'add', content: 'added'
+    });
+  });
+
+  it('reads a `--unified=0` delete/add pair before the next hunk as content', () => {
+    // With no context lines, a hunk can end on a `--- x` / `+++ y` pair that
+    // runs straight into the next `@@`. Inside the hunk, the pair is content.
+    const diff = [
+      'diff --git a/q.sql b/q.sql',
+      '--- a/q.sql',
+      '+++ b/q.sql',
+      '@@ -3 +3 @@',
+      '--- old comment',
+      '+++ new comment',
+      '@@ -10 +10 @@',
+      '-a',
+      '+b',
+      ''
+    ].join('\n');
+    const parsed = parseAnnotatedDiff(annotateDiff(diff));
+    expect(parsed.map(f => f.path)).toEqual(['q.sql']);
+    expect(parsed[0].lines.filter(l => l.type !== 'hunk')).toEqual([
+      { oldLineNum: 3, newLineNum: null, type: 'delete', content: '-- old comment' },
+      { oldLineNum: null, newLineNum: 3, type: 'add', content: '++ new comment' },
+      { oldLineNum: 10, newLineNum: null, type: 'delete', content: 'a' },
+      { oldLineNum: null, newLineNum: 10, type: 'add', content: 'b' }
+    ]);
+  });
+
+  it('numbers a hunk whose `@@` context contains a carriage return', () => {
+    // Without dotAll the header was rejected, so its lines were numbered as a
+    // continuation of the previous hunk instead of from line 20.
+    const diff = [
+      'diff --git a/f.js b/f.js',
+      '--- a/f.js',
+      '+++ b/f.js',
+      '@@ -1,2 +1,2 @@',
+      ' a',
+      '-b',
+      '+B',
+      '@@ -20,2 +20,2 @@ function foo() {\r  // x',
+      ' c',
+      '-d',
+      '+D',
+      ''
+    ].join('\n');
+    const parsed = parseAnnotatedDiff(annotateDiff(diff));
+    expect(parsed[0].lines.filter(l => l.type !== 'hunk').slice(3)).toEqual([
+      { oldLineNum: 20, newLineNum: 20, type: 'context', content: 'c' },
+      { oldLineNum: 21, newLineNum: null, type: 'delete', content: 'd' },
+      { oldLineNum: null, newLineNum: 21, type: 'add', content: 'D' }
+    ]);
+  });
+
+  it('keeps `\\ No newline` markers, omitted counts and zero counts in step', () => {
+    const diff = [
+      'diff --git a/one.sql b/one.sql',
+      '--- a/one.sql',
+      '+++ b/one.sql',
+      '@@ -3 +3 @@',
+      '--- was a comment',
+      '\\ No newline at end of file',
+      '+++y',
+      '\\ No newline at end of file',
+      'diff --git a/gone.sql b/gone.sql',
+      'deleted file mode 100644',
+      '--- a/gone.sql',
+      '+++ /dev/null',
+      '@@ -1,2 +0,0 @@',
+      '--- only comment',
+      '-SELECT 1;',
+      ''
+    ].join('\n');
+    const result = annotateDiff(diff);
+    expect(result).toContain('   3 |   -- | [-] -- was a comment');
+    expect(result).toContain('  -- |    3 | [+] ++y');
+    expect(result.match(/\\ No newline at end of file/g)).toHaveLength(2);
+    const parsed = parseAnnotatedDiff(result);
+    expect(parsed.map(f => f.path)).toEqual(['one.sql', 'gone.sql']);
+    expect(parsed[1].lines.filter(l => l.type !== 'hunk')).toEqual([
+      { oldLineNum: 1, newLineNum: null, type: 'delete', content: '-- only comment' },
+      { oldLineNum: 2, newLineNum: null, type: 'delete', content: 'SELECT 1;' }
+    ]);
+  });
+});
+
+describe('git-diff-lines on a real repo with header-like hunk content', () => {
+  // End to end through real `git diff`: both the Node CLI (which uses
+  // annotateDiff) and the code-critic plugin's standalone awk port must number
+  // a removed SQL `-- comment` and an added `++x` as ordinary content.
+  const projectRoot = path.resolve(__dirname, '../..');
+  const nodeScript = path.join(projectRoot, 'bin', 'git-diff-lines');
+  const pluginScript = path.join(projectRoot, 'plugin-code-critic', 'skills', 'analyze', 'scripts', 'git-diff-lines');
+  let tempDir;
+  let repo;
+  let env;
+
+  beforeAll(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'git-diff-lines-hdr-'));
+    repo = path.join(tempDir, 'repo');
+    fs.mkdirSync(repo);
+    // Isolated HOME so the developer's git config (diff.noprefix, colour,
+    // external diff drivers) cannot change the diff being annotated.
+    env = {
+      ...process.env,
+      HOME: tempDir,
+      XDG_CONFIG_HOME: tempDir,
+      GIT_CONFIG_NOSYSTEM: '1',
+      PAIR_REVIEW_NO_OPEN: '1'
+    };
+    const git = (...args) => execFileSync('git', args, { cwd: repo, env, stdio: 'pipe' });
+    git('init', '-q');
+    git('config', 'user.email', 'test@test.com');
+    git('config', 'user.name', 'Test');
+    fs.writeFileSync(path.join(repo, 'queries.sql'),
+      'SELECT 1;\n-- old comment\nSELECT 2;\nSELECT 3;\n');
+    fs.writeFileSync(path.join(repo, 'z-after.js'), 'a\nb\nc\n');
+    git('add', '.');
+    git('commit', '-q', '-m', 'initial');
+    fs.writeFileSync(path.join(repo, 'queries.sql'),
+      'SELECT 1;\n++x\n++ y\nSELECT 2;\nSELECT 3;\nSELECT 4;\n');
+    fs.writeFileSync(path.join(repo, 'z-after.js'), 'a\nb\nc\nd\n');
+  });
+
+  afterAll(() => {
+    if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const expectedQueries = [
+    '=== queries.sql ===',
+    ' OLD | NEW |',
+    '@@ -1,4 +1,6 @@',
+    '   1 |    1 |     SELECT 1;',
+    '   2 |   -- | [-] -- old comment',
+    '  -- |    2 | [+] ++x',
+    '  -- |    3 | [+] ++ y',
+    '   3 |    4 |     SELECT 2;',
+    '   4 |    5 |     SELECT 3;',
+    '  -- |    6 | [+] SELECT 4;'
+  ].join('\n');
+
+  for (const [label, run] of [
+    ['bin/git-diff-lines', () => execFileSync('node', [nodeScript, '--cwd', repo], { encoding: 'utf8', env })],
+    ['plugin git-diff-lines', () => execFileSync('bash', [pluginScript, '--cwd', repo], { encoding: 'utf8', env })]
+  ]) {
+    it(`${label} numbers the disguised lines as content and keeps both paths`, () => {
+      const output = run();
+      expect(output).toContain(expectedQueries);
+      expect(output).toContain('=== z-after.js ===');
+      expect(output).toContain('  -- |    4 | [+] d');
+      expect(output).not.toMatch(/=== (old comment|x|y|\+x) ===/);
+    });
+  }
+});
+
+describe('git-diff-lines on a real repo with names git quotes', () => {
+  // Both scripts pin core.quotePath=false, so non-ASCII names come out
+  // verbatim, and decode the paths git still C-quotes (names with `"`, `\`
+  // or control characters). The AI reads file names from this output, so
+  // the awk port must name every file exactly like the Node CLI.
+  const projectRoot = path.resolve(__dirname, '../..');
+  const nodeScript = path.join(projectRoot, 'bin', 'git-diff-lines');
+  const pluginScript = path.join(projectRoot, 'plugin-code-critic', 'skills', 'analyze', 'scripts', 'git-diff-lines');
+  const EDITED = ['café.js', 'quo"te.js', 'back\\slash.js', 'dir with space/a b.js', 'x b/y.js', 'tab\tname.js', 'ctl\x01.js'];
+  let tempDir;
+  let repo;
+  let env;
+
+  beforeAll(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'git-diff-lines-quoted-'));
+    repo = path.join(tempDir, 'repo');
+    fs.mkdirSync(repo);
+    // Isolated HOME: git's default core.quotePath=true is in effect unless
+    // the scripts override it.
+    env = {
+      ...process.env,
+      HOME: tempDir,
+      XDG_CONFIG_HOME: tempDir,
+      GIT_CONFIG_NOSYSTEM: '1',
+      PAIR_REVIEW_NO_OPEN: '1'
+    };
+    const git = (...args) => execFileSync('git', args, { cwd: repo, env, stdio: 'pipe' });
+    const write = (name, content) => {
+      fs.mkdirSync(path.dirname(path.join(repo, name)), { recursive: true });
+      fs.writeFileSync(path.join(repo, name), content);
+    };
+    git('init', '-q');
+    git('config', 'user.email', 'test@test.com');
+    git('config', 'user.name', 'Test');
+    for (const name of EDITED) write(name, 'a\nb\n');
+    write('plain.js', 'a\nb\nc\nd\n');
+    write('gone"d.js', 'x\n');
+    write('bin"ary.png', Buffer.from([0, 1, 2, 3]));
+    git('add', '-A');
+    git('commit', '-q', '-m', 'initial');
+    for (const name of EDITED) write(name, 'a\nb\nc\n');
+    git('mv', 'plain.js', 'ré"named.js');
+    write('ré"named.js', 'a\nb\nc\nd\ne\n');
+    fs.rmSync(path.join(repo, 'gone"d.js'));
+    write('bin"ary.png', Buffer.from([0, 1, 2, 4]));
+    git('add', '-A');
+  });
+
+  afterAll(() => {
+    if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const runNode = () => execFileSync('node', [nodeScript, '--cwd', repo, '--cached'], { encoding: 'utf8', env });
+  const runPlugin = () => execFileSync('bash', [pluginScript, '--cwd', repo, '--cached'], { encoding: 'utf8', env });
+  const fileHeaders = output => output.split('\n').filter(line => line.startsWith('=== '));
+
+  it('bin/git-diff-lines names every file by its real path', () => {
+    expect(fileHeaders(runNode())).toEqual([
+      '=== back\\slash.js ===',
+      '=== bin"ary.png ===',
+      '=== café.js ===',
+      '=== ctl\x01.js ===',
+      '=== dir with space/a b.js ===',
+      '=== gone"d.js ===',
+      '=== quo"te.js ===',
+      '=== plain.js -> ré"named.js ===',
+      '=== tab\tname.js ===',
+      '=== x b/y.js ==='
+    ]);
+  });
+
+  it('the plugin git-diff-lines produces the same output as bin/git-diff-lines', () => {
+    expect(runPlugin()).toBe(runNode());
+  });
+});
+
+describe('git-diff-lines on a real repo with a file name that is not UTF-8', () => {
+  // With core.quotePath=false a raw 0xFF byte in a file name reaches awk
+  // unescaped. BSD awk (macOS /usr/bin/awk) in a UTF-8 locale aborts on it
+  // with "towc: multibyte conversion failure" unless the plugin script runs
+  // awk under LC_ALL=C. APFS rejects such names on disk, so the commits are
+  // built with git plumbing and diffed commit to commit, never checked out.
+  const projectRoot = path.resolve(__dirname, '../..');
+  const pluginScript = path.join(projectRoot, 'plugin-code-critic', 'skills', 'analyze', 'scripts', 'git-diff-lines');
+  const BAD_NAME = Buffer.from([0x62, 0x61, 0x64, 0xff, 0x2e, 0x6a, 0x73]); // "bad\xff.js"
+  let tempDir;
+  let repo;
+  let env;
+  let oldCommit;
+  let newCommit;
+  let skipReason = null;
+
+  beforeAll(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'git-diff-lines-nonutf8-'));
+    repo = path.join(tempDir, 'repo');
+    fs.mkdirSync(repo);
+    // A UTF-8 locale is what makes awk decode the name; isolated HOME keeps
+    // the developer's git config out of the diff.
+    env = {
+      ...process.env,
+      HOME: tempDir,
+      XDG_CONFIG_HOME: tempDir,
+      GIT_CONFIG_NOSYSTEM: '1',
+      LC_ALL: 'en_US.UTF-8',
+      PAIR_REVIEW_NO_OPEN: '1'
+    };
+    const git = (args, input) => execFileSync('git', args, { cwd: repo, env, input, encoding: 'utf8', stdio: 'pipe' }).trim();
+    git(['init', '-q']);
+    git(['config', 'user.email', 'test@test.com']);
+    git(['config', 'user.name', 'Test']);
+    // argv strings are UTF-8 encoded, so the raw byte goes in through a
+    // NUL-terminated --index-info record on stdin.
+    const stage = content => {
+      const blob = git(['hash-object', '-w', '--stdin'], content);
+      const record = Buffer.concat([Buffer.from(`100644 ${blob}\t`), BAD_NAME, Buffer.from([0])]);
+      git(['update-index', '-z', '--add', '--index-info'], record);
+      return git(['write-tree']);
+    };
+    try {
+      oldCommit = git(['commit-tree', stage('a\nb\n'), '-m', 'initial']);
+      newCommit = git(['commit-tree', stage('a\nb\nc\n'), '-p', oldCommit, '-m', 'add c']);
+    } catch (error) {
+      skipReason = `git refused a non-UTF-8 path on this platform: ${error.message}`;
+    }
+  });
+
+  afterAll(() => {
+    if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('the plugin git-diff-lines annotates the file instead of crashing awk', (ctx) => {
+    if (skipReason) ctx.skip(skipReason);
+    const result = spawnSync('bash', [pluginScript, '--cwd', repo, oldCommit, newCommit], { env });
+    expect(result.stderr.toString()).toBe('');
+    expect(result.status).toBe(0);
+    // latin1 maps each byte to one char, so 0xFF survives as \xff
+    expect(result.stdout.toString('latin1')).toBe([
+      '=== bad\xff.js ===',
+      ' OLD | NEW |',
+      '@@ -1,2 +1,3 @@',
+      '   1 |    1 |     a',
+      '   2 |    2 |     b',
+      '  -- |    3 | [+] c',
+      ''
+    ].join('\n'));
   });
 });
 

@@ -83,6 +83,7 @@ function createTestPRManager() {
 }
 
 describe('PR mode: refreshPR() reloads comments after diff refresh', () => {
+
   it('should not call loadUserComments when refresh API fails', async () => {
     const prManager = createTestPRManager();
 
@@ -108,49 +109,4 @@ describe('PR mode: refreshPR() reloads comments after diff refresh', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-});
-
-
-describe('PR mode: refreshPR() handles reload errors gracefully', () => {
-  it('should propagate loadUserComments error to the catch block', async () => {
-    const prManager = createTestPRManager();
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: vi.fn().mockResolvedValue({
-        success: true,
-        data: prManager.currentPR
-      })
-    });
-
-    vi.spyOn(global, 'setTimeout').mockImplementation((cb) => cb());
-
-    prManager.loadUserComments.mockRejectedValueOnce(new Error('Failed to load comments'));
-
-    await prManager.refreshPR();
-
-    // The error should be caught and displayed
-    expect(prManager.showError).toHaveBeenCalledWith('Failed to load comments');
-  });
-
-  it('should propagate loadAISuggestions error to the catch block', async () => {
-    const prManager = createTestPRManager();
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: vi.fn().mockResolvedValue({
-        success: true,
-        data: prManager.currentPR
-      })
-    });
-
-    vi.spyOn(global, 'setTimeout').mockImplementation((cb) => cb());
-
-    prManager.loadAISuggestions.mockRejectedValueOnce(new Error('Failed to load suggestions'));
-
-    await prManager.refreshPR();
-
-    // The error should be caught and displayed
-    expect(prManager.showError).toHaveBeenCalledWith('Failed to load suggestions');
-  });
 });

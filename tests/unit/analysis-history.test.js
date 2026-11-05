@@ -642,7 +642,7 @@ describe('AnalysisHistoryManager', () => {
       manager.selectedRun = {
         id: 1,
         provider: 'antigravity',
-        model: 'gemini-3.1-pro-low',
+        model: 'gemini-3.8-flash-medium',
         started_at: threeHoursAgo
       };
 

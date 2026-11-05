@@ -10,7 +10,7 @@ async function createSubmissionHost(options = {}) {
   const pullPath = `/repos/${repository}/pulls/${number}`;
   const state = { head: options.head || 'a'.repeat(40), base: options.base || 'b'.repeat(40), viewer: { id: 7, login: 'reviewer' },
     author: 'author', reviews: new Map(), calls: [], batches: 0, nextId: 10,
-    loseCreate: false, loseBatch: null, partialBatch: null, loseSubmit: false, rejectBatch: null };
+    loseCreate: false, loseBatch: null, partialBatch: null, loseSubmit: false, rejectBatch: null, failEdit: null };
   if (options.author) state.author = options.author;
   const diff = options.diff || ['a.js', 'hidden.js'].map(file => `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1,30 +1,30 @@\n${Array.from({ length: 30 }, (_, i) => ` line${i + 1}`).join('\n')}\n`).join('');
   let baseUrl;
@@ -32,13 +32,20 @@ async function createSubmissionHost(options = {}) {
       if (reviewMatch && req.method === 'GET') {
         const review = [...state.reviews.values()].find(value => value.databaseId === Number(reviewMatch[1]));
         if (!review) return respond({ message: 'Not found' }, 404);
-        return respond(reviewMatch[2] === '/comments' ? review.comments.map(comment => ({ ...comment, node_id: comment.id, id: comment.databaseId,
-          start_line: comment.startLine, subject_type: comment.subjectType.toLowerCase() }))
+        return respond(reviewMatch[2] === '/comments' ? review.comments.map(restComment)
           : restReview(review));
       }
       let raw = '';
       for await (const chunk of req) raw += chunk;
       const data = raw ? JSON.parse(raw) : {};
+      const commentMatch = pathname.match(/\/pulls\/comments\/(\d+)$/);
+      if (commentMatch && ['GET', 'PATCH'].includes(req.method)) {
+        const comment = [...state.reviews.values()].flatMap(review => review.comments)
+          .find(row => row.databaseId === Number(commentMatch[1]));
+        if (!comment || state.failEdit) return respond({ message: 'Comment unavailable' }, state.failEdit || 404);
+        if (req.method === 'PATCH') editComment(comment, data.body);
+        return respond(restComment(comment));
+      }
       if (pathname === `${pullPath}/reviews` && req.method === 'POST') {
         const review = createReview(data.body, data.commit_id);
         if (state.loseCreate) return req.socket.destroy();
@@ -52,16 +59,28 @@ async function createSubmissionHost(options = {}) {
           return respond(restReview(review));
         }
         state.batches++;
-        if (state.rejectBatch === state.batches) return respond({ added: 0, failed: data.comments.map((_comment, index) => ({ index, error_message: 'Temporarily rejected' })) });
-        for (const comment of data.comments) addComment(review, { ...comment, startLine: comment.start_line, subjectType: comment.subject_type.toUpperCase() });
+        const comments = data.comments || [data];
+        if (state.rejectBatch === state.batches) {
+          if (!data.comments) return respond({ message: 'Temporarily rejected' }, 422);
+          return respond({ added: 0, failed: comments.map((_comment, index) => ({ index, error_message: 'Temporarily rejected' })) });
+        }
+        const added = comments.map(comment => addComment(review, {
+          ...comment, startLine: comment.start_line, subjectType: comment.subject_type.toUpperCase()
+        }));
         if (state.loseBatch === state.batches) return req.socket.destroy();
-        return respond({ added: data.comments.length, failed: [] });
+        return respond(data.comments ? { added: comments.length, failed: [] } : restComment(added[0]));
       }
       if (req.url !== '/graphql') return respond({ message: `Unexpected fixture path ${req.url}` }, 404);
       const source = data.query;
       const args = data.variables || {};
       const literals = [];
       const masked = source.replace(/"(?:\\.|[^"\\])*"/g, value => { literals.push(JSON.parse(value)); return `LITERAL_${literals.length - 1}`; });
+      if (masked.includes('updatePullRequestReviewComment(input:')) {
+        const comment = [...state.reviews.values()].flatMap(review => review.comments).find(row => row.id === args.id);
+        if (!comment || state.failEdit) return respond({ message: 'Comment unavailable' }, state.failEdit || 404);
+        editComment(comment, args.body);
+        return respond({ data: { updatePullRequestReviewComment: { pullRequestReviewComment: comment } } });
+      }
       if (masked.includes('addPullRequestReview(input:')) {
         const review = createReview(args.body, args.commitOID);
         if (state.loseCreate) return req.socket.destroy();
@@ -89,6 +108,7 @@ async function createSubmissionHost(options = {}) {
         if (state.loseSubmit) return req.socket.destroy();
         return respond({ data: { submitPullRequestReview: { pullRequestReview: graphReview(review) } } });
       }
+      if (args.id) return respond({ data: { node: state.reviews.has(args.id) ? graphReview(state.reviews.get(args.id)) : null } });
       if (args.nodeId) return respond({ data: { node: state.reviews.has(args.nodeId) ? graphReview(state.reviews.get(args.nodeId)) : null } });
       if (masked.includes('reviews(states: PENDING')) return respond({ data: { repository: { pullRequest: { reviews: {
         nodes: [...state.reviews.values()].filter(review => review.state === 'PENDING').map(graphReview), pageInfo: { hasNextPage: false }
@@ -101,17 +121,28 @@ async function createSubmissionHost(options = {}) {
     comments: { totalCount: review.comments.length, nodes: review.comments, pageInfo: { hasNextPage: false } } });
   const restReview = review => ({ id: review.databaseId, node_id: state.omitNodeIds ? undefined : review.id,
     body: review.body, state: review.state, commit_id: review.head, user: review.user, html_url: review.url });
+  const restComment = comment => ({ ...comment, node_id: comment.id, id: comment.databaseId,
+    html_url: comment.url, start_line: comment.startLine, start_side: comment.startSide || comment.side,
+    original_line: comment.originalLine, original_start_line: comment.originalStartLine,
+    subject_type: comment.subjectType.toLowerCase(), created_at: comment.createdAt, user: comment.author });
+  const editComment = (comment, body) => {
+    comment.body = body;
+    state.calls.push({ operation: 'update', commentId: comment.id, body });
+  };
   const createReview = (body, head) => {
     const id = ++state.nextId;
     const review = { id: `REVIEW_${id}`, databaseId: id, state: 'PENDING', body: body ?? '', head,
-      user: { ...state.viewer }, url: `${baseUrl}/${repository}/pull/${number}#review-${id}`, comments: [] };
+      user: { ...state.viewer }, url: `${baseUrl}/${repository}/pull/${number}#pullrequestreview-${id}`, comments: [] };
     state.reviews.set(review.id, review);
     state.calls.push({ operation: 'create', id: review.id, head, body: review.body });
     return review;
   };
   const addComment = (review, fields) => {
     const id = ++state.nextId;
-    const comment = { ...fields, id: `COMMENT_${id}`, databaseId: id };
+    const comment = { ...fields, id: `COMMENT_${id}`, databaseId: id, fullDatabaseId: String(id),
+      subjectType: fields.subjectType || 'LINE', author: { login: state.viewer.login },
+      createdAt: new Date().toISOString(), originalLine: fields.line, originalStartLine: fields.startLine,
+      url: `${baseUrl}/${repository}/pull/${number}#discussion_r${id}` };
     review.comments.push(comment);
     state.calls.push({ operation: 'comment', reviewId: review.id, comment });
     return comment;
@@ -124,7 +155,7 @@ async function createSubmissionHost(options = {}) {
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   baseUrl = `http://127.0.0.1:${server.address().port}`;
-  return { state, baseUrl, createReview, addComment, async close() {
+  return { state, baseUrl, createReview, addComment, submitReview: submit, async close() {
     const stopped = new Promise(resolve => server.close(resolve)); server.closeAllConnections(); await stopped;
   } };
 }

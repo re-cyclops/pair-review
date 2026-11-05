@@ -22,11 +22,12 @@ const { GitWorktreeManager } = require('../git/worktree');
 const { normalizeRepository } = require('../utils/paths');
 const { resolveFormat, formatAdoptedComment: formatComment } = require('../utils/comment-formatter');
 const { safeParseJson } = require('../utils/safe-parse-json');
-const { resolveOriginalFileContentSpecs } = require('../utils/diff-file-content');
+const { getPRFileContentSpecs } = require('../utils/pr-file-blob-cache');
 const validateReviewId = require('./middleware/validate-review-id');
 const { reviewScope, scopeIncludes, includesBranch } = require('../local-scope');
 const { findMergeBase } = require('../local-review');
 const submission = require('../review-submission');
+const { listSubmissions } = require('../github/update-posted-comment');
 const { GitHubClient } = require('../github/client');
 const { PRArgumentParser } = require('../github/parser');
 const { resolveReviewBinding } = require('../utils/host-resolution');
@@ -156,8 +157,12 @@ router.post('/api/reviews/:reviewId/submit', validateReviewId, async (req, res) 
   } catch (error) { submissionError(res, error); }
 });
 
-router.get('/api/reviews/:reviewId/submissions', validateReviewId, (req, res) => {
-  res.json({ receipts: submission.listReceipts(req.app.get('db'), req.reviewId) });
+router.get('/api/reviews/:reviewId/submissions', validateReviewId, async (req, res) => {
+  try {
+    const db = req.app.get('db');
+    res.json({ receipts: submission.listReceipts(db, req.reviewId),
+      submissions: await listSubmissions(db, req.reviewId) });
+  } catch (error) { submissionError(res, error); }
 });
 
 router.post('/api/reviews/:reviewId/submissions/:attemptId/reconcile', validateReviewId, async (req, res) => {
@@ -217,8 +222,8 @@ router.post('/api/reviews/:reviewId/comments/:id/reanchor', validateReviewId, as
 
 
 /**
- * Resolve the worktree path and base_sha for a PR-mode review.
- * Returns { worktreePath, baseSha } or throws with { status, error } on failure.
+ * Resolve the worktree path and normalized repository for a PR-mode review.
+ * Returns { worktreePath, prNumber, repository } or throws with { statusCode } on failure.
  */
 async function resolveWorktreeForReview(review, db) {
   const prNumber = review.pr_number;
@@ -241,19 +246,7 @@ async function resolveWorktreeForReview(review, db) {
 
   const worktreePath = await worktreeManager.getWorktreePath({ owner, repo, number: prNumber });
 
-  // Load cached PR metadata so callers can resolve exact diff blobs.
-  const normalizedRepo = normalizeRepository(owner, repo);
-  const prRecord = await queryOne(db, `
-    SELECT pr_data FROM pr_metadata
-    WHERE pr_number = ? AND repository = ? COLLATE NOCASE
-  `, [prNumber, normalizedRepo]);
-
-  const prData = safeParseJson(prRecord?.pr_data, null);
-  if (prRecord?.pr_data && !prData) {
-    logger.warn('Could not parse pr_data for review');
-  }
-
-  return { worktreePath, prData };
+  return { worktreePath, prNumber, repository: normalizeRepository(owner, repo) };
 }
 
 /**
@@ -1316,17 +1309,7 @@ router.get('/api/reviews/:reviewId/file-content/:fileName(*)', validateReviewId,
     // Prefer the exact blob from the cached diff snapshot. If that is unavailable,
     // fall back to repo-wide base_sha and finally the worktree filesystem.
     const normalizedRepo = normalizeRepository(owner, repo);
-    const prRecord = await queryOne(db, `
-      SELECT pr_data FROM pr_metadata
-      WHERE pr_number = ? AND repository = ? COLLATE NOCASE
-    `, [prNumber, normalizedRepo]);
-
-    const prData = safeParseJson(prRecord?.pr_data, null);
-    if (prRecord?.pr_data && !prData) {
-      logger.warn('Could not parse pr_data for file-content route');
-    }
-
-    const contentSpecs = resolveOriginalFileContentSpecs(prData, fileName);
+    const contentSpecs = getPRFileContentSpecs(db, normalizedRepo, prNumber, fileName);
 
     if (contentSpecs.length > 0) {
       try {
@@ -1625,9 +1608,9 @@ router.get('/api/reviews/:reviewId/file-contents/:fileName(*)', validateReviewId
     }
 
     // --- PR mode ---
-    let worktreePath, prData;
+    let worktreePath, prNumber, repository;
     try {
-      ({ worktreePath, prData } = await resolveWorktreeForReview(review, db));
+      ({ worktreePath, prNumber, repository } = await resolveWorktreeForReview(review, db));
     } catch (resolveErr) {
       return res.status(resolveErr.statusCode || 500).json({ error: resolveErr.message });
     }
@@ -1635,7 +1618,7 @@ router.get('/api/reviews/:reviewId/file-contents/:fileName(*)', validateReviewId
     if (status !== 'added') {
       // Prefer the exact blob from the cached diff snapshot; fall back to base_sha.
       // Matches the /file-content endpoint so both stay consistent with stale PR metadata.
-      const contentSpecs = resolveOriginalFileContentSpecs(prData, oldFilePath);
+      const contentSpecs = getPRFileContentSpecs(db, repository, prNumber, oldFilePath);
       for (const contentSpec of contentSpecs) {
         const content = await gitShow(worktreePath, contentSpec.gitSpec);
         if (content != null) {

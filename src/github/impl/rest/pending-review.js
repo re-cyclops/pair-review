@@ -187,9 +187,10 @@ async function getPendingReviewForUser(octokit, owner, repo, prNumber) {
  * @param {Object} octokit
  * @param {string|number} nodeId - GraphQL node id OR numeric review id
  * @param {Object} prContext - { owner, repo, prNumber, reviewId? }
+ * @param {Object} [options] - { strict?: boolean, includeComments?: boolean }
  * @returns {Promise<Object|null>}
  */
-async function getReviewById(octokit, nodeId, prContext) {
+async function getReviewById(octokit, nodeId, prContext, { strict = false, includeComments = false } = {}) {
   if (!prContext || !prContext.owner || !prContext.repo || !prContext.prNumber) {
     throw new Error(
       'REST getReviewById requires prContext={owner, repo, prNumber}. ' +
@@ -210,7 +211,9 @@ async function getReviewById(octokit, nodeId, prContext) {
     } else {
       // No usable numeric id — surface a clear error rather than calling
       // the REST API with a GraphQL node id (which would 404).
-      logger.warn(`REST getReviewById called with non-numeric id "${nodeId}" and no prContext.reviewId`);
+      const message = `REST getReviewById called with non-numeric id "${nodeId}" and no prContext.reviewId`;
+      logger.warn(message);
+      if (strict) throw new Error(message);
       return null;
     }
   }
@@ -224,6 +227,13 @@ async function getReviewById(octokit, nodeId, prContext) {
       pull_number: prContext.prNumber,
       review_id: reviewId
     });
+    const review = {
+      id: deriveRestReviewId(data), databaseId: data.id, body: data.body ?? '',
+      state: data.state, submittedAt: data.submitted_at || null, url: data.html_url,
+      headSha: data.commit_id, author: data.user?.login,
+      repository: `${prContext.owner}/${prContext.repo}`, prNumber: prContext.prNumber
+    };
+    if (!includeComments) return review;
 
     const comments = await octokit.paginate(octokit.rest.pulls.listCommentsForReview, {
       owner: prContext.owner, repo: prContext.repo, pull_number: prContext.prNumber,
@@ -231,10 +241,7 @@ async function getReviewById(octokit, nodeId, prContext) {
     });
     if (comments.some(comment => comment.id == null && !comment.node_id)) throw new Error('Remote review contains an unidentified comment');
     return {
-      id: deriveRestReviewId(data), databaseId: data.id, body: data.body ?? '',
-      state: data.state, submittedAt: data.submitted_at || null, url: data.html_url,
-      headSha: data.commit_id, author: data.user?.login,
-      repository: `${prContext.owner}/${prContext.repo}`, prNumber: prContext.prNumber,
+      ...review,
       comments: comments.map(comment => ({
         id: comment.node_id || String(comment.id), databaseId: comment.id,
         body: comment.body, path: comment.path, line: comment.line,
@@ -247,7 +254,9 @@ async function getReviewById(octokit, nodeId, prContext) {
       logger.debug(`Review ${reviewId} not found via REST`);
       return null;
     }
-    throw error;
+    logger.warn(`Error fetching review ${reviewId} via REST: ${error.message}`);
+    if (strict) throw error;
+    return null;
   }
 }
 

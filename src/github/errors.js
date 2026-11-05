@@ -17,4 +17,11 @@ class GitHubApiError extends Error {
   }
 }
 
-module.exports = { GitHubApiError };
+/** GitHub's pre-execution complexity/cost rejection. */
+function isComplexityError(error) {
+  const patterns = [/complexity/i, /MAX_NODE_LIMIT/, /cost exceeds/i, /too large/i, /query size exceeds/i];
+  return patterns.some(pattern => pattern.test(error.message || '')) ||
+    Array.isArray(error.errors) && error.errors.some(item => patterns.some(pattern => pattern.test(item.message || '')));
+}
+
+module.exports = { GitHubApiError, isComplexityError };

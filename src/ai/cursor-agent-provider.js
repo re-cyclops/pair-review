@@ -32,7 +32,7 @@ const BIN_DIR = path.join(__dirname, '..', '..', 'bin');
  * Tier structure:
  * - free (auto): Cursor's default auto-routing model
  * - fast (composer-2-fast, gpt-5.3-codex-fast, gemini-3-flash): Quick analysis
- * - balanced (composer-1.5, sonnet-4.6-thinking, sonnet-4.5-thinking, gemini-3.1-pro): Recommended for most reviews
+ * - balanced (composer-1.5 (default), sonnet-4.6-thinking, sonnet-4.5-thinking, gemini-3.1-pro): Recommended for most reviews
  * - thorough (composer-2, gpt-5.3-codex-high, gpt-5.3-codex-xhigh, opus-4.5-thinking, opus-4.6-thinking): Deep analysis for complex code
  */
 const CURSOR_AGENT_MODELS = [
@@ -70,7 +70,8 @@ const CURSOR_AGENT_MODELS = [
     tagline: 'Previous Composer',
     description: 'Previous generation Cursor Composer model—positioned between Sonnet and Opus for multi-file edits',
     badge: 'Previous Gen',
-    badgeClass: 'badge-balanced'
+    badgeClass: 'badge-balanced',
+    default: true
   },
   {
     id: 'gpt-5.3-codex-fast',
@@ -97,8 +98,7 @@ const CURSOR_AGENT_MODELS = [
     tagline: 'Best Balance',
     description: 'Latest Sonnet with extended thinking—excellent quality-to-cost ratio for thorough reviews',
     badge: 'Recommended',
-    badgeClass: 'badge-recommended',
-    default: true
+    badgeClass: 'badge-recommended'
   },
   {
     id: 'sonnet-4.5-thinking',
@@ -773,6 +773,22 @@ class CursorAgentProvider extends AIProvider {
   }
 
   /**
+   * Resolve merged env (provider env + model env) for the given model.
+   * Same merge the constructor applies for the analysis model, so the
+   * extraction model (possibly a different fast-tier model) gets its own env.
+   *
+   * @param {string} model - The model identifier
+   * @returns {Object} Env vars to merge into the child environment
+   */
+  _resolveEnvForModel(model) {
+    const modelConfig = this.configOverrides?.models?.find(m => m.id === model);
+    return {
+      ...(this.configOverrides?.env || {}),
+      ...(modelConfig?.env || {})
+    };
+  }
+
+  /**
    * Get CLI configuration for LLM extraction
    * @param {string} model - The model to use for extraction
    * @returns {Object} Configuration for spawning extraction process
@@ -785,6 +801,7 @@ class CursorAgentProvider extends AIProvider {
 
     // Build args consistently using the shared method, applying provider and model extra_args
     const args = this.buildArgsForModel(model);
+    const env = this._resolveEnvForModel(model);
 
     // For extraction, we pass the prompt via stdin
     if (useShell) {
@@ -792,14 +809,16 @@ class CursorAgentProvider extends AIProvider {
         command: `${agentCmd} ${quoteShellArgs(args).join(' ')}`,
         args: [],
         useShell: true,
-        promptViaStdin: true
+        promptViaStdin: true,
+        env
       };
     }
     return {
       command: agentCmd,
       args,
       useShell: false,
-      promptViaStdin: true
+      promptViaStdin: true,
+      env
     };
   }
 

@@ -219,7 +219,7 @@ test('acknowledges quick approval before a held comments refresh completes', asy
     await gate;
     await route.continue();
   };
-  await page.route('**/api/reviews/1/comments', holdRefresh);
+  await page.route(target => target.pathname === '/api/reviews/1/comments', holdRefresh);
   try {
     await page.getByRole('button', { name: 'Submit approval', exact: true }).click();
     await refreshStarted;
@@ -290,8 +290,8 @@ test('keeps remote approval visible while finishing failed local cleanup without
   const { commentId } = await created.json();
   await openReviewAuthoring(page);
   await page.getByRole('group', { name: 'Review decision' }).locator('[data-decision="APPROVE"]').click();
-  testServer.db.exec(`CREATE TRIGGER fail_submission_cleanup BEFORE UPDATE OF status ON comments
-    WHEN NEW.status = 'submitted'
+  testServer.db.exec(`CREATE TRIGGER fail_submission_cleanup BEFORE UPDATE OF state ON github_reviews
+    WHEN NEW.state = 'submitted'
     BEGIN SELECT RAISE(ABORT, 'fixture cleanup failure'); END;`);
   try {
     await page.getByRole('button', { name: 'Submit approval', exact: true }).click();
@@ -321,7 +321,8 @@ test('keeps remote approval visible while finishing failed local cleanup without
     await expect(page.locator('.workspace-review-receipts')).not.toContainText('fixture cleanup failure');
     await expect(page.getByRole('textbox', { name: `Draft ${commentId} exact Markdown`, exact: true })).toHaveCount(0);
     await expect(page.locator('.workspace-submit-primary')).not.toHaveAttribute('data-loading', 'true');
-    expect(testServer.db.prepare('SELECT status FROM comments WHERE id = ?').get(commentId)).toEqual({ status: 'submitted' });
+    const saved = await (await page.request.get(`/api/reviews/1/comments/${commentId}`)).json();
+    expect(saved).toMatchObject({ status: 'active', body: 'Approved file invariant', publication: { state: 'posted' } });
     expect(testServer.reviewHost.state.calls).toEqual(writes);
     expect([...testServer.reviewHost.state.reviews.values()][0].state).toBe('APPROVED');
   } finally {

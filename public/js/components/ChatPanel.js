@@ -1208,15 +1208,21 @@ class ChatPanel {
     const handle = this.panel.querySelector('.chat-panel__resize-handle');
     if (!handle) return;
 
-    const { min, storageKey } = this._resizeConfig;
+    const { min, storageKey, cssVar } = this._resizeConfig;
+
+    // The panel can render narrower than its width variable while it shrinks to
+    // share a drawer, so resize from (and save) the variable, not the box
+    const getWidth = () => parseInt(getComputedStyle(document.documentElement).getPropertyValue(cssVar), 10)
+      || this.panel.getBoundingClientRect().width;
 
     let startX = 0;
     let startWidth = 0;
 
     const onMouseMove = (e) => {
-      // Compute dynamic max: leave room for the sidebar and a minimum content area
-      const sidebarWidth = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width'), 10) || 260;
-      const dynamicMax = window.innerWidth - sidebarWidth - 100;
+      // Dynamic max: leave room for the docked sidebar and a minimum content
+      // area. Shared with the Review panel so both resize against the same
+      // bound (a collapsed/slim-screen sidebar correctly counts as 0).
+      const dynamicMax = window.PanelResizer?.getDynamicPanelMax?.() ?? (window.innerWidth - 100);
 
       // Panel is right-anchored, so dragging left (decreasing clientX) should increase width
       const delta = startX - e.clientX;
@@ -1226,8 +1232,7 @@ class ChatPanel {
 
     const onMouseUp = () => {
       // Persist the final width
-      const finalWidth = this.panel.getBoundingClientRect().width;
-      localStorage.setItem(storageKey, Math.round(finalWidth));
+      localStorage.setItem(storageKey, Math.round(getWidth()));
 
       handle.classList.remove('dragging');
       this.panel.classList.remove('chat-panel--resizing');
@@ -1243,7 +1248,7 @@ class ChatPanel {
     handle.addEventListener('mousedown', (e) => {
       e.preventDefault();
       startX = e.clientX;
-      startWidth = this.panel.getBoundingClientRect().width;
+      startWidth = getWidth();
 
       handle.classList.add('dragging');
       this.panel.classList.add('chat-panel--resizing');
@@ -1644,6 +1649,9 @@ class ChatPanel {
     this.isOpen = true;
     this.panel.classList.remove('chat-panel--closed');
     this.panel.classList.add('chat-panel--open');
+    // Tell PanelGroup now, not after the awaits below: it lays the panels out
+    // from this, and a close() during the restore must not be overwritten
+    window.panelGroup?._onChatVisibilityChanged(true);
 
     // Warm the model catalog so the header can show real model names. Never
     // blocks the open; the header is re-rendered if/when it lands.
@@ -1763,7 +1771,6 @@ class ChatPanel {
     }
 
     this._updateActionButtons();
-    window.panelGroup?._onChatVisibilityChanged(true);
     if (!options.suppressFocus) {
       this.inputEl.focus();
     }
@@ -5022,6 +5029,12 @@ class ChatPanel {
         console.debug('[ChatPanel] WS event:', data.type, 'tab:', tab.sessionId);
       }
 
+      // Same handling whether or not the tab is in the foreground.
+      if (data.type === 'session_closed') {
+        this._handleSessionClosed(tab);
+        return;
+      }
+
       const isActive = this.isOpen && this._getActiveTab() === tab;
 
       // Background tab (or panel closed): drive the per-tab DOM via tab-aware
@@ -5107,6 +5120,24 @@ class ChatPanel {
     } catch (e) {
       console.error('[ChatPanel] WS parse error:', e);
     }
+  }
+
+  /**
+   * The server shut down this tab's agent process (idle timeout). The session
+   * resumes transparently on the next send, so nothing is shown; clearing
+   * `sessionWarm` makes that send show the ACP "Resuming" indicator.
+   * The server does not reap a session mid-turn, but if this tab still thinks
+   * it is streaming, no 'complete' will ever arrive for it: end the stream the
+   * way 'complete' does (tab-aware, so it is correct for a background tab
+   * too — UI controls are only touched when the tab is active).
+   * @param {ChatTab} tab
+   */
+  _handleSessionClosed(tab) {
+    if (tab.isStreaming) {
+      tab.abortPending = false;
+      this.finalizeStreamingMessage(null, tab);
+    }
+    tab.sessionWarm = false;
   }
 
   /**

@@ -201,8 +201,10 @@ class HunkParser {
     if (!header) return null;
     // Match: @@ followed by line info, then @@ and optional trailing context
     // The [^@]+ between @@ markers ensures we stop at the closing @@, so even
-    // if the function name contains @ characters, they're captured correctly
-    const match = header.match(/^@@[^@]+@@\s*(.*)$/);
+    // if the function name contains @ characters, they're captured correctly.
+    // The `s` flag keeps a lone `\r` inside the context line (git keeps it)
+    // from failing the match, mirroring the server's parseHunkHeader.
+    const match = header.match(/^@@[^@]+@@\s*(.*)$/s);
     const context = match ? match[1].trim() : null;
     return context || null; // Return null for empty strings too
   }
@@ -387,6 +389,41 @@ class HunkParser {
     }
 
     return blocks;
+  }
+
+  /**
+   * Count added and deleted lines in a per-file patch.
+   *
+   * Counts only lines inside a hunk (a block from parseDiffIntoBlocks, within
+   * the line counts its `@@` header declares), so a prefix never decides
+   * header-vs-content: inside a hunk a deleted `-- x` line is `--- x` and an
+   * added `++ x` line is `+++ x`, and both count. Mirrors the server's
+   * `countPatchStats` (src/utils/diff-file-list.js); both suites share
+   * tests/utils/diff-stat-fixtures.js.
+   * @param {string} patch - Per-file patch text
+   * @returns {{additions: number, deletions: number}}
+   */
+  static countPatchStats(patch) {
+    let additions = 0;
+    let deletions = 0;
+    for (const block of HunkParser.parseDiffIntoBlocks(patch || '')) {
+      const counts = block.header.match(/@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/) || [];
+      let oldRemaining = counts[1] === undefined ? 1 : parseInt(counts[1], 10);
+      let newRemaining = counts[2] === undefined ? 1 : parseInt(counts[2], 10);
+      for (const line of block.lines) {
+        if (line.startsWith('+') && newRemaining > 0) {
+          additions++;
+          newRemaining--;
+        } else if (line.startsWith('-') && oldRemaining > 0) {
+          deletions++;
+          oldRemaining--;
+        } else if (line.startsWith(' ')) {
+          oldRemaining--;
+          newRemaining--;
+        }
+      }
+    }
+    return { additions, deletions };
   }
 
   /**

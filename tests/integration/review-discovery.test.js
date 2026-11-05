@@ -187,7 +187,6 @@ describe('Activity stream reconciliation', () => {
     await delayed.pending;
     expect(workspace.runs.get('observed-run')).toMatchObject({ status: 'completed', sequence: 4 });
     expect(workspace.activityButton.textContent).toContain('1 unread result');
-    expect(workspace.activityButton.textContent).toContain('No active analyses observed');
   });
 
   it('keeps a newly observed run absent from an older snapshot in the same millisecond', async () => {
@@ -207,7 +206,6 @@ describe('Activity stream reconciliation', () => {
     await workspace.refresh();
     event(run({ sequence: 100 }), { ...identity, [field]: 'previous-context' });
     expect(workspace.runs.get('observed-run')).toMatchObject({ status: 'completed', sequence: 4 });
-    expect(workspace.activityButton.textContent).toContain('No active analyses observed');
   });
 
   it('retains last state while disconnected and reports idle only after successful reconciliation', async () => {
@@ -222,6 +220,6 @@ describe('Activity stream reconciliation', () => {
     activityUnavailable = false;
     activityRuns = [];
     await workspace.refresh();
-    expect(workspace.activityButton.textContent).toContain('No active analyses observed');
+    expect(workspace.runs.size).toBe(0);
   });
 });

@@ -61,6 +61,18 @@ const { GitWorktreeManager } = require('../../src/git/worktree');
 vi.spyOn(GitWorktreeManager.prototype, 'worktreeExists').mockResolvedValue(true);
 vi.spyOn(GitWorktreeManager.prototype, 'getWorktreePath').mockResolvedValue('/tmp/worktree/test');
 
+const { GitHubClient } = require('../../src/github/client');
+const refreshReads = [
+  vi.spyOn(GitHubClient.prototype, 'repositoryExists').mockResolvedValue(true),
+  vi.spyOn(GitHubClient.prototype, 'fetchPullRequest').mockResolvedValue({
+    title: 'Test PR', state: 'open', head_sha: 'a'.repeat(40), base_sha: 'b'.repeat(40),
+    head_branch: 'feature', base_branch: 'main', node_id: 'PR_test'
+  }),
+  vi.spyOn(GitWorktreeManager.prototype, 'updateWorktree').mockResolvedValue('/tmp/worktree/test'),
+  vi.spyOn(GitWorktreeManager.prototype, 'assertPinnedWorktree').mockResolvedValue(undefined),
+  vi.spyOn(GitWorktreeManager.prototype, 'generateUnifiedDiff').mockResolvedValue('diff'),
+  vi.spyOn(GitWorktreeManager.prototype, 'getChangedFiles').mockResolvedValue([{ file: 'mock-file.js' }])
+];
 const configModule = require('../../src/config');
 vi.spyOn(configModule, 'loadConfig').mockResolvedValue({
   github_token: 'test-token', port: 7247, theme: 'light'
@@ -145,6 +157,7 @@ describe('Repo default-council parity in plain Analyze routes', () => {
   });
 
   afterAll(() => {
+    for (const spy of refreshReads) spy.mockRestore();
     fs.rmSync(testConfigDir, { recursive: true, force: true });
   });
 

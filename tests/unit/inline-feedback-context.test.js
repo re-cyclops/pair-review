@@ -23,7 +23,7 @@ describe.each([
   it.each(['LEFT', 'RIGHT'])('reveals both endpoints on the %s side before looking up the card', async (side) => {
     const inst = Object.create(AIPanel.prototype);
     inst._navGen = 0;
-    inst[collection] = [{ id: 1, line_start: 10, line_end: 50, side }];
+    inst[collection] = [{ id: 1, line_start: 10, line_end: 50, side, commit_sha: 'current-head' }];
     inst.expandFileIfCollapsed = vi.fn();
     inst._scrollDiffTarget = vi.fn();
     const card = document.createElement('div');
@@ -32,6 +32,7 @@ describe.each([
     card.dataset.commentId = '1';
     let reveal;
     window.prManager = {
+      currentPR: { head_sha: 'current-head' },
       ensureLinesVisible: vi.fn(() => new Promise(resolve => {
         reveal = () => { document.body.appendChild(card); resolve(); };
       })),

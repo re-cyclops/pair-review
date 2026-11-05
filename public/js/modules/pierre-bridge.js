@@ -45,6 +45,10 @@ class PierreBridge {
     // Monotonic counter for unique annotation IDs
     this._annotationCounter = 0;
 
+    // Rendered annotation elements, keyed by the annotation's metadata object.
+    // See _renderAnnotation for why these are reused across renders.
+    this._renderedAnnotations = new WeakMap();
+
     // Cache for gutter button containers — keyed by fileName.
     // Stored here instead of on fileState because renderGutterUtility fires
     // during instance.render(), before fileState is set on this.files.
@@ -314,7 +318,16 @@ class PierreBridge {
 
     const parsed = window.PierreDiffs.parsePatchFiles(input);
     if (parsed && parsed.length > 0 && parsed[0].files && parsed[0].files.length > 0) {
-      return parsed[0].files[0];
+      const metadata = parsed[0].files[0];
+      // Pierre keeps git's C-quoted spelling of a header path. Respell the
+      // names it reports with the decoded paths pair-review keys on; prevName
+      // also picks the old side's highlighting language.
+      const paths = window.GitPaths?.parsePatchPaths(input);
+      if (paths) {
+        metadata.name = paths.newPath;
+        if (metadata.prevName != null) metadata.prevName = paths.oldPath;
+      }
+      return metadata;
     }
     // Fallback: try getSingularPatch
     return window.PierreDiffs.getSingularPatch(patch);
@@ -1861,6 +1874,35 @@ class PierreBridge {
    * @private
    */
   _renderAnnotation(annotation, fileName, formElements) {
+    const { metadata, lineNumber, side } = annotation;
+    // Forms already reuse their DOM through formElements.
+    if (metadata.type === 'comment-form') {
+      return this._renderAnnotationContent(annotation, fileName, formElements);
+    }
+    // @pierre/diffs 1.6 calls renderAnnotation again for EVERY annotation
+    // whenever the fileDiff object changes (context ranges, gap expansion,
+    // rebuilds from base metadata), not only when the annotation changed, as
+    // 1.2 did. Rebuilt cards would disconnect elements that callers still hold
+    // (e.g. a scroll-to-finding in flight) and drop in-place DOM state. An
+    // annotation's metadata object is replaced whenever its content changes
+    // (_pushAnnotation), so the same metadata at the same line and side means
+    // the same card: hand back the element already built for it.
+    const cached = this._renderedAnnotations.get(metadata);
+    if (cached && cached.lineNumber === lineNumber && cached.side === side) {
+      return cached.element;
+    }
+    const element = this._renderAnnotationContent(annotation, fileName, formElements);
+    if (element) {
+      this._renderedAnnotations.set(metadata, { element, lineNumber, side });
+    }
+    return element;
+  }
+
+  /**
+   * Build the element for an annotation, by type.
+   * @private
+   */
+  _renderAnnotationContent(annotation, fileName, formElements) {
     const { type, data, id } = annotation.metadata;
 
     switch (type) {
@@ -1955,6 +1997,7 @@ class PierreBridge {
     const container = document.createElement('div');
     container.className = 'user-comment-row';
     container.dataset.commentId = comment.id;
+    window.PostedComment?.stampCommentStatus(container, comment);
     container.dataset.file = comment.file;
     container.dataset.lineStart = comment.line_start;
     container.dataset.lineEnd = comment.line_end || comment.line_start;
@@ -1966,6 +2009,7 @@ class PierreBridge {
           <div class="user-comment-header-left">
             <span class="comment-origin-icon">${commentIcon}</span>
             <span class="user-comment-line-info">${lineInfo}</span>
+            ${window.getPostedCommentIcon?.(comment, { link: true }) || ''}
             ${metadataHTML}
           </div>
           <div class="user-comment-actions">
@@ -1990,6 +2034,7 @@ class PierreBridge {
           </div>
         </div>
         <div class="user-comment-body" data-original-markdown="${window.escapeHtmlAttribute ? window.escapeHtmlAttribute(comment.body) : ''}">${window.renderMarkdown ? window.renderMarkdown(comment.body || '') : escapeHtml(comment.body || '')}</div>
+        ${window.PostedComment?.getEditedSincePostedHtml(comment) || ''}
       </div>
     `;
 
@@ -2043,7 +2088,7 @@ class PierreBridge {
       <div class="ai-suggestion-header">
         <div class="ai-suggestion-header-left">
           <span class="ai-suggestion-category">${escapeHtml(suggestion.type || '')}</span>
-          <span class="ai-title">${escapeHtml(suggestion.title || '')}</span>
+          <span class="ai-title smart-truncate">${escapeHtml(suggestion.title || '')}</span>
         </div>
       </div>
       <div class="ai-suggestion-body">${bodyHTML}</div>

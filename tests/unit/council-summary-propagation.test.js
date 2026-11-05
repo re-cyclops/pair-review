@@ -1,5 +1,6 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { createTestDatabase, closeTestDatabase } from '../utils/schema';
 
 // Mock dependencies before importing the Analyzer
 vi.mock('../../src/ai/index', () => ({
@@ -25,6 +26,7 @@ vi.mock('../../src/routes/shared', () => ({
 
 import Analyzer from '../../src/ai/analyzer.js';
 const { AnalysisRunRepository } = require('../../src/database');
+const { GitWorktreeManager } = require('../../src/git/worktree');
 
 /**
  * Tests for council analysis summary propagation through bypass paths.
@@ -37,7 +39,9 @@ describe('Council analysis summary propagation', () => {
   let analyzer;
   let storedSuggestions;
   let baselineRead;
-  afterEach(() => baselineRead?.mockRestore());
+  let pinnedRead;
+  let db;
+  afterEach(() => { baselineRead?.mockRestore(); pinnedRead?.mockRestore(); closeTestDatabase(db); });
 
   const validFiles = ['src/foo.js', 'src/bar.js'];
 
@@ -60,10 +64,12 @@ describe('Council analysis summary propagation', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    db = createTestDatabase();
     baselineRead = vi.spyOn(AnalysisRunRepository.prototype, 'getById').mockResolvedValue(null);
+    pinnedRead = vi.spyOn(GitWorktreeManager.prototype, 'assertPinnedWorktree').mockResolvedValue(undefined);
     storedSuggestions = [];
 
-    analyzer = new Analyzer({}, 'council', 'council');
+    analyzer = new Analyzer(db, 'council', 'council');
 
     // Stub methods that touch filesystem/database
     vi.spyOn(analyzer, 'loadGeneratedFilePatterns').mockResolvedValue([]);

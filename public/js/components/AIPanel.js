@@ -20,11 +20,8 @@ class AIPanel {
         filter: `<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
             <path d="M.75 3h14.5a.75.75 0 010 1.5H.75a.75.75 0 010-1.5zM3 7.75A.75.75 0 013.75 7h8.5a.75.75 0 010 1.5h-8.5A.75.75 0 013 7.75zm3 4a.75.75 0 01.75-.75h2.5a.75.75 0 010 1.5h-2.5a.75.75 0 01-.75-.75z"></path>
         </svg>`,
-        eye: `<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
-            <path d="M8 2c1.981 0 3.671.992 4.933 2.078 1.27 1.091 2.187 2.345 2.637 3.023a1.62 1.62 0 0 1 0 1.798c-.45.678-1.367 1.932-2.637 3.023C11.67 13.008 9.981 14 8 14c-1.981 0-3.671-.992-4.933-2.078C1.797 10.83.88 9.576.43 8.898a1.62 1.62 0 0 1 0-1.798c.45-.677 1.367-1.931 2.637-3.022C4.33 2.992 6.019 2 8 2ZM1.679 7.932a.12.12 0 0 0 0 .136c.411.622 1.241 1.75 2.366 2.717C5.176 11.758 6.527 12.5 8 12.5c1.473 0 2.825-.742 3.955-1.715 1.124-.967 1.954-2.096 2.366-2.717a.12.12 0 0 0 0-.136c-.412-.621-1.242-1.75-2.366-2.717C10.824 4.242 9.473 3.5 8 3.5c-1.473 0-2.825.742-3.955 1.715-1.124.967-1.954 2.096-2.366 2.717ZM8 10a2 2 0 1 1-.001-3.999A2 2 0 0 1 8 10Z"></path>
-        </svg>`,
-        eyeClosed: `<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
-            <path d="M.143 2.31a.75.75 0 0 1 1.047-.167l14.5 10.5a.75.75 0 1 1-.88 1.214l-2.248-1.628C11.346 13.19 9.792 14 8 14c-1.981 0-3.67-.992-4.933-2.078C1.797 10.832.88 9.577.43 8.9a1.619 1.619 0 0 1 0-1.797c.353-.533.995-1.42 1.868-2.305L.31 3.357A.75.75 0 0 1 .143 2.31Zm1.536 5.622A.12.12 0 0 0 1.657 8c0 .021.006.045.022.068.412.621 1.242 1.75 2.366 2.717C5.175 11.758 6.527 12.5 8 12.5c1.195 0 2.31-.488 3.29-1.191L9.063 9.695A2 2 0 0 1 6.058 7.52L3.529 5.688a14.207 14.207 0 0 0-1.85 2.244ZM8 3.5c-.516 0-1.017.09-1.499.251a.75.75 0 1 1-.473-1.423A6.207 6.207 0 0 1 8 2c1.981 0 3.67.992 4.933 2.078 1.27 1.091 2.187 2.345 2.637 3.023a1.62 1.62 0 0 1 0 1.798c-.11.166-.248.365-.41.587a.75.75 0 1 1-1.21-.887c.148-.201.272-.382.371-.53a.119.119 0 0 0 0-.137c-.412-.621-1.242-1.75-2.366-2.717C10.825 4.242 9.473 3.5 8 3.5Z"></path>
+        funnel: `<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+            <path fill-rule="evenodd" d="M.75 2h14.5a.75.75 0 0 1 .58 1.22L10 10.37v3.88a.75.75 0 0 1-1.13.65l-2.5-1.46A.75.75 0 0 1 6 12.8v-2.43L.17 3.22A.75.75 0 0 1 .75 2Zm1.58 1.5 4.99 6.1a.75.75 0 0 1 .18.48v2.3l1 .58v-2.88a.75.75 0 0 1 .18-.48l4.99-6.1H2.33Z"></path>
         </svg>`
     };
 
@@ -51,8 +48,11 @@ class AIPanel {
         // Canonical file order for consistent sorting across components
         this.fileOrder = new Map(); // Map of file path -> index
 
-        // Filter toggle state for showing dismissed comments (default: hidden)
+        // "Show dismissed" filter for user comments (default: hidden). The
+        // "Show posted" filter lives in PostedComment (see showPostedComments).
         this.showDismissedComments = false;
+        // User comments the filters hide, counted by PRManager from its data
+        this.hiddenCommentCounts = { posted: 0, dismissed: 0 };
 
         // Outdated external threads (their code changed since the comment)
         // stay visible by default but are flagged; the reviewer can hide them.
@@ -112,8 +112,9 @@ class AIPanel {
         this.segmentScrollRight = document.getElementById('segment-scroll-right');
         this.segmentExternalBtn = this.segmentControl?.querySelector('.segment-btn[data-segment="external"]');
 
-        // Create filter toggle button (will be inserted after segment control)
-        this.filterToggleBtn = null; // Created dynamically in createFilterToggle()
+        // Comment filter menu (created dynamically in createFilterMenu())
+        this.filterMenuBtn = null;
+        this.filterMenu = null;
 
         // Level filter
         this.levelFilter = document.getElementById('level-filter');
@@ -126,9 +127,9 @@ class AIPanel {
         // AI Summary data
         this.summaryData = null;
 
-        // Create filter toggle if segment control exists
+        // Create the comment filter menu if segment control exists
         if (this.segmentControl) {
-            this.createFilterToggle();
+            this.createFilterMenu();
             this.createOutdatedNotice();
         }
     }
@@ -181,37 +182,266 @@ class AIPanel {
     }
 
     /**
-     * Create the filter toggle button for showing dismissed comments
+     * Create the comment filter menu: a funnel button at the right of the
+     * segment row that opens a small popover of labeled options. The options
+     * only affect user comments. Local mode has no posted comments, so it
+     * gets no "Show posted" option.
      */
-    createFilterToggle() {
-        // Create filter toggle button
-        this.filterToggleBtn = document.createElement('button');
-        this.filterToggleBtn.className = 'filter-toggle-btn';
+    createFilterMenu() {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'comment-filter';
 
-        // Apply restored state from constructor
-        // Use eye icon when dismissed comments are visible, eye-closed when hidden
-        if (this.showDismissedComments) {
-            this.filterToggleBtn.classList.add('active');
-            this.filterToggleBtn.title = 'Hide dismissed user comments';
-            this.filterToggleBtn.innerHTML = AIPanel.ICONS.eye;
-        } else {
-            this.filterToggleBtn.title = 'Show dismissed user comments';
-            this.filterToggleBtn.innerHTML = AIPanel.ICONS.eyeClosed;
-        }
-        this.filterToggleBtn.setAttribute('aria-label', this.filterToggleBtn.title);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'comment-filter-btn';
+        button.setAttribute('aria-expanded', 'false');
+        button.setAttribute('aria-controls', 'comment-filter-menu');
+        button.innerHTML = `${AIPanel.ICONS.funnel}<span class="comment-filter-dot" aria-hidden="true"></span>`;
+
+        const menu = document.createElement('div');
+        menu.className = 'comment-filter-menu';
+        menu.id = 'comment-filter-menu';
+        menu.setAttribute('role', 'group');
+        menu.setAttribute('aria-label', 'User comment filters');
+        menu.hidden = true;
+        const postedOption = this._isLocalMode() ? '' : `
+            <label class="comment-filter-option">
+                <input type="checkbox" data-filter="showPosted"> Show posted
+            </label>`;
+        menu.innerHTML = `
+            <div class="comment-filter-menu-title">User comments</div>
+            <label class="comment-filter-option">
+                <input type="checkbox" data-filter="showDismissed"> Show dismissed
+            </label>${postedOption}`;
+
+        wrapper.appendChild(button);
+        wrapper.appendChild(menu);
+        this.filterMenuWrapper = wrapper;
+        this.filterMenuBtn = button;
+        this.filterMenu = menu;
+
+        button.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (this.filterMenu.hidden) {
+                this.openFilterMenu();
+            } else {
+                this.closeFilterMenu();
+            }
+        });
+        menu.addEventListener('change', (e) => {
+            const input = e.target;
+            if (!input?.dataset?.filter) return;
+            this.setCommentFilter({ [input.dataset.filter]: input.checked });
+        });
+        wrapper.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && !this.filterMenu.hidden) {
+                e.preventDefault();
+                e.stopPropagation();
+                this.closeFilterMenu({ focusButton: true });
+            }
+        });
+        // Tabbing out of the menu closes it
+        wrapper.addEventListener('focusout', (e) => {
+            if (e.relatedTarget && !wrapper.contains(e.relatedTarget)) {
+                this.closeFilterMenu();
+            }
+        });
+        this._onFilterMenuOutsidePointer = (e) => {
+            if (!wrapper.contains(e.target)) this.closeFilterMenu();
+        };
+
+        this.updateFilterMenuVisual();
 
         // Insert as the LAST child of segment-control so it sits at the
         // right edge of the row, after the segment buttons and the right
-        // overflow chevron. Previous versions used insertBefore relative
-        // to .segment-control-inner — that breaks now that the inner row
-        // is nested inside a scroll wrapper. Append-to-end is correct for
-        // both old and new structures and avoids the cross-parent
-        // insertBefore footgun.
+        // overflow chevron. Append-to-end is correct for the nested
+        // scroll-wrapper structure and avoids a cross-parent insertBefore.
         if (this.segmentControl) {
-            this.segmentControl.appendChild(this.filterToggleBtn);
+            this.segmentControl.appendChild(wrapper);
         }
+    }
 
-        // Button is always visible - no conditional hiding to prevent layout shift
+    openFilterMenu() {
+        if (!this.filterMenu || !this.filterMenu.hidden) return;
+        this.updateFilterMenuVisual();
+        this.filterMenu.hidden = false;
+        this.filterMenuBtn.setAttribute('aria-expanded', 'true');
+        // Lift the segment row above the panel sections below it (pr.css)
+        this.segmentControl?.classList.add('comment-filter-open');
+        document.addEventListener('pointerdown', this._onFilterMenuOutsidePointer, true);
+        this.filterMenu.querySelector('input')?.focus();
+    }
+
+    /**
+     * @param {Object} [options]
+     * @param {boolean} [options.focusButton] - Return focus to the funnel (keyboard close)
+     */
+    closeFilterMenu({ focusButton = false } = {}) {
+        if (!this.filterMenu || this.filterMenu.hidden) return;
+        this.filterMenu.hidden = true;
+        this.filterMenuBtn.setAttribute('aria-expanded', 'false');
+        this.segmentControl?.classList.remove('comment-filter-open');
+        document.removeEventListener('pointerdown', this._onFilterMenuOutsidePointer, true);
+        if (focusButton) this.filterMenuBtn.focus();
+    }
+
+    _isLocalMode() {
+        return typeof window !== 'undefined' && !!window.PAIR_REVIEW_LOCAL_MODE;
+    }
+
+    _postedComment() {
+        return (typeof window !== 'undefined' && window.PostedComment) || null;
+    }
+
+    /** The browser-wide default for "Show posted": the opposite of "hide comments after posting". */
+    _defaultShowPosted() {
+        return !(this._postedComment()?.isHidePostedEnabled() || false);
+    }
+
+    /** Whether posted comments show in this review (its override, else the browser-wide setting). */
+    get showPostedComments() {
+        const posted = this._postedComment();
+        return posted ? !posted.isHidePostedInEffect() : true;
+    }
+
+    /**
+     * The user-comment filters, read by PRManager.loadUserComments and
+     * applyPostedCommentVisibility.
+     * @returns {{includeDismissed: boolean, showPosted: boolean}}
+     */
+    getCommentFilterState() {
+        return {
+            includeDismissed: !!this.showDismissedComments,
+            showPosted: this.showPostedComments
+        };
+    }
+
+    /** True when any filter option differs from its default (shows the dot on the funnel). */
+    isCommentFilterNonDefault() {
+        if (this.showDismissedComments) return true;
+        if (this._isLocalMode()) return false;
+        return this.showPostedComments !== this._defaultShowPosted();
+    }
+
+    /**
+     * Change filter options as the user asked: persist them, update the menu
+     * and dispatch one commentFilterChanged event so the comments reload.
+     * Restoring saved state goes through restoreFilterState instead, which
+     * does not dispatch.
+     * @param {{showDismissed?: boolean, showPosted?: boolean}} updates
+     * @returns {boolean} Whether anything changed
+     */
+    setCommentFilter(updates = {}) {
+        let changed = false;
+        if ('showDismissed' in updates && !!updates.showDismissed !== !!this.showDismissedComments) {
+            this.showDismissedComments = !!updates.showDismissed;
+            this.saveFilterState();
+            changed = true;
+        }
+        if ('showPosted' in updates && !this._isLocalMode()
+            && !!updates.showPosted !== this.showPostedComments) {
+            this._setShowPosted(!!updates.showPosted);
+            changed = true;
+        }
+        this.updateFilterMenuVisual();
+        if (!changed) return false;
+
+        document.dispatchEvent(new CustomEvent('commentFilterChanged', {
+            detail: this.getCommentFilterState()
+        }));
+        return true;
+    }
+
+    /**
+     * Set this review's "Show posted" override. A value equal to the
+     * browser-wide default drops the override, so the review follows that
+     * setting again. Never writes the browser-wide setting.
+     * @private
+     */
+    _setShowPosted(value) {
+        const override = value === this._defaultShowPosted() ? null : value;
+        this._postedComment()?.setShowPostedOverride(override);
+        const key = this.getShowPostedStorageKey();
+        if (!key) return;
+        if (override === null) {
+            localStorage.removeItem(key);
+        } else {
+            localStorage.setItem(key, String(override));
+        }
+    }
+
+    /**
+     * Drop this review's "Show posted" override so it follows the browser-wide
+     * setting. Called when the reviewer changes that setting in the submit
+     * dialog. Updates the menu only; the caller refreshes the comments.
+     */
+    clearShowPostedOverride() {
+        this._postedComment()?.setShowPostedOverride(null);
+        const key = this.getShowPostedStorageKey();
+        if (key) localStorage.removeItem(key);
+        this.updateFilterMenuVisual();
+    }
+
+    /**
+     * Update the funnel (dot, label) and the menu's checkboxes to match the
+     * filter state.
+     */
+    updateFilterMenuVisual() {
+        if (!this.filterMenuBtn) return;
+        const nonDefault = this.isCommentFilterNonDefault();
+        this.filterMenuBtn.classList.toggle('has-active-filter', nonDefault);
+        const label = nonDefault ? 'Filter user comments (filters on)' : 'Filter user comments';
+        this.filterMenuBtn.title = label;
+        this.filterMenuBtn.setAttribute('aria-label', label);
+
+        const state = this.getCommentFilterState();
+        const dismissedInput = this.filterMenu?.querySelector('input[data-filter="showDismissed"]');
+        if (dismissedInput) dismissedInput.checked = state.includeDismissed;
+        const postedInput = this.filterMenu?.querySelector('input[data-filter="showPosted"]');
+        if (postedInput) postedInput.checked = state.showPosted;
+    }
+
+    /**
+     * Record how many user comments the filters hide, for the notice at the
+     * end of the list. PRManager counts them from its comment data.
+     * @param {{posted?: number, dismissed?: number}} counts
+     */
+    setHiddenCommentCounts(counts = {}) {
+        const next = { posted: counts.posted || 0, dismissed: counts.dismissed || 0 };
+        const prev = this.hiddenCommentCounts || { posted: 0, dismissed: 0 };
+        this.hiddenCommentCounts = next;
+        const changed = next.posted !== prev.posted || next.dismissed !== prev.dismissed;
+        // Only the User and All lists show the notice
+        if (changed && (this.selectedSegment === 'comments' || this.selectedSegment === 'all')) {
+            this.renderFindings();
+        }
+    }
+
+    /** Turn on the filter options that show the comments the notice counts. */
+    showHiddenComments() {
+        const { posted, dismissed } = this.hiddenCommentCounts || {};
+        const updates = {};
+        if (dismissed > 0) updates.showDismissed = true;
+        if (posted > 0) updates.showPosted = true;
+        return this.setCommentFilter(updates);
+    }
+
+    /**
+     * The muted "N posted · M dismissed hidden — Show" line at the end of the
+     * user comment list, or '' when nothing is hidden.
+     */
+    renderHiddenCommentsNotice() {
+        if (this.selectedSegment !== 'comments' && this.selectedSegment !== 'all') return '';
+        const { posted = 0, dismissed = 0 } = this.hiddenCommentCounts || {};
+        const parts = [];
+        if (posted > 0) parts.push(`${posted} posted`);
+        if (dismissed > 0) parts.push(`${dismissed} dismissed`);
+        if (parts.length === 0) return '';
+        return `
+            <div class="hidden-comments-notice">
+                <span>${parts.join(' · ')} hidden</span> —
+                <button type="button" class="hidden-comments-show" aria-label="Show hidden user comments">Show</button>
+            </div>`;
     }
 
     bindEvents() {
@@ -221,7 +451,10 @@ class AIPanel {
         }
 
         if (this.toggleBtn) {
-            this.toggleBtn.addEventListener('click', () => this.openFindings());
+            this.toggleBtn.addEventListener('click', () => {
+                if (!this.isCollapsed && this.selectedSegment === 'ai') this.collapse();
+                else this.openFindings();
+            });
         }
 
         // AI Summary button
@@ -243,54 +476,12 @@ class AIPanel {
             });
         }
 
-        // Filter toggle button
-        if (this.filterToggleBtn) {
-            this.filterToggleBtn.addEventListener('click', () => this.onFilterToggle());
-        }
-
         // Segment overflow scroll chevrons
         if (this.segmentScrollLeft) {
             this.segmentScrollLeft.addEventListener('click', () => this.scrollSegmentRow(-1));
         }
         if (this.segmentScrollRight) {
             this.segmentScrollRight.addEventListener('click', () => this.scrollSegmentRow(1));
-        }
-    }
-
-    /**
-     * Handle filter toggle button click
-     */
-    onFilterToggle() {
-        this.showDismissedComments = !this.showDismissedComments;
-
-        // Update button visual state
-        this.updateFilterToggleVisual();
-
-        // Persist to localStorage (per-review)
-        this.saveFilterState();
-
-        // Dispatch event for prManager to reload comments with new filter
-        const event = new CustomEvent('filterDismissedChanged', {
-            detail: { showDismissed: this.showDismissedComments }
-        });
-        document.dispatchEvent(event);
-    }
-
-    /**
-     * Update the filter toggle button visual state
-     */
-    updateFilterToggleVisual() {
-        if (this.filterToggleBtn) {
-            this.filterToggleBtn.classList.toggle('active', this.showDismissedComments);
-            // Use eye icon when dismissed comments are visible, eye-closed when hidden
-            if (this.showDismissedComments) {
-                this.filterToggleBtn.title = 'Hide dismissed user comments';
-                this.filterToggleBtn.innerHTML = AIPanel.ICONS.eye;
-            } else {
-                this.filterToggleBtn.title = 'Show dismissed user comments';
-                this.filterToggleBtn.innerHTML = AIPanel.ICONS.eyeClosed;
-            }
-            this.filterToggleBtn.setAttribute('aria-label', this.filterToggleBtn.title);
         }
     }
 
@@ -334,7 +525,7 @@ class AIPanel {
     }
 
     /**
-     * Get the localStorage key for the filter state (per-review)
+     * Get the localStorage key for the "Show dismissed" filter (per-review)
      * @returns {string|null} Storage key or null if no PR context
      */
     getFilterStorageKey() {
@@ -343,7 +534,17 @@ class AIPanel {
     }
 
     /**
-     * Save the filter state to localStorage (per-review)
+     * Get the localStorage key for this review's "Show posted" override. Absent
+     * means the review follows the browser-wide "hide comments after posting".
+     * @returns {string|null} Storage key or null if no PR context
+     */
+    getShowPostedStorageKey() {
+        if (!this.currentPRKey) return null;
+        return `pair-review-show-posted_${this.currentPRKey}`;
+    }
+
+    /**
+     * Save the "Show dismissed" filter to localStorage (per-review)
      */
     saveFilterState() {
         const key = this.getFilterStorageKey();
@@ -354,35 +555,33 @@ class AIPanel {
 
     /**
      * Restore the filter state from localStorage (per-review)
-     * Note: This method only updates internal state and button visual.
-     * It does NOT dispatch the filterDismissedChanged event because:
+     * Note: This method only updates internal state and the menu visual.
+     * It does NOT dispatch the commentFilterChanged event because:
      * 1. During initial setup (setPR), loadUserComments is called explicitly by the caller
-     *    (pr.js or local.js) with the appropriate filter state.
+     *    (pr.js or local.js), and it reads this restored state.
      * 2. Dispatching here would cause a duplicate loadUserComments call that could
      *    override the filter state with an incorrect value.
      *
-     * The event is only dispatched from onFilterToggle() when the user clicks the button.
+     * The event is only dispatched from setCommentFilter() when the user changes an option.
      */
     restoreFilterState() {
         const key = this.getFilterStorageKey();
-        if (key) {
-            const stored = localStorage.getItem(key);
-            if (stored !== null) {
-                this.showDismissedComments = stored === 'true';
-            } else {
-                // Default to false (hidden) for new reviews
-                this.showDismissedComments = false;
-            }
-        } else {
-            this.showDismissedComments = false;
-        }
+        // Default to false (hidden) for new reviews
+        this.showDismissedComments = key ? localStorage.getItem(key) === 'true' : false;
 
-        // Update button visual to match restored state
-        this.updateFilterToggleVisual();
+        // "Show posted": this review's override, if any. Local mode has no
+        // posted comments and so no override.
+        const postedKey = this._isLocalMode() ? null : this.getShowPostedStorageKey();
+        const storedPosted = postedKey ? localStorage.getItem(postedKey) : null;
+        const override = storedPosted === 'true' ? true : storedPosted === 'false' ? false : null;
+        this._postedComment()?.setShowPostedOverride(override);
 
-        // NOTE: We intentionally do NOT dispatch filterDismissedChanged here.
+        // Update the menu to match restored state
+        this.updateFilterMenuVisual();
+
+        // NOTE: We intentionally do NOT dispatch commentFilterChanged here.
         // The caller (pr.js or local.js) is responsible for calling loadUserComments
-        // with the restored filter state after setPR() completes.
+        // after setPR() completes.
     }
 
     toggle() {
@@ -407,8 +606,9 @@ class AIPanel {
             : state === 'complete' ? `${count} AI finding${count === 1 ? '' : 's'}`
             : 'AI · Not reviewed';
         this.toggleBtn.textContent = label + (this.historicalFindings ? ' · Historical' : '');
-        this.toggleBtn.title = 'Open AI findings';
-        this.toggleBtn.setAttribute('aria-label', `${this.toggleBtn.textContent}. Open AI findings`);
+        const action = !this.isCollapsed && this.selectedSegment === 'ai' ? 'Close AI findings' : 'Open AI findings';
+        this.toggleBtn.title = action;
+        this.toggleBtn.setAttribute('aria-label', `${this.toggleBtn.textContent}. ${action}`);
         this.toggleBtn.setAttribute('aria-controls', 'ai-panel');
         this.toggleBtn.setAttribute('aria-expanded', String(!this.isCollapsed));
     }
@@ -435,7 +635,7 @@ class AIPanel {
 
     collapse() {
         this.isCollapsed = true;
-        this.toggleBtn?.setAttribute('aria-expanded', 'false');
+        this.updateFindingsAction();
         if (this.panel) {
             this.panel.classList.add('collapsed');
             if (this.panel.contains(document.activeElement)) {
@@ -450,7 +650,7 @@ class AIPanel {
 
     expand() {
         this.isCollapsed = false;
-        this.toggleBtn?.setAttribute('aria-expanded', 'true');
+        this.updateFindingsAction();
         if (this.panel) {
             this.panel.classList.remove('collapsed');
         }
@@ -582,6 +782,7 @@ class AIPanel {
         this.segmentBtns.forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         this.selectedSegment = segment;
+        this.updateFindingsAction();
 
         // Persist selection with PR-specific key
         if (this.currentPRKey) {
@@ -739,8 +940,8 @@ class AIPanel {
      *
      * Design note: These counts reflect "inbox size" (total items in this.comments),
      * which may include dismissed comments when the "show dismissed" filter is enabled.
-     * This differs from SplitButton/ReviewModal which use DOM-based counting to show
-     * only active comments (what will actually be submitted). The difference is intentional:
+     * This differs from SplitButton/ReviewModal which count comments by active status
+     * (what will actually be submitted). The difference is intentional:
      * - Segment counts = "how many items are in this panel view"
      * - SplitButton counts = "how many comments will be submitted"
      */
@@ -889,11 +1090,19 @@ class AIPanel {
         this.updateOutdatedNotice?.();
 
         const items = this.getFilteredItems();
+        // "N posted · M dismissed hidden — Show", or '' when nothing is hidden
+        const hiddenNotice = this.renderHiddenCommentsNotice();
 
         // Show empty state based on segment and analysis state
         if (items.length === 0) {
             let emptyContent;
-            if (this.selectedSegment === 'comments') {
+            if (this.selectedSegment === 'comments' && hiddenNotice) {
+                emptyContent = `
+                    <div class="empty-state-icon">${this.getEmptyStateIcon('comment')}</div>
+                    <div class="empty-state-title">No comments shown</div>
+                    <div class="empty-state-description">The comment filters hide every user comment.</div>
+                `;
+            } else if (this.selectedSegment === 'comments') {
                 emptyContent = `
                     <div class="empty-state-icon">${this.getEmptyStateIcon('comment')}</div>
                     <div class="empty-state-title">No comments yet</div>
@@ -957,7 +1166,9 @@ class AIPanel {
                 <div class="findings-empty empty-state">
                     ${emptyContent}
                 </div>
+                ${hiddenNotice}
             `;
+            this._bindHiddenCommentsNotice();
             this.updateFindingsHeader(0);
             return;
         }
@@ -973,7 +1184,8 @@ class AIPanel {
             } else {
                 return this.renderFindingItem(item, index);
             }
-        }).join('');
+        }).join('') + hiddenNotice;
+        this._bindHiddenCommentsNotice();
 
         // Bind click events
         this.findingsList.querySelectorAll('.finding-item').forEach(item => {
@@ -1042,6 +1254,17 @@ class AIPanel {
         });
         // Restore active state if we have a current index
         this.highlightCurrentItem();
+    }
+
+    /** Wire the hidden-comments notice's Show button, if the list has one. @private */
+    _bindHiddenCommentsNotice() {
+        const showBtn = this.findingsList?.querySelector('.hidden-comments-show');
+        if (showBtn) {
+            showBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.showHiddenComments();
+            });
+        }
     }
 
     /**
@@ -1357,6 +1580,7 @@ class AIPanel {
     }
 
     showNavigationGuidance(item, { message, matched = false, evidence = '', inDiff = false, location = null } = {}) {
+        if (this.isCollapsed) inDiff = true;
         this.clearNavigationGuidance();
         const manager = window.prManager;
         const notice = document.createElement('section');
@@ -2233,6 +2457,7 @@ class AIPanel {
             <div class="finding-item-wrapper">
                 <button class="finding-item finding-comment ${comment.parent_id ? 'comment-ai-origin' : 'comment-user-origin'}${isFileLevel ? ' file-level' : ''}${dismissedClass}" data-index="${index}" data-id="${comment.id || ''}" data-file="${this.escapeHtml(comment.file || '')}" data-line="${lineNum || ''}" data-is-file-level="${isFileLevel ? '1' : '0'}" data-item-type="comment" title="${this.escapeHtml(fullLocation)}">
                     <span class="comment-icon">${icon}</span>
+                    ${window.getPostedCommentIcon?.(comment) || ''}
                     <div class="finding-content">
                         <span class="finding-title">${this.escapeHtml(title)}</span>
                         ${fileName ? `<span class="finding-location">${this.escapeHtml(fileName)}${isFileLevel ? ' <span class="file-level-indicator">(file)</span>' : ''}</span>` : ''}
@@ -2493,8 +2718,9 @@ class AIPanel {
         this.renderFindings();
         this.resetLevelFilter();
 
-        // Also clear suggestions from the diff view
-        document.querySelectorAll('.ai-suggestion-row').forEach(row => row.remove());
+        // Also clear suggestions from the diff view: inline rows, Pierre
+        // annotations, file-level cards and the navigator list
+        window.prManager?.suggestionManager?.clearAISuggestions?.();
     }
 
     // ========================================
@@ -2577,9 +2803,9 @@ class AIPanel {
             Object.assign(comment, updates);
             // Note: updateSegmentCounts() counts this.comments.length which won't change
             // when status changes. This is intentional - segment counts show "inbox size"
-            // (total items in panel) while SplitButton uses DOM-based counting for
-            // submission validation (active comments only). We still call it here to
-            // trigger any button state updates (e.g., enabling/disabling).
+            // (total items in panel) while the review button and SplitButton count the
+            // pending (active) comments from PRManager.userComments. We still call it
+            // here to trigger any button state updates (e.g., enabling/disabling).
             this.updateSegmentCounts();
             this.renderFindings();
         }

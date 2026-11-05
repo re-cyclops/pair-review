@@ -3,6 +3,9 @@
  * Diff annotation utility for adding explicit line numbers to unified diffs
  * Provides two-column format showing both OLD (base) and NEW (head) line numbers
  */
+const { parseDiffGitPaths, decodeDiffLinePath } = require('./git-paths');
+
+const logger = require('./logger');
 
 /**
  * Parse a hunk header to extract line number information
@@ -12,8 +15,12 @@
  */
 function parseHunkHeader(header) {
   // Match: @@ -oldStart,oldCount +newStart,newCount @@ optional context
-  // Count can be omitted, defaulting to 1
-  const match = header.match(/^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@(.*)$/);
+  // Count can be omitted, defaulting to 1. The `s` (dotAll) flag lets the
+  // trailing context span a carriage return: git trims trailing whitespace
+  // from the function-context line but keeps a lone `\r` inside it, and
+  // without dotAll `.` stops at that `\r`, `$` cannot match, and the whole
+  // header is rejected, so its hunk body goes uncounted.
+  const match = header.match(/^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@(.*)$/s);
 
   if (!match) {
     return null;
@@ -73,6 +80,13 @@ function getLineContent(line) {
 
 /**
  * Parse file header lines to extract old and new file paths
+ *
+ * CALLER CONTRACT: only call this on lines that are OUTSIDE a hunk body. It
+ * returns `true` for anything merely starting with `---`, `+++`, `index ` or
+ * `diff --git`, and those prefixes are ordinary CONTENT inside a hunk (a
+ * deleted `-- x` is emitted as `--- x`, an added `++ x` as `+++ x`). Both
+ * loops in this file enforce that with an `!inHunk` guard.
+ *
  * @param {string} line - A diff line that might be a file header
  * @param {Object} currentFile - Current file info to update
  * @returns {boolean} Whether this was a file header line
@@ -80,28 +94,30 @@ function getLineContent(line) {
 function parseFileHeader(line, currentFile) {
   // Handle diff --git header
   if (line.startsWith('diff --git')) {
-    const match = line.match(/^diff --git a\/(.+) b\/(.+)$/);
-    if (match) {
-      currentFile.oldPath = match[1];
-      currentFile.newPath = match[2];
+    const paths = parseDiffGitPaths(line);
+    if (paths) {
+      currentFile.oldPath = paths.oldPath;
+      currentFile.newPath = paths.newPath;
     }
     return true;
   }
 
   // Handle --- header
   if (line.startsWith('---')) {
-    const match = line.match(/^---\s+(?:a\/)?(.+)$/);
-    if (match && match[1] !== '/dev/null') {
-      currentFile.oldPath = match[1];
+    const match = line.match(/^---\s+(.+)$/);
+    const oldPath = match ? decodeDiffLinePath(match[1], 'a/') : null;
+    if (oldPath !== null) {
+      currentFile.oldPath = oldPath;
     }
     return true;
   }
 
   // Handle +++ header
   if (line.startsWith('+++')) {
-    const match = line.match(/^\+\+\+\s+(?:b\/)?(.+)$/);
-    if (match && match[1] !== '/dev/null') {
-      currentFile.newPath = match[1];
+    const match = line.match(/^\+\+\+\s+(.+)$/);
+    const newPath = match ? decodeDiffLinePath(match[1], 'b/') : null;
+    if (newPath !== null) {
+      currentFile.newPath = newPath;
     }
     return true;
   }
@@ -137,7 +153,7 @@ function parseFileHeader(line, currentFile) {
   if (line.startsWith('rename from')) {
     const match = line.match(/^rename from (.+)$/);
     if (match) {
-      currentFile.renamedFrom = match[1];
+      currentFile.renamedFrom = decodeDiffLinePath(match[1]);
     }
     return true;
   }
@@ -145,7 +161,7 @@ function parseFileHeader(line, currentFile) {
   if (line.startsWith('rename to')) {
     const match = line.match(/^rename to (.+)$/);
     if (match) {
-      currentFile.renamedTo = match[1];
+      currentFile.renamedTo = decodeDiffLinePath(match[1]);
     }
     return true;
   }
@@ -218,8 +234,13 @@ function annotateDiff(rawDiff) {
       continue;
     }
 
-    // Parse file header lines
-    if (parseFileHeader(line, currentFile)) {
+    // Parse file header lines. Guarded on `!inHunk`: inside a hunk body these
+    // prefixes are content, and letting `parseFileHeader` claim them both
+    // corrupts the file path (an added `++ x` line arrives as `+++ x`) and
+    // skips the counter-advancing branches below, shifting every later anchor
+    // in the file. `git diff` opens every file with `diff --git`, which resets
+    // `inHunk` above before that file's real headers arrive.
+    if (!inHunk && parseFileHeader(line, currentFile)) {
       // Check if we just detected a binary file that needs output
       if (currentFile.isBinary && fileStarted && !fileHeaderOutput) {
         let filePath = currentFile.newPath || currentFile.oldPath || 'unknown';
@@ -410,15 +431,35 @@ function parseAnnotatedDiff(annotatedDiff) {
  * Used to determine whether a comment targets a line GitHub can render inline
  * (inside a hunk) vs. one that must be submitted as file-level.
  *
+ * File headers are only headers OUTSIDE a hunk body. `parseFileHeader`
+ * returns `true` for anything starting with `---`, `+++`, `index ` or
+ * `diff --git`, and inside a hunk those are content: a deleted `-- x` line is
+ * emitted as `--- x`, an added `++ x` as `+++ x`, and an unindented `++i;` as
+ * `+++i;`. Letting the header parser claim them overwrote the section's path
+ * with a fragment of source code AND skipped the counter-advancing branch,
+ * shifting every later RIGHT anchor in the file by one. The `!inHunk` guard is
+ * what makes those lines fall through to the ordinary `+`/`-` accounting where
+ * they belong.
+ *
+ * Each line also records the hunk it belongs to, so a caller can tell
+ * whether two lines share a hunk: GitHub only accepts a multi-line comment
+ * whose two ends are in the same hunk.
+ *
  * @param {string} rawDiff - Raw unified diff from git
- * @returns {{ isLineInDiff: (file: string, line: number, side?: string) => boolean }}
+ * @returns {{
+ *   isLineInDiff: (file: string, line: number, side?: string) => boolean,
+ *   hunkOf: (file: string, line: number, side?: string) => number|null
+ * }} `hunkOf` returns an index that is unique per hunk across the whole
+ *   diff, or null for a line outside every hunk.
  */
 function buildDiffLineSet(rawDiff) {
   if (!rawDiff || rawDiff.trim() === '') {
-    return { isLineInDiff: () => false };
+    return { isLineInDiff: () => false, hunkOf: () => null };
   }
 
-  const entries = new Set();
+  // `${file}:${side}:${line}` -> index of the hunk that contains the line
+  const entries = new Map();
+  let hunkIndex = -1;
   const diffLines = rawDiff.split('\n');
   // Trim trailing empty element produced by split('\n') on newline-terminated input.
   // Without this, the empty string matches the context-line branch and adds phantom
@@ -437,7 +478,9 @@ function buildDiffLineSet(rawDiff) {
       continue;
     }
 
-    if (parseFileHeader(line, currentFile)) {
+    // Header lines are headers only outside a hunk body — see the docblock.
+    // Inside one they fall through to the +/- accounting below.
+    if (!inHunk && parseFileHeader(line, currentFile)) {
       continue;
     }
 
@@ -446,6 +489,7 @@ function buildDiffLineSet(rawDiff) {
       oldLineNum = hunkInfo.oldStart;
       newLineNum = hunkInfo.newStart;
       inHunk = true;
+      hunkIndex++;
       continue;
     }
 
@@ -457,14 +501,14 @@ function buildDiffLineSet(rawDiff) {
     if (!filePath) continue;
 
     if (line.startsWith('+')) {
-      entries.add(`${filePath}:RIGHT:${newLineNum}`);
+      entries.set(`${filePath}:RIGHT:${newLineNum}`, hunkIndex);
       newLineNum++;
     } else if (line.startsWith('-')) {
-      entries.add(`${filePath}:LEFT:${oldLineNum}`);
+      entries.set(`${filePath}:LEFT:${oldLineNum}`, hunkIndex);
       oldLineNum++;
     } else if (line.startsWith(' ') || line === '') {
-      entries.add(`${filePath}:LEFT:${oldLineNum}`);
-      entries.add(`${filePath}:RIGHT:${newLineNum}`);
+      entries.set(`${filePath}:LEFT:${oldLineNum}`, hunkIndex);
+      entries.set(`${filePath}:RIGHT:${newLineNum}`, hunkIndex);
       oldLineNum++;
       newLineNum++;
     }
@@ -473,8 +517,113 @@ function buildDiffLineSet(rawDiff) {
   return {
     isLineInDiff(file, lineNum, side = 'RIGHT') {
       return entries.has(`${file}:${side}:${lineNum}`);
+    },
+    hunkOf(file, lineNum, side = 'RIGHT') {
+      const hunk = entries.get(`${file}:${side}:${lineNum}`);
+      return hunk === undefined ? null : hunk;
     }
   };
+}
+
+/**
+ * Map stored comment rows to the GitHub review comments that a review
+ * submission sends. The one mapping for both submit paths: the web submit
+ * route (src/routes/pr.js) and headless --ai-draft / --ai-review
+ * (src/main.js). Both GitHub transports (GraphQL and the host REST
+ * extension) accept the result.
+ *
+ * - `is_file_level = 1` rows become file-level comments.
+ * - A range written backwards (`line_end < line_start`) is the same span,
+ *   so its ends are put in ascending order first.
+ * - A range becomes a multi-line comment (`start_line`, `start_side`, `line`)
+ *   only when both ends are inside the diff, on the comment side, in the
+ *   SAME hunk. GitHub rejects a range that crosses hunks, and one rejected
+ *   comment discards the whole pending review.
+ * - Otherwise, a single line or a range whose `line_start` is inside a hunk
+ *   becomes a single-line comment on `line_start` (the line the finding is
+ *   anchored on).
+ * - Anything else (e.g. expanded context) cannot be inline, so it becomes a
+ *   file-level comment whose body starts with `(Ref Line N)` or
+ *   `(Ref Lines N-M)`.
+ *
+ * @param {Array<Object>|null} rows - Comment rows: file, line_start,
+ *   line_end, side, body, is_file_level
+ * @param {string} diffContent - Raw unified diff used for the hunk check
+ * @param {Object} [options]
+ * @param {(row: Object) => string} [options.formatBody] - Comment text for a
+ *   row, before any line reference prefix. Defaults to `row.body`.
+ * @returns {Array<{path: string, body: string, isFileLevel: boolean,
+ *   line?: number, side?: string, start_line?: number, start_side?: string}>}
+ */
+function buildReviewComments(rows, diffContent, { formatBody = row => row.body } = {}) {
+  const diffLineSet = buildDiffLineSet(diffContent);
+
+  return (rows || []).map(comment => {
+    const side = comment.side || 'RIGHT';
+    const body = formatBody(comment);
+
+    // Explicit file-level comment: about the whole file, not tied to lines
+    if (comment.is_file_level === 1) {
+      logger.debug(`Formatting file-level comment: ${comment.file}`);
+      return {
+        path: comment.file,
+        body,
+        isFileLevel: true
+      };
+    }
+
+    // A backwards range is the same span; order it so start < end.
+    const isRange = comment.line_start != null && Boolean(comment.line_end) && comment.line_end !== comment.line_start;
+    const rangeStart = isRange ? Math.min(comment.line_start, comment.line_end) : comment.line_start;
+    const rangeEnd = isRange ? Math.max(comment.line_start, comment.line_end) : comment.line_start;
+
+    // Check whether the target lines actually appear in a diff hunk rather
+    // than relying on diff_position, which may be absent (e.g. comments
+    // created by the chat agent or headless AI findings).
+    if (isRange) {
+      const startHunk = diffLineSet.hunkOf(comment.file, rangeStart, side);
+      const endHunk = diffLineSet.hunkOf(comment.file, rangeEnd, side);
+      if (startHunk !== null && startHunk === endHunk) {
+        logger.debug(`Formatting range comment: ${comment.file}:${rangeStart}-${rangeEnd} side=${side}`);
+        return {
+          path: comment.file,
+          line: rangeEnd,
+          body,
+          side,
+          isFileLevel: false,
+          start_line: rangeStart,
+          start_side: side
+        };
+      }
+    }
+
+    // A single line, or a range GitHub cannot render as one thread: anchor
+    // on line_start when it is inside a hunk.
+    if (diffLineSet.isLineInDiff(comment.file, comment.line_start, side)) {
+      if (isRange) {
+        logger.debug(`Range ${comment.file}:${rangeStart}-${rangeEnd} side=${side} does not fit one hunk; anchoring on line ${comment.line_start}`);
+      } else {
+        logger.debug(`Formatting line comment: ${comment.file}:${comment.line_start} side=${side}`);
+      }
+      return {
+        path: comment.file,
+        line: comment.line_start,
+        body,
+        side,
+        isFileLevel: false
+      };
+    }
+
+    const lineRef = isRange
+      ? `(Ref Lines ${rangeStart}-${rangeEnd})`
+      : `(Ref Line ${comment.line_start})`;
+    logger.debug(`Formatting file-level comment (expanded context): ${comment.file} ${lineRef}`);
+    return {
+      path: comment.file,
+      body: `${lineRef} ${body}`,
+      isFileLevel: true
+    };
+  });
 }
 
 module.exports = {
@@ -484,5 +633,6 @@ module.exports = {
   formatLineNum,
   getLineMarker,
   getLineContent,
-  buildDiffLineSet
+  buildDiffLineSet,
+  buildReviewComments
 };
