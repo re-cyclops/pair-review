@@ -562,26 +562,17 @@ class ReviewModal {
       view.anchorStatus.replaceChildren();
       for (const problem of draft.errors || []) view.anchorStatus.append(node('p', problem));
       if (draft.included && draft.errors?.length && manifest.target) {
-        const outsideDiff = draft.errors.some(err => err.includes('outside the current diff'));
         const missingFile = draft.errors.some(err => err.includes('not in the current PR diff'));
-        const reanchor = async asFile => {
-          await window.reviewDrafts.flush(view.textarea.draftEntry);
-          const current = view.textarea.draftEntry.base;
-          await this.request(`comments/${current.id}/anchor`, { method: 'PUT', body: JSON.stringify({ draft_key: current.draft_key, expected_revision: current.revision, head: manifest.target.head, as_file: asFile }) });
-          this.invalidate('Anchor updated.');
-          await window.prManager.loadUserComments();
-          await this.load();
-        };
         const actionRow = node('div', null, { class: 'workspace-review-actions' });
-        if (!outsideDiff && !missingFile) {
-          const confirmAnchorBtn = this.button('Confirm this anchor on current head', () => reanchor(false));
-          confirmAnchorBtn.classList.add('workspace-btn-secondary');
-          actionRow.append(confirmAnchorBtn);
-        }
-        if (!draft.wire.isFileLevel && !missingFile) {
-          const convertFileBtn = this.button('Convert explicitly to file comment', () => reanchor(true));
-          convertFileBtn.classList.add('workspace-btn-secondary');
-          actionRow.append(convertFileBtn);
+        if (!missingFile && window.aiPanel?.appendReanchorForm) {
+          view.anchorStatus.classList.add('finding-navigation-guidance');
+          const comment = view.textarea.draftEntry.base;
+          // Old numeric coordinates are not evidence for a current anchor.
+          window.aiPanel.appendReanchorForm(view.anchorStatus, { ...comment, body: view.textarea.value },
+            null, manifest.target.head, async () => {
+              this.invalidate('Anchor updated. Prepare a new final preview.');
+              await this.load();
+            });
         }
         const moveToBodyBtn = this.button('Move exact text to review body and exclude inline draft', async () => {
           this.bodyInput.value = this.bodyInput.value ? `${this.bodyInput.value}\n\n${view.textarea.value}` : view.textarea.value;

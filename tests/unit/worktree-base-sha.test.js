@@ -29,6 +29,9 @@ describe('GitWorktreeManager base SHA availability', () => {
     manager.hasLocalChanges = vi.fn().mockResolvedValue(false);
     manager.getWorktreePath = vi.fn().mockResolvedValue('/tmp/worktrees/existing');
     manager.worktreeExists = vi.fn().mockResolvedValue(true);
+    manager.pathExists = vi.fn().mockResolvedValue(false);
+    const ensureCommitAvailable = manager.ensureCommitAvailable.bind(manager);
+    manager.ensureCommitAvailable = vi.fn((git, sha, remote, label) => label === 'Head SHA' ? undefined : ensureCommitAvailable(git, sha, remote, label));
   });
 
   afterEach(() => {
@@ -134,7 +137,7 @@ describe('GitWorktreeManager base SHA availability', () => {
 
     expect(worktreeGit.fetch).not.toHaveBeenCalledWith(['--no-tags', '--prune', 'fork-remote']);
     expect(worktreeGit.raw).toHaveBeenCalledWith(['fetch', '--no-tags', 'fork-remote', 'base-sha']);
-    expect(worktreeGit.checkout).toHaveBeenCalledWith(['refs/remotes/fork-remote/pr-42']);
+    expect(worktreeGit.raw).toHaveBeenCalledWith(['checkout', '--detach', '--no-overwrite-ignore', 'head-sha']);
   });
 
   it('fetches only the base branch when updating, never a bulk prune fetch', async () => {
@@ -159,7 +162,7 @@ describe('GitWorktreeManager base SHA availability', () => {
       '+refs/heads/main:refs/remotes/fork-remote/main',
     ]);
     expect(worktreeGit.fetch).not.toHaveBeenCalledWith(['--no-tags', '--prune', 'fork-remote']);
-    expect(worktreeGit.checkout).toHaveBeenCalledWith(['refs/remotes/fork-remote/pr-42']);
+    expect(worktreeGit.raw).toHaveBeenCalledWith(['checkout', '--detach', '--no-overwrite-ignore', 'head-sha']);
   });
 
   it('prunes and retries when the update base-branch fetch hits a ref hierarchy conflict', async () => {
@@ -187,7 +190,7 @@ describe('GitWorktreeManager base SHA availability', () => {
       'fork-remote',
       '+refs/heads/main:refs/remotes/fork-remote/main',
     ]);
-    expect(worktreeGit.checkout).toHaveBeenCalledWith(['refs/remotes/fork-remote/pr-42']);
+    expect(worktreeGit.raw).toHaveBeenCalledWith(['checkout', '--detach', '--no-overwrite-ignore', 'head-sha']);
   });
 
   it('tolerates a failed targeted base-branch fetch and proceeds to checkout', async () => {
@@ -210,7 +213,7 @@ describe('GitWorktreeManager base SHA availability', () => {
     )).resolves.toBeDefined();
 
     expect(worktreeGit.raw).not.toHaveBeenCalledWith(['remote', 'prune', 'fork-remote']);
-    expect(worktreeGit.checkout).toHaveBeenCalledWith(['refs/remotes/fork-remote/pr-42']);
+    expect(worktreeGit.raw).toHaveBeenCalledWith(['checkout', '--detach', '--no-overwrite-ignore', 'head-sha']);
   });
 
   it('uses nested REST-format SHAs during update verification', async () => {
@@ -232,7 +235,7 @@ describe('GitWorktreeManager base SHA availability', () => {
       head: { sha: 'nested-head-sha' },
     });
 
-    expect(worktreeGit.checkout).toHaveBeenCalledWith(['refs/remotes/fork-remote/pr-42']);
+    expect(worktreeGit.raw).toHaveBeenCalledWith(['checkout', '--detach', '--no-overwrite-ignore', 'nested-head-sha']);
     // This payload carries a base SHA but no ref anywhere, so the advisory
     // missing-base-branch warn fires — only fetch failures would be a problem.
     expect(warnSpy).toHaveBeenCalledWith(
@@ -451,7 +454,7 @@ describe('GitWorktreeManager base SHA availability', () => {
       'fork-remote',
       '+refs/heads/main:refs/remotes/fork-remote/main',
     ]);
-    expect(worktreeGit.raw).toHaveBeenCalledWith(['reset', '--hard', 'refs/remotes/fork-remote/pr-42']);
+    expect(worktreeGit.raw).toHaveBeenCalledWith(['checkout', '--detach', '--no-overwrite-ignore', 'head-sha']);
   });
 
   it('fetches the exact base SHA when refreshing an existing worktree record', async () => {
@@ -482,7 +485,7 @@ describe('GitWorktreeManager base SHA availability', () => {
     );
 
     expect(worktreeGit.raw).toHaveBeenCalledWith(['fetch', '--no-tags', 'fork-remote', 'base-sha']);
-    expect(worktreeGit.raw).toHaveBeenCalledWith(['reset', '--hard', 'refs/remotes/fork-remote/pr-42']);
+    expect(worktreeGit.raw).toHaveBeenCalledWith(['checkout', '--detach', '--no-overwrite-ignore', 'head-sha']);
   });
 
   it('fails with a targeted diff error when the base SHA is missing locally', async () => {

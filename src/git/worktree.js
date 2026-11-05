@@ -10,6 +10,8 @@ const { normalizeRepository, resolveRenamedFile, resolveRenamedFileOld } = requi
 const { GIT_DIFF_FLAGS_ARRAY, GIT_DIFF_SUMMARY_FLAGS_ARRAY } = require('./diff-flags');
 const { rawFetchNoTags, fetchWithPruneRecovery } = require('./fetch-helpers');
 const { spawn, execSync } = require('child_process');
+const { WorktreeLockManager } = require('./worktree-lock');
+const { randomUUID } = require('node:crypto');
 
 const MISSING_COMMIT_ERROR_CODE = 'PAIR_REVIEW_MISSING_COMMIT';
 
@@ -346,6 +348,7 @@ class GitWorktreeManager {
   wrapError(prefix, error) {
     const wrapped = new Error(`${prefix}: ${error.message}`);
     if (error?.code) wrapped.code = error.code;
+    if (error?.statusCode) wrapped.statusCode = error.statusCode;
     if (error?.commitSha) wrapped.commitSha = error.commitSha;
     if (error?.commitLabel) wrapped.commitLabel = error.commitLabel;
     if (error?.remote) wrapped.remote = error.remote;
@@ -541,12 +544,8 @@ class GitWorktreeManager {
 
           return { path: refreshedPath, id: returnId };
         } catch (refreshError) {
-          // If refresh fails due to uncommitted changes, propagate that error
-          if (refreshError.message.includes('uncommitted changes')) {
-            throw refreshError;
-          }
-          // For other errors, log and fall through to recreate
-          console.log(`Could not refresh existing worktree, will recreate: ${refreshError.message}`);
+          // Never delete an existing checkout to recover from a fetch/checkout error.
+          throw refreshError;
         }
       } else if (directoryExists) {
         console.log(`Worktree directory at ${worktreePath} is not a valid git worktree, will recreate`);
@@ -581,12 +580,7 @@ class GitWorktreeManager {
           const refreshedPath = await this.refreshWorktree({ path: legacyPath, id: worktreeRecord?.id }, prInfo.number, prData, prInfo);
           return { path: refreshedPath, id: worktreeRecord?.id };
         } catch (refreshError) {
-          // If refresh fails due to uncommitted changes, propagate that error
-          if (refreshError.message.includes('uncommitted changes')) {
-            throw refreshError;
-          }
-          // For other errors, log and fall through to recreate with new ID
-          console.log(`Could not refresh legacy worktree, will create new one: ${refreshError.message}`);
+          throw refreshError;
         }
       }
 
@@ -601,14 +595,20 @@ class GitWorktreeManager {
       worktreePath = path.join(this.worktreeBaseDir, worktreeDirName);
     }
 
+    if (await this.pathExists(worktreePath)) {
+      throw new Error(`Refusing to replace an existing directory at ${worktreePath}. Resolve it manually; its files were preserved.`);
+    }
+    const locks = this.db ? new WorktreeLockManager(this.db) : null;
+    const holder = `create:${randomUUID()}`;
+    if (locks && !locks.acquire(worktreePath, holder, { repository, prNumber: prInfo.number })) {
+      throw Object.assign(new Error('Worktree is in use by another operation'), { statusCode: 409 });
+    }
     try {
       console.log(`Creating worktree for PR #${prInfo.number} at ${worktreePath}`);
 
       // Ensure worktree base directory exists
       await this.ensureWorktreeBaseDir();
 
-      // Clean up existing worktree if it exists
-      await this.cleanupWorktree(worktreePath);
       
       // Create git instance for the source repository
       const git = this._gitFor(repositoryPath);
@@ -724,16 +724,16 @@ class GitWorktreeManager {
       const targetSha = this.getPRHeadSha(prData);
       if (targetSha) {
         console.log(`Checking out to PR head commit ${targetSha}...`);
-        await worktreeGit.checkout([targetSha]);
+        await worktreeGit.raw(['checkout', '--detach', '--no-overwrite-ignore', targetSha]);
       } else {
         console.log(`Checking out to PR head ref ${fetchedHead.checkoutTarget}...`);
-        await worktreeGit.checkout([fetchedHead.checkoutTarget]);
+        await worktreeGit.raw(['checkout', '--detach', '--no-overwrite-ignore', fetchedHead.checkoutTarget]);
       }
       
       // Verify we're at the correct commit
       const currentCommit = await worktreeGit.revparse(['HEAD']);
       if (targetSha && currentCommit.trim() !== targetSha) {
-        console.warn(`Warning: Expected commit ${targetSha}, but got ${currentCommit.trim()}`);
+        throw new Error(`Expected PR head ${targetSha}, but checkout is at ${currentCommit.trim()}`);
       }
 
       // Store/update worktree record in database
@@ -764,6 +764,8 @@ class GitWorktreeManager {
       }
       
       throw this.wrapError('Failed to create git worktree', error);
+    } finally {
+      locks?.release(worktreePath, holder);
     }
   }
 
@@ -777,64 +779,9 @@ class GitWorktreeManager {
    */
   async updateWorktree(owner, repo, number, prData) {
     const prInfo = { owner, repo, number };
-    const headSha = this.getPRHeadSha(prData);
     const worktreePath = await this.getWorktreePath(prInfo);
-
-    try {
-      // Check if worktree exists
-      const exists = await this.worktreeExists(prInfo);
-      if (!exists) {
-        throw new Error(`Worktree does not exist at ${worktreePath}`);
-      }
-
-      console.log(`Updating worktree for PR #${number} at ${worktreePath}`);
-
-      // Create git instance for the worktree
-      const worktreeGit = this._gitFor(worktreePath);
-
-      // Resolve which remote points to the PR's base repository (handles forks)
-      const remote = await this.resolveRemoteForPR(worktreeGit, prData, prInfo);
-
-      // Fetch only the PR's base branch so ensureBaseShaAvailable does not have to
-      // fall back to `git fetch <remote> <sha>`, which some Git servers and mirrors
-      // reject (they require uploadpack.allowReachableSHA1InWant). This mirrors the
-      // targeted fetch used in createWorktreeForPR; ensureBaseShaAvailable below is
-      // the correctness backstop if the ref cannot be updated.
-      const baseBranch = prData?.base_branch || prData?.base?.ref || null;
-      if (baseBranch) {
-        console.log(`Fetching base branch ${baseBranch} from ${remote}...`);
-        try {
-          await fetchWithPruneRecovery(worktreeGit, remote, `+refs/heads/${baseBranch}:refs/remotes/${remote}/${baseBranch}`);
-        } catch (fetchError) {
-          console.warn(`Targeted base-branch fetch failed, will rely on existing refs: ${fetchError.message}`);
-        }
-      } else {
-        console.warn(`No base branch recorded for PR #${number}; skipping targeted base fetch (ensureBaseShaAvailable may fall back to a direct SHA fetch)`);
-      }
-
-      await this.ensureBaseShaAvailable(worktreeGit, prData, remote);
-
-      // Fetch the PR head using PR refs when available, with a branch/SHA fallback
-      console.log(`Fetching PR #${number} head...`);
-      const fetchedHead = await this.fetchPRHead(worktreeGit, prInfo, prData, { remote });
-
-      // Checkout to PR head commit
-      console.log(`Checking out to PR head ${headSha || fetchedHead.checkoutTarget}...`);
-      await worktreeGit.checkout([fetchedHead.checkoutTarget]);
-
-      // Verify we're at the correct commit
-      const currentCommit = await worktreeGit.revparse(['HEAD']);
-      if (headSha && currentCommit.trim() !== headSha) {
-        console.warn(`Warning: Expected commit ${headSha}, but got ${currentCommit.trim()}`);
-      }
-
-      console.log(`Worktree updated successfully at ${worktreePath}`);
-      return worktreePath;
-
-    } catch (error) {
-      console.error('Error updating worktree:', error);
-      throw this.wrapError('Failed to update git worktree', error);
-    }
+    if (!await this.worktreeExists(prInfo)) throw new Error(`Worktree does not exist at ${worktreePath}`);
+    return this.refreshWorktree({ path: worktreePath }, number, prData, prInfo);
   }
 
   /**
@@ -1193,6 +1140,17 @@ class GitWorktreeManager {
     }
   }
 
+  async assertPinnedWorktree(worktreePath, prData) {
+    const git = this._gitFor(worktreePath);
+    const expected = this.getPRHeadSha(prData);
+    if (!expected) throw new Error('Current PR head is unavailable. Reload the pull request.');
+    const actual = (await git.revparse(['HEAD'])).trim();
+    if (actual !== expected) throw new Error(`Checkout is at ${actual}, not the current PR head ${expected}. Reload the pull request.`);
+    if (await this.hasLocalChanges(worktreePath)) {
+      throw new Error(`Worktree has uncommitted changes. Please resolve manually at: ${worktreePath}`);
+    }
+  }
+
   /**
    * Refresh an existing worktree with latest PR changes from remote
    * @param {Object} worktreeRecord - Database record for the worktree
@@ -1204,8 +1162,24 @@ class GitWorktreeManager {
    */
   async refreshWorktree(worktreeRecord, prNumber, prData = null, prInfo = null) {
     const worktreePath = worktreeRecord.path;
+    const locks = this.db ? new WorktreeLockManager(this.db) : null;
+    const holder = `refresh:${randomUUID()}`;
+    if (locks && !locks.acquire(worktreePath, holder, { repository: prInfo?.owner && normalizeRepository(prInfo.owner, prInfo.repo), prNumber })) {
+      throw Object.assign(new Error('Worktree is in use by another operation'), { statusCode: 409 });
+    }
 
     try {
+      if (this.db && prInfo?.owner) {
+        const reviews = this.db.prepare('SELECT id FROM reviews WHERE repository = ? COLLATE NOCASE AND pr_number = ?')
+          .all(normalizeRepository(prInfo.owner, prInfo.repo), prNumber);
+        const busy = reviews.some(review => require('../analysis-activity').reviewInProgress(this.db, review.id)
+          || require('../ai/background-queue').backgroundQueue.hasUnsettledForReview(review.id));
+        if (busy) {
+          try { await this.assertPinnedWorktree(worktreePath, prData); }
+          catch { throw Object.assign(new Error('The PR changed while analysis or background work is active. Wait for it to finish, then reload the latest revision.'), { statusCode: 409 }); }
+          return worktreePath;
+        }
+      }
       console.log(`Refreshing existing worktree for PR #${prNumber} at ${worktreePath}`);
 
       // Check for uncommitted changes
@@ -1240,12 +1214,15 @@ class GitWorktreeManager {
       console.log(`Fetching PR #${prNumber} head from ${remote}...`);
       const fetchedHead = await this.fetchPRHead(git, prInfo || { number: prNumber }, prData, { remote });
 
-      // Reset to the fetched PR head
-      console.log(`Resetting worktree to PR head...`);
-      await git.raw(['reset', '--hard', fetchedHead.checkoutTarget]);
+      // A non-forced checkout preserves dirty and ignored files, including
+      // ignored files that the new revision would otherwise overwrite.
+      const target = this.getPRHeadSha(prData) || fetchedHead.checkoutTarget;
+      await this.ensureCommitAvailable(git, target, remote, 'Head SHA');
+      await git.raw(['checkout', '--detach', '--no-overwrite-ignore', target]);
+      await this.assertPinnedWorktree(worktreePath, { head_sha: target });
 
       // Update last_accessed_at in database
-      if (this.worktreeRepo) {
+      if (this.worktreeRepo && worktreeRecord.id) {
         await this.worktreeRepo.updateLastAccessed(worktreeRecord.id);
         console.log(`Updated last_accessed_at timestamp for worktree`);
       }
@@ -1260,6 +1237,8 @@ class GitWorktreeManager {
       }
       console.error('Error refreshing worktree:', error);
       throw this.wrapError('Failed to refresh worktree', error);
+    } finally {
+      locks?.release(worktreePath, holder);
     }
   }
 

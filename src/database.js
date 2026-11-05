@@ -5596,14 +5596,15 @@ class AnalysisRunRepository {
    * @param {Object|null} [runInfo.protocol] - Effective run protocol; child runs inherit their parent's snapshot
    * @returns {Promise<Object>} Created analysis run record
    */
-  async create({ id, reviewId, provider = null, model = null, tier = null, customInstructions = null, globalInstructions = null, repoInstructions = null, requestInstructions = null, headSha = null, diff = null, status = 'running', parentRunId = null, configType = 'single', levelsConfig = null, scopeStart = null, scopeEnd = null, protocol = null }) {
+  async create({ id, reviewId, provider = null, model = null, tier = null, customInstructions = null, globalInstructions = null, repoInstructions = null, requestInstructions = null, headSha = null, baseSha = null, diff = null, status = 'running', parentRunId = null, configType = 'single', levelsConfig = null, scopeStart = null, scopeEnd = null, protocol = null }) {
     if (activity.isStopping()) {
       throw Object.assign(new Error('Executor is shutting down'), { status: 503, isCancellation: true });
     }
     const isTerminal = ['completed', 'failed', 'cancelled'].includes(status);
     const completedAt = isTerminal ? 'CURRENT_TIMESTAMP' : 'NULL';
     const levelsConfigJson = levelsConfig ? JSON.stringify(levelsConfig) : null;
-    const protocolJson = protocol ? JSON.stringify(protocol) : null;
+    const pinnedProtocol = baseSha && headSha ? { ...protocol, comparison: { baseSha, headSha } } : protocol;
+    const protocolJson = pinnedProtocol ? JSON.stringify(pinnedProtocol) : null;
     this.db.transaction(() => {
       require('./review-removal').assertReviewAvailable(this.db, reviewId);
       const parent = parentRunId

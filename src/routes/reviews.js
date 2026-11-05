@@ -32,6 +32,7 @@ const { PRArgumentParser } = require('../github/parser');
 const { resolveReviewBinding } = require('../utils/host-resolution');
 const reviewProgress = require('../review-progress');
 const { actualModelsForRun } = require('../ai/model-evidence');
+const { decorateRevisionFeedback } = require('../revision-feedback');
 
 const router = express.Router();
 
@@ -205,11 +206,11 @@ router.put('/api/reviews/:reviewId/association', validateReviewId, async (req, r
   } catch (error) { submissionError(res, error); }
 });
 
-router.put('/api/reviews/:reviewId/comments/:id/anchor', validateReviewId, async (req, res) => {
+router.post('/api/reviews/:reviewId/comments/:id/reanchor', validateReviewId, async (req, res) => {
   try {
     const context = await submissionContext(req);
     const comment = await submission.reanchorDraft(context, { ...req.body, commentId: Number(req.params.id) });
-    res.json({ comment });
+    res.json({ success: true, comment: decorateRevisionFeedback(req.app.get('db'), req.reviewId, [comment])[0] });
     broadcastReviewEvent(req.reviewId, { type: 'review:comments_changed' }, { sourceClientId: req.get('X-Client-Id') });
   } catch (error) { submissionError(res, error); }
 });
@@ -273,7 +274,7 @@ router.get('/api/reviews/:reviewId/comments', validateReviewId, async (req, res)
 
     res.json({
       success: true,
-      comments: comments || []
+      comments: decorateRevisionFeedback(db, req.reviewId, comments || [])
     });
   } catch (error) {
     logger.error('Error fetching comments:', error);
@@ -393,7 +394,7 @@ router.get('/api/reviews/:reviewId/comments/:id', validateReviewId, async (req, 
       return res.status(404).json({ error: 'User comment not found' });
     }
 
-    res.json(comment);
+    res.json(decorateRevisionFeedback(db, req.reviewId, [comment])[0]);
   } catch (error) {
     logger.error('Error fetching comment:', error);
     res.status(500).json({
@@ -455,6 +456,7 @@ router.put('/api/reviews/:reviewId/comments/:id', validateReviewId, async (req, 
     });
   }
 });
+
 
 // Unlike dismissal, deletion clears local draft text and cannot be restored.
 // Keep the identity tombstone so a late create/save cannot resurrect it.
@@ -853,7 +855,7 @@ router.get('/api/reviews/:reviewId/suggestions', validateReviewId, async (req, r
       FROM reviews r LEFT JOIN pr_metadata p ON p.repository = r.repository COLLATE NOCASE AND p.pr_number = r.pr_number
       WHERE r.id = ?`, [reviewId]);
 
-    const suggestions = rows.map(row => {
+    const suggestions = decorateRevisionFeedback(db, reviewId, rows).map(row => {
       const formattedBody = formatComment({
         body: row.body,
         suggestionText: row.suggestion_text,

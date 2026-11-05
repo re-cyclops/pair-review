@@ -35,6 +35,8 @@ const { safeParseJson } = require('../utils/safe-parse-json');
 const { mergeInstructions } = require('../utils/instructions');
 const { captureRunProtocol } = require('../utils/review-protocol');
 
+const { beginRevisionRecheck } = require('../revision-feedback');
+const { GitWorktreeManager } = require('../git/worktree');
 /**
  * Generate a diff for the executable provider and write it to a file.
  *
@@ -278,6 +280,7 @@ async function runExecutableAnalysis(req, res, params, shared, callbacks) {
       repoInstructions,
       requestInstructions,
       headSha: headSha || null,
+      baseSha: reviewType === 'pr' ? buildContext(review, { selectedModel }).baseSha : null,
       configType: 'single',
       levelsConfig: null,
       protocol: captureRunProtocol(config, { provider: selectedProvider, model: selectedModel, tier: 'thorough', ...providerOverrides })
@@ -363,6 +366,14 @@ async function runExecutableAnalysis(req, res, params, shared, callbacks) {
       executableContext.customInstructions = [executableContext.customInstructions,
         baselineInstructions(safeParseJson((await analysisRunRepo.getById(runId))?.review_baseline))].filter(Boolean).join('\n\n') || null;
       const cwd = executableContext.cwd || process.cwd();
+      const revisionRecheck = reviewType === 'pr' ? beginRevisionRecheck(db, reviewId, headSha, runId) : null;
+      executableContext.customInstructions = [executableContext.customInstructions, revisionRecheck?.instructions].filter(Boolean).join('\n\n') || null;
+      if (reviewType === 'pr') await new GitWorktreeManager(db).assertPinnedWorktree(cwd, { head_sha: headSha });
+      if (reviewType === 'pr') {
+        const snapshotPath = path.join(tmpDir, 'analysis.diff');
+        await generateDiffForExecutable(cwd, executableContext, [], snapshotPath);
+        await analysisRunRepo.update(runId, { diff: await fsPromises.readFile(snapshotPath, 'utf8') });
+      }
 
       // Only generate a diff file when the provider's context_args maps diff_path to a CLI flag
       if (provider.contextArgs?.diff_path) {
@@ -411,6 +422,7 @@ async function runExecutableAnalysis(req, res, params, shared, callbacks) {
         throw new Error('Executable provider returned no data');
       }
 
+      revisionRecheck?.record(result.data);
       const rawSuggestions = result.data.suggestions || [];
       const summary = result.data.summary || '';
 
@@ -434,6 +446,7 @@ async function runExecutableAnalysis(req, res, params, shared, callbacks) {
 
       // Mode-specific success handling
       await onSuccess(db, runId, { suggestions, summary });
+      revisionRecheck?.finish();
 
       logger.success(`Executable analysis complete for ${logLabel}: ${suggestions.length} suggestions`);
 

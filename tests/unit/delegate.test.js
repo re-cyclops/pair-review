@@ -78,7 +78,7 @@ const CONFIG = { port: 7247 };
 describe('probeServer', () => {
   it('delegates to a matching-version, same-DB pair-review server', async () => {
     const fetch = vi.fn(async () =>
-      jsonRes(200, { status: 'ok', service: 'pair-review', version: CLI_VERSION, dbId: DB_ID })
+      jsonRes(200, { status: 'ok', service: 'pair-review', version: CLI_VERSION, dbId: DB_ID, dotfilesReviewFreshness: 1 })
     );
     const result = await probeServer(CONFIG, baseDeps({ fetch }));
     expect(result).toMatchObject({ delegate: true, baseUrl: 'http://localhost:7247', serverVersion: CLI_VERSION });
@@ -116,6 +116,14 @@ describe('probeServer', () => {
     const result = await probeServer(CONFIG, baseDeps({ fetch }));
     expect(result.delegate).toBe(false);
     expect(result.reason).toMatch(/different database/i);
+  });
+
+  it('does not delegate to a same-version server without the freshness capability', async () => {
+    const fetch = vi.fn(async () => jsonRes(200, { status: 'ok', service: 'pair-review', version: CLI_VERSION, dbId: DB_ID }));
+    const result = await probeServer(CONFIG, baseDeps({ fetch }));
+    expect(result.delegate).toBe(false);
+    expect(result.reason).toMatch(/freshness/i);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('does NOT delegate on a 5xx /health (transient server error, empty body)', async () => {

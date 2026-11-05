@@ -1304,8 +1304,43 @@ class PRManager {
    * keeps external-comment rows in sync with the other two overlays
    * whenever post-analysis refresh fires.
    */
-  _reloadAfterAnalysis() {
-    return this._rerenderAllOverlays();
+  async _reloadAfterAnalysis() {
+    this._analysisReloadPending = true;
+    if (this._analysisReloadPromise) return this._analysisReloadPromise;
+    this._analysisReloadPromise = (async () => {
+      do {
+        this._analysisReloadPending = false;
+        const reviewId = this.currentPR?.id;
+        const runHead = this.analysisHistoryManager?.selectedRun?.head_sha;
+        const viewedHead = this.displayedProgressContext?.head || this.currentPR?.head_sha;
+        try {
+          if (!window.PAIR_REVIEW_LOCAL_MODE && runHead && runHead !== viewedHead) {
+            if (!this._canReplaceDiff()) {
+              this._showStaleBadge('stale', 'Latest analysis is ready. Save or cancel the open editor, then update to view its current code.');
+              return;
+            }
+            const { owner, repo, number } = this.currentPR;
+            const response = await fetch(`/api/pr/${owner}/${repo}/${number}`);
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || 'Could not load the analyzed revision.');
+            if (this.currentPR?.id !== reviewId) return;
+            await this.loadAndDisplayFiles(owner, repo, number, { preserveEditors: true });
+            if (this.currentPR?.id !== reviewId) return;
+            this.currentPR = data.data || data;
+            this.renderPRHeader(this.currentPR);
+            this._syncWorktreeDropdown(this.currentPR);
+          }
+          await this._rerenderAllOverlays();
+        } catch (error) {
+          window.toast?.showError(error.message);
+          this._showStaleBadge('stale', error.message);
+        }
+        if (this.currentPR?.id !== reviewId) return;
+        if (this.analysisHistoryManager?.selectedRun?.head_sha !== runHead) this._analysisReloadPending = true;
+      } while (this._analysisReloadPending);
+    })();
+    try { await this._analysisReloadPromise; }
+    finally { this._analysisReloadPromise = null; }
   }
 
   /**
@@ -6711,7 +6746,7 @@ class PRManager {
           const historical = !!analysisHasRun && (!run?.head_sha || !viewedSha || run.head_sha !== viewedSha || !localDiffMatches);
           window.aiPanel?.setRevisionContext?.({
             historical,
-            message: historical ? `Historical AI review (${run?.head_sha?.slice(0, 7) || 'revision unknown'}); viewed revision ${viewedSha?.slice(0, 7) || 'unknown'}. Open a finding to inspect its saved code, not the current diff.`
+            message: historical ? `Earlier AI review (${run?.head_sha?.slice(0, 7) || 'revision unknown'}); current revision ${viewedSha?.slice(0, 7) || 'unknown'}. Open a finding to locate matching code. Issue relevance and pending anchors still need recheck.`
               : analysisHasRun ? `AI review of the viewed revision ${viewedSha?.slice(0, 7) || ''}. User drafts and GitHub comments are separate segments.` : ''
           });
 
@@ -8547,8 +8582,8 @@ class PRManager {
 
   /**
    * Fire-and-forget staleness check on page load.
-   * If stale and no active session data, silently refreshes.
-   * If stale and session data exists, shows the badge.
+   * A head advance refreshes the current code while preserving saved drafts
+   * and history. Open editors and unsafe checkouts still block replacement.
    * Also shows badge variants for closed/merged PRs.
    * @returns {Promise<Object|null>} The parsed staleness result, or null on failure.
    */
@@ -8567,7 +8602,7 @@ class PRManager {
       if (result.isStale !== true) return result;
 
       this._staleDetails = result;
-      if (await this._hasActiveSessionData()) this._showStaleBadge('stale');
+      if (!this._canReplaceDiff()) this._showStaleBadge('stale', 'Save or cancel the open editor, then update to view the latest commits.');
       else await this.refreshPR();
       return result;
     } catch {
@@ -8597,34 +8632,27 @@ class PRManager {
   }
 
   /**
-   * Check whether the current session has user work worth protecting
-   * (analysis results or active user comments).
-   * Returns true if uncertain (fail-safe: don't auto-refresh).
+   * Local mode uses saved session data to decide whether to replace a working
+   * directory diff. PR refresh preserves these records and does not use this gate.
    */
   async _hasActiveSessionData() {
     if (!this._canReplaceDiff()) return true;
     const reviewId = this.currentPR?.id;
-    // No review record → no session data possible
     if (!reviewId) return false;
-
     try {
       const [suggestionsRes, commentsRes] = await Promise.all([
         fetch(`/api/reviews/${reviewId}/suggestions/check`).then(r => r.ok ? r.json() : null),
         fetch(`/api/reviews/${reviewId}/comments`).then(r => r.ok ? r.json() : null)
       ]);
       if (!suggestionsRes || !commentsRes) return true;
-
-      const hasAnalysis = suggestionsRes?.analysisHasRun === true;
-      const hasUserComments = (commentsRes?.comments || []).some(
-        c => c.source === 'user' && c.status !== 'inactive'
+      return suggestionsRes.analysisHasRun === true || (commentsRes.comments || []).some(
+        comment => comment.source === 'user' && comment.status !== 'inactive'
       );
-
-      return hasAnalysis || hasUserComments;
     } catch {
-      // Uncertain — fail safe
       return true;
     }
   }
+
 
   /**
    * Show the stale badge with an optional variant class.

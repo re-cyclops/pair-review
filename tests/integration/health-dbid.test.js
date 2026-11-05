@@ -48,6 +48,7 @@ describe('buildHealthPayload', () => {
     expect(payload.service).toBe('pair-review');
     expect(payload.version).toBe(pkgVersion);
     expect(payload.dbId).toBe('deadbeef');
+    expect(payload.dotfilesReviewFreshness).toBe(1);
     expect(typeof payload.timestamp).toBe('string');
     // Timestamp must be a parseable ISO string.
     expect(Number.isNaN(Date.parse(payload.timestamp))).toBe(false);
@@ -71,7 +72,8 @@ describe('GET /health', () => {
     expect(res.body).toMatchObject({
       status: 'ok',
       service: 'pair-review',
-      version: pkgVersion
+      version: pkgVersion,
+      dotfilesReviewFreshness: 1
     });
     expect(res.body.timestamp).toBeTruthy();
     // The load-bearing field: byte-identical to the CLI-side computation.

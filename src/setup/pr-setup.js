@@ -11,19 +11,25 @@
  *   - setupPRReview: full orchestrator that wires the above together
  */
 
-const { run, queryOne, WorktreeRepository, RepoSettingsRepository, ReviewRepository, PRMetadataRepository } = require('../database');
-const { GitWorktreeManager, MISSING_COMMIT_ERROR_CODE } = require('../git/worktree');
+const { run, queryOne, WorktreeRepository, RepoSettingsRepository, PRMetadataRepository } = require('../database');
+const { GitWorktreeManager } = require('../git/worktree');
 const { WorktreePoolLifecycle } = require('../git/worktree-pool-lifecycle');
 const { GitHubClient } = require('../github/client');
 const { normalizeRepository } = require('../utils/paths');
 const { findMainGitRoot } = require('../local-review');
-const { getConfigDir, getRepoPath, resolveRepoOptions, resolvePoolConfig, getRepoResetScript, resolveHostBinding, resolveBindingRepositoryFromPR, getRepoConfig, getRepoCloneUrlForHost, DEFAULT_CHECKOUT_TIMEOUT_MS } = require('../config');
+const { getConfigDir, getRepoPath, resolveRepoOptions, resolvePoolConfig, getRepoResetScript, resolveHostBinding, resolveBindingRepositoryFromPR, getRepoConfig, DEFAULT_CHECKOUT_TIMEOUT_MS } = require('../config');
 const { storedHostToOption, isDualHostRepoConfig, resolveRecordedHost, bindingRepositoryForHost } = require('../utils/host-resolution');
 const logger = require('../utils/logger');
 const { fireReviewStartedHook } = require('../hooks/payloads');
 const simpleGit = require('simple-git');
 const fs = require('fs').promises;
 const path = require('path');
+const { WorktreeLockManager } = require('../git/worktree-lock');
+
+async function withPRPreparation({ db, owner, repo, prNumber, worktreePath }, operation) {
+  worktreePath ||= await new GitWorktreeManager(db).getWorktreePath({ owner, repo, number: prNumber });
+  return new WorktreeLockManager(db).withReservation(worktreePath, { repository: normalizeRepository(owner, repo), prNumber }, operation);
+}
 
 /**
  * Store PR data in the database within a single transaction.
@@ -378,36 +384,6 @@ async function resolvePrHostBinding({ db, config, bindingRepository, owner, repo
   }
 }
 
-/**
- * Resolve which host a RESTORED PR lives on, without contacting any API.
- *
- * Restore mode replays a stored snapshot, so `resolvePrHostBinding` (which
- * fetches) never runs. This applies the same host precedence minus the probe:
- *
- *   1. the explicit `host` parameter when defined (URL paste / dashboard row);
- *   2. otherwise the stored `pr_metadata` row, read through the SAME
- *      `getPRHostWithRecordedUrl` + `resolveRecordedHost` pair that
- *      `resolvePrHostBinding` uses, so a pre-stamping NULL row is interpreted
- *      identically;
- *   3. otherwise `undefined` — host unknown, leaving the caller's ambiguity
- *      rule to decide.
- *
- * @param {Object} params
- * @param {Object} params.db
- * @param {Object} params.config
- * @param {string} params.bindingRepository - `repos[...]` config-lookup key
- * @param {string} params.repository - normalized "owner/repo"
- * @param {number} params.prNumber
- * @param {string|null|undefined} params.host - explicit host override
- * @returns {Promise<string|null|undefined>} The host, or `undefined` if unknown
- */
-async function resolveRestoreHost({ db, config, bindingRepository, repository, prNumber, host }) {
-  if (host !== undefined) return host;
-  if (!db) return undefined;
-  const recorded = await new PRMetadataRepository(db).getPRHostWithRecordedUrl(repository, prNumber);
-  if (recorded === undefined) return undefined;
-  return resolveRecordedHost(config, bindingRepository, recorded.host, recorded.recordedUrl);
-}
 
 /**
  * Register the known location of a GitHub repository in the database.
@@ -613,30 +589,6 @@ async function findRepositoryPath({ db, owner, repo, repository, bindingReposito
   return { repositoryPath, knownPath, worktreeSourcePath, checkoutScript, checkoutTimeout, worktreeConfig };
 }
 
-/**
- * Detect git errors indicating a SHA doesn't exist in the local repository.
- * Used to trigger fallback from restore mode to fresh setup.
- */
-function isShaNotFoundError(err) {
-  let current = err;
-  while (current) {
-    if (current.code === MISSING_COMMIT_ERROR_CODE) {
-      return true;
-    }
-
-    const msg = (current.message || '').toLowerCase();
-    if (msg.includes('did not match any') ||
-        msg.includes('not a valid object') ||
-        msg.includes('reference is not a tree') ||
-        msg.includes('bad object')) {
-      return true;
-    }
-
-    current = current.cause;
-  }
-
-  return false;
-}
 
 /**
  * Full PR review setup orchestrator.
@@ -654,14 +606,17 @@ function isShaNotFoundError(err) {
  * @param {string} [params.bindingRepository] - `repos[...]` config-lookup key; resolved internally when omitted
  * @param {Object} [params.config] - Application config (for monorepo path lookup)
  * @param {import('../git/worktree-pool-lifecycle').WorktreePoolLifecycle} [params.poolLifecycle] - Shared pool lifecycle instance (avoids creating a fresh singleton)
- * @param {Object} [params.restoreMetadata] - Stored PR data for restore mode (skips GitHub fetch + diff)
  * @param {string|null} [params.host] - Explicit per-PR host override (URL paste /
  *   dashboard row): `null` = github.com, an api_host URL string = that alt host,
  *   omitted (`undefined`) = unknown (derive from stored host / probe).
  * @param {Function} [params.onProgress] - Optional progress callback
  * @returns {Promise<{ reviewUrl: string, title: string }>}
  */
-async function setupPRReview({ db, owner, repo, prNumber, githubToken, bindingRepository: externalBindingRepository, config, host, onProgress, poolLifecycle: externalPoolLifecycle, restoreMetadata }) {
+async function setupPRReview(params) {
+  return withPRPreparation(params, () => setupPinnedPRReview(params));
+}
+
+async function setupPinnedPRReview({ db, owner, repo, prNumber, githubToken, bindingRepository: externalBindingRepository, config, host, onProgress, poolLifecycle: externalPoolLifecycle }) {
   const repository = normalizeRepository(owner, repo);
   const progress = onProgress || (() => {});
 
@@ -672,71 +627,21 @@ async function setupPRReview({ db, owner, repo, prNumber, githubToken, bindingRe
   const bindingRepository = externalBindingRepository
     || (config ? resolveBindingRepositoryFromPR(owner, repo, config) : repository);
 
-  const isRestore = !!(restoreMetadata && restoreMetadata.head_sha);
   let prData;
   let githubClient = null;
-  // Host actually used to fetch — persisted by storePRData (self-healing). Left
-  // undefined for restore mode and the legacy (no-config) path so those flows
-  // leave any previously-stamped host untouched.
+  // Always fetch: a saved review is history, never evidence of the current revision.
   let stampHost;
 
-  if (isRestore) {
-    prData = restoreMetadata;
-    // Restore mode replays a stored snapshot and never calls the API, so
-    // `fetchPullRequest` never gets to substitute the repo's configured
-    // `clone_url`. Snapshots taken before the option existed (or from a host
-    // that omits `base.repo.clone_url` entirely) therefore carry no clone URL
-    // at all, and restore also skips `storePRData` — so the gap never heals.
-    // Hydrate a copy here so EVERY downstream consumer sees it: the clone in
-    // `findRepositoryPath` AND the `resolveRemoteForPR` calls reached via
-    // `acquireForPR` / `createWorktreeForPR`. Never mutate `restoreMetadata`
-    // itself — the caller may reuse that object.
-    if (config && !prData?.repository?.clone_url) {
-      const configuredCloneUrl = getRepoCloneUrlForHost(
-        config,
-        bindingRepository,
-        await resolveRestoreHost({ db, config, bindingRepository, repository, prNumber, host })
-      );
-      if (configuredCloneUrl) {
-        prData = {
-          ...restoreMetadata,
-          repository: { ...(restoreMetadata.repository || {}), clone_url: configuredCloneUrl }
-        };
-      }
-    }
-    progress({ step: 'verify', status: 'completed', message: 'Restoring previous review state.' });
-    progress({ step: 'fetch', status: 'completed', message: 'Using stored PR data.' });
-  } else {
-    // ------------------------------------------------------------------
-    // Step: verify + fetch - Resolve the per-PR host binding, verify access,
-    // and fetch PR data. `resolvePrHostBinding` applies host precedence
-    // (explicit host → stored host → ambiguity/probe) and, for a dual repo
-    // whose host is unknown, probes the alt host first (404 → github.com).
-    // ------------------------------------------------------------------
-    progress({ step: 'verify', status: 'running', message: 'Verifying repository access...' });
-    // Pair the 'fetch' step's completed event (below) with a running event and
-    // restore the spinner message; resolvePrHostBinding does the actual fetch.
-    progress({ step: 'fetch', status: 'running', message: 'Fetching pull request data from GitHub...' });
-    if (config) {
-      const resolved = await resolvePrHostBinding({
-        db, config, bindingRepository, owner, repo, prNumber, host, githubToken
-      });
-      githubClient = resolved.githubClient;
-      prData = resolved.prData;
-      stampHost = resolved.binding.host;
-    } else {
-      // Legacy path: no config, so bind directly with the supplied token and
-      // do not track a host.
-      githubClient = new GitHubClient(githubToken);
-      const repoExists = await githubClient.repositoryExists(owner, repo);
-      if (!repoExists) {
-        throw new Error(`Repository ${owner}/${repo} not found`);
-      }
-      prData = await githubClient.fetchPullRequest(owner, repo, prNumber);
-    }
-    progress({ step: 'verify', status: 'completed', message: 'Repository access verified.' });
-    progress({ step: 'fetch', status: 'completed', message: 'Pull request data fetched.' });
-  }
+  progress({ step: 'verify', status: 'running', message: 'Verifying repository access...' });
+  progress({ step: 'fetch', status: 'running', message: 'Fetching pull request data from GitHub...' });
+  const resolved = await resolvePrHostBinding({
+    db, config: config || {}, bindingRepository, owner, repo, prNumber, host, githubToken
+  });
+  githubClient = resolved.githubClient;
+  prData = resolved.prData;
+  stampHost = resolved.binding.host;
+  progress({ step: 'verify', status: 'completed', message: 'Repository access verified.' });
+  progress({ step: 'fetch', status: 'completed', message: 'Pull request data fetched.' });
 
   // ------------------------------------------------------------------
   // Step: repo - Find (or clone) a local repository
@@ -771,10 +676,11 @@ async function setupPRReview({ db, owner, repo, prNumber, githubToken, bindingRe
   let poolWorktreeId = null;
   let poolLifecycle = null;
 
-  // Wrap worktree acquisition and all subsequent steps in a try/catch so that:
-  // 1. If any step between acquireForPR and setCurrentReviewId throws, the pool
-  //    worktree is released back to the available state.
-  // 2. In restore mode, SHA-not-found errors trigger a fallback to fresh setup.
+  const existingPath = await new GitWorktreeManager(db).getWorktreePath(prInfo);
+  if (new WorktreeLockManager(db).isLocked(existingPath, { repository, prNumber }).locked) {
+    throw Object.assign(new Error('Worktree is in use by another operation'), { statusCode: 409 });
+  }
+  // Release a newly acquired pool slot if a later persistence step fails.
   try {
 
   if (poolSize > 0) {
@@ -800,52 +706,6 @@ async function setupPRReview({ db, owner, repo, prNumber, githubToken, bindingRe
     progress({ step: 'worktree', status: 'completed', message: `Worktree created at ${worktreePath}` });
   }
 
-    if (isRestore) {
-      // ── Restore mode: skip sparse, diff, storePRData ─────────────────
-      // Metadata and diff are already stored from the previous session.
-      // Just ensure the review record exists and wire up pool ownership.
-      progress({ step: 'sparse', status: 'completed', message: 'Using stored checkout (restore mode).' });
-      progress({ step: 'diff', status: 'completed', message: 'Using stored diff (restore mode).' });
-      progress({ step: 'store', status: 'running', message: 'Restoring review state...' });
-
-      // Ensure worktree record exists (pool path manages this via switchPR,
-      // but non-pool path needs it)
-      if (!poolWorktreeId) {
-        const worktreeRepo = new WorktreeRepository(db);
-        await worktreeRepo.getOrCreate({
-          prNumber,
-          repository,
-          branch: prData.head_branch || prData.head?.ref || '',
-          path: worktreePath
-        });
-      }
-
-      // Ensure review record exists
-      const reviewRepo = new ReviewRepository(db);
-      const { review } = await reviewRepo.getOrCreate({ prNumber, repository });
-      const reviewId = review.id;
-
-      // Wire up pool ownership
-      if (poolWorktreeId && poolLifecycle) {
-        await poolLifecycle.setReviewOwner(poolWorktreeId, reviewId);
-      }
-
-      // Register repo path if not already known
-      if (knownPath === null && repositoryPath) {
-        const repoSettingsRepo = new RepoSettingsRepository(db);
-        const currentPath = await repoSettingsRepo.getLocalPath(repository);
-        if (path.resolve(currentPath || '') !== path.resolve(repositoryPath)) {
-          await repoSettingsRepo.setLocalPath(repository, repositoryPath);
-          logger.info(`Registered repository location: ${repositoryPath}`);
-        }
-      }
-
-      progress({ step: 'store', status: 'completed', message: 'Restored to previous review state.' });
-      const reviewUrl = `/pr/${owner}/${repo}/${prNumber}`;
-      return { reviewUrl, title: prData.title };
-    }
-
-    // ── Fresh mode: existing sparse, diff, storePRData flow (unchanged) ──
 
   // ------------------------------------------------------------------
   // Step: sparse - Expand sparse-checkout before generating diff
@@ -886,6 +746,7 @@ async function setupPRReview({ db, owner, repo, prNumber, githubToken, bindingRe
   // Step: diff - Generate unified diff and changed file list
   // ------------------------------------------------------------------
   progress({ step: 'diff', status: 'running', message: 'Generating unified diff...' });
+  await worktreeManager.assertPinnedWorktree(worktreePath, prData);
   const diff = await worktreeManager.generateUnifiedDiff(worktreePath, prData);
   const changedFiles = await worktreeManager.getChangedFiles(worktreePath, prData);
   progress({ step: 'diff', status: 'completed', message: 'Diff generated.' });
@@ -930,21 +791,6 @@ async function setupPRReview({ db, owner, repo, prNumber, githubToken, bindingRe
   return { reviewUrl, title: prData.title };
 
   } catch (err) {
-    // If restore mode failed because the stored SHA no longer exists,
-    // fall back to a full fresh setup.
-    if (isRestore && isShaNotFoundError(err)) {
-      logger.warn(`Restore to stored SHA failed, falling back to fresh setup: ${err.message}`);
-      // Retry without restoreMetadata. Forward the explicit `host` and
-      // `bindingRepository` so the fresh fetch binds the SAME host the caller
-      // requested — re-deriving them here could bind a different host (probe a
-      // dual repo, or pick the wrong monorepo binding key).
-      return setupPRReview({
-        db, owner, repo, prNumber, githubToken,
-        bindingRepository: externalBindingRepository,
-        config, host, onProgress, poolLifecycle: externalPoolLifecycle
-      });
-    }
-
     // Release the pool worktree so it doesn't stay permanently in_use.
     // After acquireForPR marks the worktree in_use, if any subsequent step
     // (sparse-checkout, diff generation, storePRData) throws before
@@ -963,4 +809,28 @@ async function setupPRReview({ db, owner, repo, prNumber, githubToken, bindingRe
   }
 }
 
-module.exports = { setupPRReview, storePRData, resolvePrHostBinding, registerRepositoryLocation, findRepositoryPath, isShaNotFoundError };
+/**
+ * Refresh an existing review through the same fetch/checkout/diff/store owners
+ * used by setup. The returned metadata is the only snapshot an analysis may use.
+ */
+async function refreshPRReview(params) {
+  return withPRPreparation(params, () => refreshPinnedPRReview(params));
+}
+
+async function refreshPinnedPRReview({ db, config = {}, owner, repo, prNumber, githubToken, bindingRepository, host }) {
+  const repository = normalizeRepository(owner, repo);
+  const resolved = await resolvePrHostBinding({
+    db, config, owner, repo, prNumber, githubToken, host,
+    bindingRepository: bindingRepository || resolveBindingRepositoryFromPR(owner, repo, config)
+  });
+  const manager = new GitWorktreeManager(db);
+  const worktreePath = await manager.updateWorktree(owner, repo, prNumber, resolved.prData);
+  await manager.assertPinnedWorktree(worktreePath, resolved.prData);
+  const diff = await manager.generateUnifiedDiff(worktreePath, resolved.prData);
+  const changedFiles = await manager.getChangedFiles(worktreePath, resolved.prData);
+  await storePRData(db, { owner, repo, number: prNumber }, resolved.prData, diff, changedFiles, worktreePath, { host: resolved.binding.host });
+  const prMetadata = await new PRMetadataRepository(db).getByPR(prNumber, repository);
+  return { prData: resolved.prData, prMetadata, worktreePath, diff, changedFiles, githubClient: resolved.githubClient };
+}
+
+module.exports = { setupPRReview, refreshPRReview, withPRPreparation, storePRData, resolvePrHostBinding, registerRepositoryLocation, findRepositoryPath };

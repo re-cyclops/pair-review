@@ -31,6 +31,7 @@ const { buildSparseCheckoutGuidance } = require('./prompts/sparse-checkout-guida
 const { generateDiffForExecutable } = require('../routes/executable-analysis');
 const { withModelEvidence } = require('./model-evidence');
 
+const { beginRevisionRecheck } = require('../revision-feedback');
 
 // GIT_DIFF_FLAGS imported from ../git/diff-flags
 
@@ -63,7 +64,7 @@ async function captureDiffSnapshot(analyzer, worktreePath, prMetadata, logPrefix
     return stdout;
   } catch (diffError) {
     logger.warn(`${logPrefix}Failed to capture diff snapshot: ${diffError.message}`);
-    // Continue without diff snapshot - share endpoint will fall back to current PR diff
+    if (prMetadata?.reviewType !== 'local') throw diffError;
     return null;
   }
 }
@@ -196,6 +197,7 @@ async function runExecutableVoice(voiceProvider, reviewId, worktreePath, prMetad
     }
 
     const suggestions = result.data.suggestions || [];
+    options.recordRevisionRechecks?.(result.data, true);
 
     return {
       suggestions,
@@ -427,6 +429,24 @@ class Analyzer {
     this._worktreeManager = null; // Lazy-initialized for sparse-checkout queries
   }
 
+  async withRevisionRecheck(reviewId, worktreePath, metadata, runId, instructions, execute) {
+    if (metadata?.reviewType === 'local') return execute(instructions, false);
+    await new GitWorktreeManager(this.db).assertPinnedWorktree(worktreePath, metadata);
+    const recheck = beginRevisionRecheck(this.db, reviewId, metadata?.head_sha, runId);
+    this.revisionRecheck = recheck;
+    const augmented = typeof instructions === 'string'
+      ? [instructions, recheck.instructions].filter(Boolean).join('\n\n')
+      : { ...instructions, requestInstructions: [instructions?.requestInstructions, recheck.instructions].filter(Boolean).join('\n\n') || null };
+    try {
+      const result = await execute(augmented, Boolean(recheck.instructions));
+      recheck.finish(!result?.orchestrationFailed);
+      return { ...result, revisionRechecks: recheck.results() };
+    } catch (error) {
+      recheck.finish(false);
+      throw error;
+    } finally { this.revisionRecheck = null; }
+  }
+
   /**
    * Get or create worktree manager instance (lazy initialization)
    * @returns {GitWorktreeManager}
@@ -464,8 +484,9 @@ class Analyzer {
   async analyzeAllLevels(prId, worktreePath, prMetadata, progressCallback = null, instructions = null, changedFiles = null, options = {}) {
     if (options.skipRunCreation && !options.runId) throw new Error('runId is required when skipRunCreation is true');
     const runId = options.runId || uuidv4();
-    return withModelEvidence(this.db, runId, () => this._analyzeAllLevels(
-      prId, worktreePath, prMetadata, progressCallback, instructions, changedFiles, { ...options, runId }));
+    return withModelEvidence(this.db, runId, () => this.withRevisionRecheck(prId, worktreePath, prMetadata, runId, instructions,
+      (updatedInstructions, rechecking) => this._analyzeAllLevels(prId, worktreePath, prMetadata, progressCallback, updatedInstructions, changedFiles,
+        { ...options, runId, ...(rechecking ? { excludePrevious: null } : {}) })));
   }
 
   async _analyzeAllLevels(prId, worktreePath, prMetadata, progressCallback = null, instructions = null, changedFiles = null, options = {}) {
@@ -537,13 +558,14 @@ class Analyzer {
           repoInstructions,
           requestInstructions,
           headSha,
+          baseSha: prMetadata?.base_sha || null,
           diff: diffSnapshot,
           protocol: options.protocol || null
         });
         logger.info(`${logPrefix}Created analysis_run record: ${runId}`);
       } catch (createError) {
         logger.warn(`${logPrefix}Failed to create analysis_run record: ${createError.message}`);
-        // Continue with analysis even if record creation fails
+        if (prMetadata?.reviewType !== 'local') throw createError;
       }
     } else if (diffSnapshot) {
       // Run was created by caller, but we still need to store the diff snapshot
@@ -552,6 +574,7 @@ class Analyzer {
         logger.info(`${logPrefix}Updated analysis_run with diff snapshot`);
       } catch (updateError) {
         logger.warn(`${logPrefix}Failed to update analysis_run with diff: ${updateError.message}`);
+        if (prMetadata?.reviewType !== 'local') throw updateError;
       }
     }
     mergedInstructions = [mergedInstructions, await reviewedContext(analysisRunRepo, runId)].filter(Boolean).join('\n\n') || null;
@@ -571,6 +594,8 @@ class Analyzer {
     logger.info(`${logPrefix}[Line Validation] Built line count map for ${fileLineCountMap.size} files`);
 
     try {
+      // Registration blocks competing refreshes; check again after the prep-to-run handoff.
+      if (prMetadata?.reviewType !== 'local') await new GitWorktreeManager(this.db).assertPinnedWorktree(worktreePath, prMetadata);
       // Note: We no longer delete old AI suggestions to preserve analysis history.
       // The API endpoint filters to show only the latest ai_run_id.
 
@@ -1682,6 +1707,7 @@ If you are unsure, use "NEW" - it is correct for the vast majority of suggestion
    * @returns {{ suggestions: Array, parseFailed: boolean }}
    */
   parseResponseWithMeta(response, level, previousSuggestions = []) {
+    this.revisionRecheck?.record(response, level === 'orchestration' || level === 'consolidation');
     const levelPrefix = `[Level ${level}]`;
 
     // Separate previous suggestions into line-level and file-level for deduplication
@@ -3108,8 +3134,8 @@ File-level suggestions should NOT have a line number. They apply to the entire f
    */
   async runReviewerCentricCouncil(reviewContext, councilConfig, options = {}) {
     const runId = options.runId || uuidv4();
-    return withModelEvidence(this.db, runId, () => this._runReviewerCentricCouncil(
-      reviewContext, councilConfig, options, runId));
+    return withModelEvidence(this.db, runId, () => this.withRevisionRecheck(reviewContext.reviewId, reviewContext.worktreePath, reviewContext.prMetadata, runId, reviewContext.instructions,
+      (instructions, rechecking) => this._runReviewerCentricCouncil({ ...reviewContext, instructions }, councilConfig, { ...options, ...(rechecking ? { excludePrevious: null } : {}) }, runId)));
   }
 
   async _runReviewerCentricCouncil(reviewContext, councilConfig, options = {}, parentRunId = options.runId || uuidv4()) {
@@ -3193,6 +3219,7 @@ File-level suggestions should NOT have a line number. They apply to the entire f
           repoInstructions: instructions?.repoInstructions || null,
           requestInstructions: instructions?.requestInstructions || null,
           headSha,
+          baseSha: prMetadata?.base_sha || null,
           diff: diffSnapshot,
           configType: 'council',
           levelsConfig: enabledLevels,
@@ -3201,6 +3228,7 @@ File-level suggestions should NOT have a line number. They apply to the entire f
         logger.info(`[ReviewerCouncil] Created parent analysis_run: ${parentRunId}`);
       } catch (err) {
         logger.warn(`[ReviewerCouncil] Failed to create parent run record: ${err.message}`);
+        if (prMetadata?.reviewType !== 'local') throw err;
       }
     } else if (diffSnapshot) {
       // Run was created by caller, but we still need to store the diff snapshot
@@ -3209,6 +3237,15 @@ File-level suggestions should NOT have a line number. They apply to the entire f
         logger.info(`[ReviewerCouncil] Updated analysis_run with diff snapshot`);
       } catch (updateError) {
         logger.warn(`[ReviewerCouncil] Failed to update analysis_run with diff: ${updateError.message}`);
+        if (prMetadata?.reviewType !== 'local') throw updateError;
+      }
+    }
+    if (prMetadata?.reviewType !== 'local') {
+      try {
+        await new GitWorktreeManager(this.db).assertPinnedWorktree(worktreePath, prMetadata);
+      } catch (error) {
+        await analysisRunRepo.update(parentRunId, { status: 'failed' });
+        throw error;
       }
     }
     const reviewBaseline = await reviewedContext(analysisRunRepo, parentRunId);
@@ -3241,6 +3278,7 @@ File-level suggestions should NOT have a line number. They apply to the entire f
           analysisId, timeout: voiceTimeout,
           instructions: { ...instructions, requestInstructions: voiceRequestInstructions },
           reviewBaseline,
+          recordRevisionRechecks: (...args) => this.revisionRecheck?.record(...args),
           progressCallback: voiceProgressCallback,
           logPrefix: `[${reviewerLabel}] `
         });
@@ -3295,6 +3333,7 @@ File-level suggestions should NOT have a line number. They apply to the entire f
           githubClient
         }
       );
+      this.revisionRecheck?.record({ revisionRechecks: result.revisionRechecks }, true);
 
       return {
         runId: parentRunId,
@@ -3346,6 +3385,7 @@ File-level suggestions should NOT have a line number. They apply to the entire f
           repoInstructions: instructions?.repoInstructions || null,
           requestInstructions: voiceRequestInstructions,
           headSha,
+          baseSha: prMetadata?.base_sha || null,
           diff: diffSnapshot,
           parentRunId,
           configType: 'council',
@@ -3354,6 +3394,7 @@ File-level suggestions should NOT have a line number. They apply to the entire f
         logger.info(`[ReviewerCouncil] Created child run ${childRunId} for ${reviewerLabel}`);
       } catch (err) {
         logger.warn(`[ReviewerCouncil] Failed to create child run record: ${err.message}`);
+        if (prMetadata?.reviewType !== 'local') throw err;
       }
 
       try {
@@ -3362,6 +3403,7 @@ File-level suggestions should NOT have a line number. They apply to the entire f
             analysisId, timeout: voiceTimeout,
             instructions: { ...instructions, requestInstructions: voiceRequestInstructions },
             reviewBaseline,
+            recordRevisionRechecks: (...args) => this.revisionRecheck?.record(...args),
             progressCallback: voiceProgressCallback,
             logPrefix: `[${reviewerLabel}] `
           });
@@ -3416,6 +3458,7 @@ File-level suggestions should NOT have a line number. They apply to the entire f
             reviewerNum: idx + 1
           }
         );
+        this.revisionRecheck?.record({ revisionRechecks: result.revisionRechecks });
 
         // Update child run to completed
         try {
@@ -3691,8 +3734,8 @@ File-level suggestions should NOT have a line number. They apply to the entire f
    */
   async runCouncilAnalysis(reviewContext, councilConfig, options = {}) {
     const runId = options.runId || uuidv4();
-    return withModelEvidence(this.db, runId, () => this._runCouncilAnalysis(
-      reviewContext, councilConfig, { ...options, runId }));
+    return withModelEvidence(this.db, runId, () => this.withRevisionRecheck(reviewContext.reviewId, reviewContext.worktreePath, reviewContext.prMetadata, runId, reviewContext.instructions,
+      (instructions, rechecking) => this._runCouncilAnalysis({ ...reviewContext, instructions }, councilConfig, { ...options, runId, ...(rechecking ? { excludePrevious: null } : {}) })));
   }
 
   async _runCouncilAnalysis(reviewContext, councilConfig, options = {}) {
@@ -3710,6 +3753,7 @@ File-level suggestions should NOT have a line number. They apply to the entire f
       mergedInstructions = mergeInstructions({ globalInstructions: instructions.globalInstructions, repoInstructions: instructions.repoInstructions, requestInstructions: instructions.requestInstructions });
     }
     mergedInstructions = [mergedInstructions, await reviewedContext(new AnalysisRunRepository(this.db), runId)].filter(Boolean).join('\n\n') || null;
+    if (prMetadata?.reviewType !== 'local') await new GitWorktreeManager(this.db).assertPinnedWorktree(worktreePath, prMetadata);
 
     // Load generated file patterns
     const generatedPatterns = await this.loadGeneratedFilePatterns(worktreePath);

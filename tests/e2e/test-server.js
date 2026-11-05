@@ -285,6 +285,7 @@ async function startTestServer(port) {
   // Mock worktree manager
   GitWorktreeManager.prototype.getWorktreePath = async () => mockWorktreeResponses.getWorktreePath;
   GitWorktreeManager.prototype.worktreeExists = async () => true;
+  GitWorktreeManager.prototype.assertPinnedWorktree = async () => {};
   GitWorktreeManager.prototype.generateUnifiedDiff = async () => mockWorktreeResponses.generateUnifiedDiff;
   GitWorktreeManager.prototype.getChangedFiles = async () => mockWorktreeResponses.getChangedFiles;
   GitWorktreeManager.prototype.updateWorktree = async () => mockWorktreeResponses.getWorktreePath;

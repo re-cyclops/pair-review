@@ -19,7 +19,7 @@ test.describe('Stale PR Badge', () => {
     await expect(badge).toBeHidden();
   });
 
-  test('badge appears when PR is stale and session has data', async ({ page }) => {
+  test('auto-refreshes a later head advance even when saved analysis exists', async ({ page }) => {
     // Override check-stale to return stale
     await page.route('**/api/pr/test-owner/test-repo/1/check-stale', route => {
       route.fulfill({
@@ -38,12 +38,13 @@ test.describe('Stale PR Badge', () => {
       });
     });
 
+    const refresh = page.waitForResponse(response => response.url().endsWith('/api/pr/test-owner/test-repo/1/refresh'));
     await page.goto('/pr/test-owner/test-repo/1');
     await waitForDiffToRender(page);
 
     const badge = page.locator('#stale-badge');
-    await expect(badge).toBeVisible();
-    await expect(badge.getByRole('button', { name: 'Update to latest commits' })).toBeVisible();
+    expect((await refresh).ok()).toBe(true);
+    await expect(badge).toBeHidden();
   });
 
   test('auto-refreshes silently when stale and no session data', async ({ page }) => {

@@ -87,6 +87,7 @@ async function runHeadlessCouncilAnalysis(db, params) {
     repoInstructions: instructions.repoInstructions || null,
     requestInstructions: instructions.requestInstructions || null,
     headSha: prMetadata?.head_sha || null,
+    baseSha: prMetadata?.base_sha || null,
     configType,
     levelsConfig,
     protocol

@@ -33,7 +33,7 @@ const PASSIVE_POLL_PATHS = /^(\/health|\/api\/analyses\/activity|\/api\/reviews\
  * (the resolved DB path cannot change without a restart).
  *
  * @param {string} dbId - computeDbId(resolveDbPath(config)) digest
- * @returns {{status: string, service: string, version: string, dbId: string, dotfilesReviewModes: 1, timestamp: string}}
+ * @returns {{status: string, service: string, version: string, dbId: string, dotfilesReviewModes: 1, dotfilesReviewFreshness: 1, timestamp: string}}
  */
 function buildHealthPayload(dbId) {
   return {
@@ -42,6 +42,7 @@ function buildHealthPayload(dbId) {
     version: require('../package.json').version,
     dbId,
     dotfilesReviewModes: 1,
+    dotfilesReviewFreshness: 1,
     timestamp: new Date().toISOString()
   };
 }

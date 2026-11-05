@@ -84,7 +84,7 @@ describe('POST /api/setup/pr/:owner/:repo/:number', () => {
     closeTestDatabase(db);
   });
 
-  it('returns existing: true when worktree exists and is NOT a pool worktree', async () => {
+  it('refreshes setup before reusing an existing non-pool worktree', async () => {
     seedPRMetadata(db);
     seedWorktree(db);
     // No pool entry — this is a traditional (non-pool) worktree
@@ -94,11 +94,12 @@ describe('POST /api/setup/pr/:owner/:repo/:number', () => {
     const res = await request(server).post('/api/setup/pr/owner/repo/42');
 
     expect(res.status).toBe(200);
-    expect(res.body.existing).toBe(true);
-    expect(res.body.reviewUrl).toBe('/pr/owner/repo/42');
+    expect(res.body.existing).toBeUndefined();
+    expect(res.body.setupId).toBeTruthy();
+    expect(prSetupModule.setupPRReview).toHaveBeenCalledOnce();
   });
 
-  it('returns existing: true when worktree is a pool worktree with in_use status', async () => {
+  it('refreshes setup before reusing an in-use pool worktree', async () => {
     seedPRMetadata(db);
     seedWorktree(db, { id: 'pool-abc' });
     seedPoolEntry(db, { id: 'pool-abc', status: 'in_use' });
@@ -108,11 +109,12 @@ describe('POST /api/setup/pr/:owner/:repo/:number', () => {
     const res = await request(server).post('/api/setup/pr/owner/repo/42');
 
     expect(res.status).toBe(200);
-    expect(res.body.existing).toBe(true);
-    expect(res.body.reviewUrl).toBe('/pr/owner/repo/42');
+    expect(res.body.existing).toBeUndefined();
+    expect(res.body.setupId).toBeTruthy();
+    expect(prSetupModule.setupPRReview).toHaveBeenCalledOnce();
   });
 
-  it('reclaims pool worktree when available but still associated with the same PR', async () => {
+  it('delegates pool reclamation through fresh setup even when still associated with the same PR', async () => {
     seedPRMetadata(db);
     seedWorktree(db, { id: 'pool-abc' });
     seedPoolEntry(db, { id: 'pool-abc', status: 'available', prNumber: 42 });
@@ -122,12 +124,9 @@ describe('POST /api/setup/pr/:owner/:repo/:number', () => {
     const res = await request(server).post('/api/setup/pr/owner/repo/42');
 
     expect(res.status).toBe(200);
-    expect(res.body.existing).toBe(true);
-    expect(res.body.reviewUrl).toBe('/pr/owner/repo/42');
-    // Pool entry should be reclaimed as in_use
-    const poolEntry = db.prepare('SELECT status, current_review_id FROM worktree_pool WHERE id = ?').get('pool-abc');
-    expect(poolEntry.status).toBe('in_use');
-    expect(poolEntry.current_review_id).toBeTruthy();
+    expect(res.body.existing).toBeUndefined();
+    expect(res.body.setupId).toBeTruthy();
+    expect(prSetupModule.setupPRReview).toHaveBeenCalledOnce();
   });
 
   it('falls through to setup when pool worktree was reassigned to a different PR', async () => {
@@ -171,7 +170,7 @@ describe('POST /api/setup/pr/:owner/:repo/:number', () => {
     expect(res.body.setupId).toBeTruthy();
   });
 
-  it('passes restoreMetadata to setupPRReview when pr_data has head_sha', async () => {
+  it('never restores cached metadata as the current head', async () => {
     // Seed PR metadata WITH pr_data containing head_sha
     const now = new Date().toISOString();
     const prDataJson = JSON.stringify({ title: 'Test PR', head_sha: 'abc123', head_branch: 'feature' });
@@ -187,14 +186,12 @@ describe('POST /api/setup/pr/:owner/:repo/:number', () => {
     expect(res.status).toBe(200);
     expect(res.body.setupId).toBeTruthy();
 
-    // Verify setupPRReview was called with restoreMetadata
     expect(prSetupModule.setupPRReview).toHaveBeenCalledOnce();
     const callArgs = prSetupModule.setupPRReview.mock.calls[0][0];
-    expect(callArgs.restoreMetadata).toBeTruthy();
-    expect(callArgs.restoreMetadata.head_sha).toBe('abc123');
+    expect(callArgs).not.toHaveProperty('restoreMetadata');
   });
 
-  it('passes null restoreMetadata when pr_data lacks head_sha', async () => {
+  it('starts fresh setup when cached metadata lacks a head', async () => {
     // Seed PR metadata with pr_data that has no head_sha
     const now = new Date().toISOString();
     const prDataJson = JSON.stringify({ title: 'Test PR', body: 'no sha here' });
@@ -211,10 +208,10 @@ describe('POST /api/setup/pr/:owner/:repo/:number', () => {
 
     expect(prSetupModule.setupPRReview).toHaveBeenCalledOnce();
     const callArgs = prSetupModule.setupPRReview.mock.calls[0][0];
-    expect(callArgs.restoreMetadata).toBeNull();
+    expect(callArgs).not.toHaveProperty('restoreMetadata');
   });
 
-  it('passes null restoreMetadata when no existing PR metadata', async () => {
+  it('starts fresh setup when no metadata exists', async () => {
     // No PR metadata seeded at all
 
     const app = createApp(db);
@@ -226,7 +223,7 @@ describe('POST /api/setup/pr/:owner/:repo/:number', () => {
 
     expect(prSetupModule.setupPRReview).toHaveBeenCalledOnce();
     const callArgs = prSetupModule.setupPRReview.mock.calls[0][0];
-    expect(callArgs.restoreMetadata).toBeNull();
+    expect(callArgs).not.toHaveProperty('restoreMetadata');
   });
 
   it('passes a body host through to setupPRReview', async () => {

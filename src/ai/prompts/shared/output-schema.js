@@ -157,6 +157,7 @@ Output ONLY valid JSON with no additional text, explanations, or markdown code b
 
 Output JSON with this structure:
 ${JSON.stringify(schema, null, 2)}
+When the review instructions include saved-feedback revision rechecks, also include the requested top-level \`revisionRechecks\` array in this same JSON object, including for zero-finding responses. Never infer that an omitted historical issue was fixed.
 
 ### GitHub Suggestion Syntax
 When suggesting a specific change, **embed** a GitHub suggestion block within the "suggestion" field:

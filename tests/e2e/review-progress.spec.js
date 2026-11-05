@@ -89,7 +89,7 @@ test('does not authorize a newer revision behind an already loaded older diff', 
 });
 
 test('shows old and unknown finding revisions without rewriting the findings', async ({ page, testServer }) => {
-  moveHead(testServer);
+  testServer.reviewHost.state.head = 'b'.repeat(40);
   testServer.db.prepare(`INSERT INTO analysis_runs (id, review_id, status)
     VALUES ('revision-history', 1, 'completed')`).run();
   const insert = testServer.db.prepare(`INSERT INTO comments
@@ -103,11 +103,16 @@ test('shows old and unknown finding revisions without rewriting the findings', a
   const oldFinding = page.locator(`.finding-item[data-id="${old}"]`);
   const unknownFinding = page.locator(`.finding-item[data-id="${unknown}"]`);
   await expect(oldFinding.locator('.ai-revision-warning')).toBeVisible();
-  await expect(oldFinding).toContainText('Older revision');
   await expect(unknownFinding.locator('.ai-revision-warning')).toBeVisible();
-  await expect(unknownFinding).toContainText('Revision unknown');
   await oldFinding.click();
-  await expect(page.getByText(/original diff was not saved/i)).toBeVisible();
+  const guidance = page.getByRole('region', { name: 'Finding location and revision' });
+  await expect(guidance).toBeVisible();
+  await expect(page.locator('dialog.historical-diff-dialog')).toHaveCount(0);
+  await guidance.getByRole('button', { name: 'Open current file', exact: true }).click();
+  await expect(page.locator('.d2h-file-wrapper[data-file-name="src/main.js"] .d2h-file-header')).toBeFocused();
+  const { suggestions } = await (await page.request.get('/api/reviews/1/suggestions?runId=revision-history')).json();
+  expect(suggestions.find(row => row.id === old).revision).toMatchObject({ state: 'stale', head: 'c'.repeat(40), currentHead: 'b'.repeat(40) });
+  expect(suggestions.find(row => row.id === unknown).revision.state).toBe('unknown');
   await expect(page.locator('#diff-container .ai-suggestion')).toHaveCount(0);
   expect(testServer.db.prepare('SELECT body, commit_sha FROM comments WHERE id = ?').get(old))
     .toEqual({ body: 'Original finding text.', commit_sha: 'c'.repeat(40) });

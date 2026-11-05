@@ -183,6 +183,9 @@ async function probeServer(config, _deps) {
       serverVersion,
     };
   }
+  if (body.dotfilesReviewFreshness !== 1) {
+    return { delegate: false, reason: 'server does not support current-revision review freshness; restart it before delegating', baseUrl, serverVersion };
+  }
 
   return { delegate: true, reason: 'compatible server', baseUrl, serverVersion };
 }

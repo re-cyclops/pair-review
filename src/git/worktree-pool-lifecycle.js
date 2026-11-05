@@ -8,6 +8,8 @@ const { GitWorktreeManager } = require('./worktree');
 const { WorktreePoolUsageTracker } = require('./worktree-pool-usage');
 const { normalizeRepository } = require('../utils/paths');
 const { resolvePoolConfig } = require('../config');
+const { WorktreeLockManager } = require('./worktree-lock');
+const { randomUUID } = require('node:crypto');
 
 /**
  * Consolidates the worktree pool state machine: absorbs WorktreePoolManager
@@ -238,7 +240,12 @@ class WorktreePoolLifecycle {
    */
   async _switchPoolWorktree(poolEntry, worktreeRecord, prInfo, prData, options) {
     // Note: poolEntry was already atomically marked 'switching' by claimAvailable()
+    const locks = new WorktreeLockManager(this.db);
+    const holder = `switch:${randomUUID()}`;
     try {
+      if (!locks.acquire(poolEntry.path, holder, { repository: prInfo.repository || normalizeRepository(prInfo.owner, prInfo.repo), prNumber: prInfo.prNumber })) {
+        throw Object.assign(new Error('Worktree is in use by another operation'), { statusCode: 409 });
+      }
       const git = this._simpleGit(poolEntry.path);
       const worktreeManager = new this._GitWorktreeManager(this.db);
 
@@ -259,20 +266,16 @@ class WorktreePoolLifecycle {
 
       await worktreeManager.ensureBaseShaAvailable(git, prData, remoteName);
 
-      // Clean the working tree before switching PRs. Without this, untracked
-      // files (build artifacts, generated code) from the previous PR leak into
-      // the new checkout, and modified tracked files can cause checkout to fail.
-      // Use -fd (not -fdx) to preserve gitignored files like node_modules that
-      // the resetScript may depend on.
-      await git.reset(['--hard', 'HEAD']);
-      await git.clean('f', ['-d']);
+      if (await worktreeManager.hasLocalChanges(poolEntry.path)) {
+        throw new Error(`Worktree has uncommitted changes. Please resolve manually at: ${poolEntry.path}`);
+      }
 
-      // Checkout specific head SHA (stored SHA in restore mode, latest in fresh mode)
+      // Checkout the fetched, pinned PR head without replacing ignored files.
       const targetSha = worktreeManager.getPRHeadSha(prData);
       if (targetSha) {
-        await git.checkout([targetSha]);
+        await git.raw(['checkout', '--detach', '--no-overwrite-ignore', targetSha]);
       } else {
-        await git.checkout([fetchedHead.checkoutTarget]);
+        await git.raw(['checkout', '--detach', '--no-overwrite-ignore', fetchedHead.checkoutTarget]);
       }
 
       // Run reset_script if configured
@@ -300,17 +303,8 @@ class WorktreePoolLifecycle {
       const branch = prData.head?.ref || prData.head_branch || '';
       const deletedPaths = await this._worktreeRepo.switchPR(poolEntry.id, prInfo.prNumber, branch);
 
-      // Best-effort disk cleanup for deleted non-pool worktree directories
-      if (deletedPaths && deletedPaths.length > 0) {
-        for (const deletedPath of deletedPaths) {
-          try {
-            await worktreeManager.cleanupWorktree(deletedPath);
-            logger.info(`Cleaned up obsolete worktree directory: ${deletedPath}`);
-          } catch (cleanupErr) {
-            logger.warn(`Failed to clean up obsolete worktree directory ${deletedPath}: ${cleanupErr.message}`);
-          }
-        }
-      }
+      // Keep obsolete checkout directories: they may contain ignored/user data.
+      if (deletedPaths?.length) logger.info(`Preserved obsolete checkout directories: ${deletedPaths.join(', ')}`);
 
       // Forcefully clear all previous tracking state (sessions, analyses, grace
       // timers, review mappings) before assigning to the new PR. Without this,
@@ -331,6 +325,8 @@ class WorktreePoolLifecycle {
         logger.error(`Failed to roll back pool worktree ${poolEntry.id} status: ${rollbackErr.message}`);
       }
       throw err;
+    } finally {
+      locks.release(poolEntry.path, holder);
     }
   }
 
@@ -346,6 +342,12 @@ class WorktreePoolLifecycle {
    * @returns {Promise<{ worktreePath: string, worktreeId: string }>}
    */
   async _refreshPoolWorktree(poolEntry, worktreeRecord, prInfo, prData) {
+    return new WorktreeLockManager(this.db).withReservation(poolEntry.path,
+      { repository: prInfo.repository || normalizeRepository(prInfo.owner, prInfo.repo), prNumber: prInfo.prNumber },
+      () => this._refreshReservedPoolWorktree(poolEntry, worktreeRecord, prInfo, prData));
+  }
+
+  async _refreshReservedPoolWorktree(poolEntry, worktreeRecord, prInfo, prData) {
     const targetSha = prData.head?.sha || prData.head_sha;
     if (targetSha) {
       try {
@@ -353,6 +355,7 @@ class WorktreePoolLifecycle {
         const currentHead = (await git.revparse(['HEAD'])).trim();
         if (currentHead === targetSha) {
           const worktreeManager = new this._GitWorktreeManager(this.db);
+          await worktreeManager.assertPinnedWorktree(poolEntry.path, prData);
           const remote = await worktreeManager.resolveRemoteForPR(git, prData, {
             owner: prInfo.owner,
             repo: prInfo.repo,
@@ -382,28 +385,11 @@ class WorktreePoolLifecycle {
       number: prInfo.prNumber,
     };
 
-    // Pool worktrees are unattended — dirty state is leftover noise, not
-    // intentional edits.  Clean before refresh so refreshWorktree's
-    // hasLocalChanges guard never trips.  Mirrors _switchPoolWorktree cleanup.
-    const refreshGit = this._simpleGit(poolEntry.path);
-    await refreshGit.reset(['--hard', 'HEAD']);
-    await refreshGit.clean('f', ['-d']);
 
     const worktreeManager = new this._GitWorktreeManager(this.db);
     await worktreeManager.refreshWorktree(worktreeRecord, normalizedPrInfo.number, normalizedPrData, normalizedPrInfo);
 
-    // refreshWorktree fetches from GitHub and resets to FETCH_HEAD, which is
-    // the latest PR head.  In restore mode targetSha may be an older commit
-    // from the cached review.  Explicitly check out the target SHA so the
-    // worktree lands on the expected commit rather than FETCH_HEAD.
-    if (targetSha) {
-      try {
-        const git = this._simpleGit(poolEntry.path);
-        await git.checkout([targetSha]);
-      } catch (err) {
-        logger.warn(`Could not checkout target SHA ${targetSha.slice(0, 8)} in pool worktree ${poolEntry.id}, continuing at FETCH_HEAD: ${err.message}`);
-      }
-    }
+    await worktreeManager.assertPinnedWorktree(poolEntry.path, normalizedPrData);
 
     // Ensure pool entry is marked in_use
     await this._poolRepo.markInUse(poolEntry.id, prInfo.prNumber);

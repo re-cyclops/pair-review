@@ -135,7 +135,7 @@ async function analyze(page, workspace, endpoint, suggestions = [finding]) {
 async function openFindings(page, count) {
   const action = page.locator('#ai-panel-toggle');
   await expect(action).toContainText(count + ' AI finding');
-  await action.click();
+  if (await action.getAttribute('aria-expanded') !== 'true') await action.click();
   await expect(page.locator('#ai-panel')).not.toHaveClass(/collapsed/);
   await expect(page.locator('#findings-list .finding-item[data-item-type="finding"]')).toHaveCount(count);
 }
@@ -272,7 +272,7 @@ for (const mode of ['PR', 'Local']) {
   });
 }
 
-test('explicit stale update retains draft/history and historical findings open their saved code', async ({ page, workspace }) => {
+test('latest entry preserves drafts/history and changed findings offer inline recovery, not a raw modal', async ({ page, workspace }) => {
   const runId = await analyze(page, workspace, '/api/pr/example/alpha/42/analyses');
   const before = await workspace.control({});
   const ordinary = await (await page.request.get(workspace.url + '/api/analyses/runs/' + runId)).json();
@@ -293,8 +293,6 @@ test('explicit stale update retains draft/history and historical findings open t
   await workspace.control({ pr: { head: { ref: 'review-head', sha: head } } });
   await page.goto(workspace.url + '/pr/example/alpha/42');
   const banner = page.locator('#stale-badge');
-  await expect(banner).toBeVisible();
-  await banner.getByRole('button', { name: 'Update to latest commits' }).click();
   await expect(banner).toBeHidden();
   await expect(page.locator('#diff-container')).toContainText('revisedOnly');
   await page.locator('.workspace-progress-details > summary').click();
@@ -306,11 +304,161 @@ test('explicit stale update retains draft/history and historical findings open t
   await page.locator('#ai-panel-toggle').click();
   await expect(page.locator('.ai-revision-notice')).toBeVisible();
   await page.locator('#findings-list .finding-item[data-item-type="finding"]').click();
-  const saved = page.locator('.historical-diff-dialog');
-  await expect(saved).toBeVisible();
-  await expect(saved.locator('.historical-diff-target')).toContainText('const value2 = 101;');
-  await expect(saved).not.toContainText('revisedOnly');
+  const guidance = page.locator('#findings-list .finding-navigation-guidance');
+  await expect(guidance).toContainText('Code changed or the location is ambiguous');
+  await expect(page.locator('dialog.historical-diff-dialog')).toHaveCount(0);
+  await guidance.getByText('Saved code context', { exact: true }).click();
+  await expect(guidance.locator('pre')).toContainText('const value2 = 101;');
+  await expect(guidance.locator('pre')).not.toContainText('revisedOnly');
+  await guidance.getByRole('button', { name: 'Open current file', exact: true }).click();
+  await expect(page.locator('#diff-container')).toContainText('revisedOnly');
+  await page.locator('.diff-navigation-guidance').getByRole('button', { name: 'Reanalyze latest', exact: true }).click();
+  await expect(page.locator('#analysis-config-modal')).toBeVisible();
   await workspace.control({ importResult: 'legacy-without-saved-diff' });
   const legacy = await (await page.request.get(workspace.url + '/api/analyses/runs/legacy-without-saved-diff?includeDiff=true')).json();
   expect(legacy.run.diff).toBeNull();
+});
+
+test('unique saved context navigates current code on desktop/mobile and drafts require explicit re-anchor', async ({ page, workspace }, testInfo) => {
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const oldRun = await analyze(page, workspace, '/api/pr/example/alpha/42/analyses');
+  const repo = path.join(workspace.home, 'repository');
+  const git = args => execFileSync('git', ['-C', repo, ...args], {
+    encoding: 'utf8', env: { ...process.env, HOME: workspace.home, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' }
+  }).trim();
+  git(['checkout', '-q', 'review-head']);
+  const original = await fs.readFile(path.join(repo, 'sample.js'), 'utf8');
+  await fs.writeFile(path.join(repo, 'sample.js'), 'const prefixAdded = true;\n' + original);
+  git(['add', 'sample.js']); git(['commit', '-qm', 'Shift synthetic current anchors']);
+  const head = git(['rev-parse', 'HEAD']);
+  git(['update-ref', 'refs/pull/42/head', head]);
+  await workspace.control({ pr: { head: { ref: 'review-head', sha: head } } });
+  const captures = process.env.PR_FRESHNESS_CAPTURE_DIR;
+  if (captures) await fs.mkdir(captures, { recursive: true });
+  for (const width of [1280, 768, 375]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.goto(workspace.url + '/pr/example/alpha/42');
+    await expect(page.locator('#diff-container')).toContainText('prefixAdded');
+    await openFindings(page, 1);
+    const item = page.locator('#findings-list .finding-item[data-item-type="finding"]');
+    if (captures) await page.screenshot({ path: path.join(captures, `before-click-${width}.png`) });
+    await item.focus();
+    await item.press('Enter');
+    await expect(page.locator('.diff-navigation-guidance')).toContainText('Location matched · Issue relevance needs recheck');
+    await expect(page.locator('dialog.historical-diff-dialog')).toHaveCount(0);
+    await expect.poll(() => page.evaluate(() => {
+      const wrapper = window.prManager.findFileElement('sample.js');
+      const host = wrapper.querySelector('diffs-container');
+      return [...host.shadowRoot.querySelectorAll('[data-line]')].some(node => {
+        if (node.textContent !== 'const value2 = 101;') return false;
+        const rect = node.getBoundingClientRect();
+        return rect.top >= 0 && rect.bottom <= innerHeight
+          && document.elementFromPoint(rect.left + Math.min(rect.width / 2, 20), rect.top + rect.height / 2) === host;
+      });
+    })).toBe(true);
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    if (width <= 900) await expect(page.locator('#ai-panel')).toHaveClass(/collapsed/);
+    if (captures) {
+      const capture = path.join(captures, `location-matched-${width}.png`);
+      await page.screenshot({ path: capture });
+      await testInfo.attach(`location-matched-${width}`, { path: capture, contentType: 'image/png' });
+    }
+  }
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.locator('#ai-panel-toggle').click();
+  await page.locator('[data-segment="comments"]').click();
+  const draft = page.locator('#findings-list .finding-item[data-item-type="comment"]').filter({ hasText: 'These assignments' });
+  const draftId = await draft.getAttribute('data-id');
+  const before = await (await page.request.get(workspace.url + `/api/reviews/1/comments/${draftId}`)).json();
+  await draft.click();
+  const guidance = page.locator('.diff-navigation-guidance');
+  await expect(guidance).toContainText('Location matched');
+  await guidance.getByText('Choose current anchor…', { exact: true }).click();
+  await expect(guidance.getByRole('button', { name: 'Confirm current anchor', exact: true })).toBeDisabled();
+  await expect(guidance.getByLabel('Start line (blank for file comment)')).toHaveValue('13');
+  await guidance.getByRole('checkbox').check();
+  await guidance.getByRole('button', { name: 'Confirm current anchor', exact: true }).click();
+  await expect(guidance).toContainText('Current anchor confirmed. Your comment text is unchanged.');
+  const after = await (await page.request.get(workspace.url + `/api/reviews/1/comments/${draftId}`)).json();
+  expect(after.commit_sha).toBe(head);
+  expect(after.line_start).toBe(13);
+  expect(after.line_end).toBe(15);
+  expect(after.body).toBe(before.body);
+  expect(workspace.parents().map(row => row.id)).toEqual([oldRun]);
+  expect((await workspace.control({})).calls).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test('finished latest-head analysis replaces the displayed diff and latest findings without a reload', async ({ page, workspace }) => {
+  await analyze(page, workspace, '/api/pr/example/alpha/42/analyses');
+  await page.goto(workspace.url + '/pr/example/alpha/42');
+  await expect(page.locator('#diff-container')).toContainText('const value2 = 101');
+  const repo = path.join(workspace.home, 'repository');
+  const git = args => execFileSync('git', ['-C', repo, ...args], {
+    encoding: 'utf8', env: { ...process.env, HOME: workspace.home, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' }
+  }).trim();
+  git(['checkout', '-q', 'review-head']);
+  await fs.writeFile(path.join(repo, 'sample.js'), 'const latestAnalysisOnly = true;\n');
+  git(['add', 'sample.js']); git(['commit', '-qm', 'Advance while browser remains open']);
+  const head = git(['rev-parse', 'HEAD']);
+  git(['update-ref', 'refs/pull/42/head', head]);
+  await workspace.control({ pr: { head: { ref: 'review-head', sha: head } } });
+  const run = await analyze(page, workspace, '/api/pr/example/alpha/42/analyses', [{
+    ...finding, line_start: 1, line_end: 1, title: 'Current-head finding'
+  }]);
+  await expect(page.locator('#diff-container')).toContainText('latestAnalysisOnly');
+  await expect.poll(() => page.evaluate(() => window.prManager.currentPR.head_sha)).toBe(head);
+  await expect.poll(() => page.evaluate(() => window.prManager.analysisHistoryManager.getSelectedRunId())).toBe(run);
+  await expect(page.locator('#ai-panel-toggle')).not.toContainText('Historical');
+  await openFindings(page, 1);
+  await expect(page.locator('#findings-list')).toContainText('Current-head finding');
+});
+
+test('a newer completed revision is not lost while an earlier diff reload is pending', async ({ page, workspace }) => {
+  await analyze(page, workspace, '/api/pr/example/alpha/42/analyses');
+  await page.goto(workspace.url + '/pr/example/alpha/42');
+  await expect(page.locator('#diff-container')).toContainText('const value2 = 101');
+  const repo = path.join(workspace.home, 'repository');
+  const git = args => execFileSync('git', ['-C', repo, ...args], {
+    encoding: 'utf8', env: { ...process.env, HOME: workspace.home, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' }
+  }).trim();
+  const advance = async name => {
+    git(['checkout', '-q', 'review-head']);
+    await fs.writeFile(path.join(repo, 'sample.js'), `const ${name} = true;\n`);
+    git(['add', 'sample.js']); git(['commit', '-qm', name]);
+    const head = git(['rev-parse', 'HEAD']);
+    git(['update-ref', 'refs/pull/42/head', head]);
+    await workspace.control({ pr: { head: { ref: 'review-head', sha: head } } });
+    return head;
+  };
+  let release, requested;
+  const held = new Promise(resolve => { release = resolve; });
+  const arrived = new Promise(resolve => { requested = resolve; });
+  let intercept = true;
+  await page.route('**/api/pr/example/alpha/42/diff*', async route => {
+    if (!intercept) return route.continue();
+    intercept = false;
+    const response = await route.fetch();
+    requested();
+    await held;
+    await route.fulfill({ response });
+  });
+  try {
+    await advance('middleCompletion');
+    await analyze(page, workspace, '/api/pr/example/alpha/42/analyses', [{ ...finding, line_start: 1, line_end: 1 }]);
+    await arrived;
+    const newestHead = await advance('newestCompletion');
+    const newestRun = await analyze(page, workspace, '/api/pr/example/alpha/42/analyses', [{ ...finding, line_start: 1, line_end: 1 }]);
+    await expect.poll(() => page.evaluate(() => window.prManager.analysisHistoryManager.getSelectedRunId())).toBe(newestRun);
+    await page.evaluate(() => { void window.prManager._reloadAfterAnalysis(); });
+    release();
+    await expect(page.locator('#diff-container')).toContainText('newestCompletion');
+    await expect(page.locator('#diff-container')).not.toContainText('middleCompletion');
+    await expect.poll(() => page.evaluate(() => window.prManager.currentPR.head_sha)).toBe(newestHead);
+    await expect(page.locator('#ai-panel-toggle')).not.toContainText('Historical');
+  } finally {
+    release();
+  }
 });

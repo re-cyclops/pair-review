@@ -26,7 +26,7 @@ const { getChangedFiles } = require('./routes/executable-analysis');
 const { captureRunProtocol } = require('./utils/review-protocol');
 const { safeParseJson } = require('./utils/safe-parse-json');
 const { includesBranch, parseScopeArg, VALID_SCOPE_RANGES, EMPTY_SCOPE_MESSAGE } = require('./local-scope');
-const { storePRData, resolvePrHostBinding, registerRepositoryLocation, findRepositoryPath } = require('./setup/pr-setup');
+const { storePRData, resolvePrHostBinding, registerRepositoryLocation, findRepositoryPath, withPRPreparation } = require('./setup/pr-setup');
 const { resolvePreflightBinding, setupHostParam, bindingRepositoryForHost } = require('./utils/host-resolution');
 const { fireReviewStartedHook } = require('./hooks/payloads');
 const { normalizeRepository, resolveRenamedFile, resolveRenamedFileOld } = require('./utils/paths');
@@ -1341,7 +1341,12 @@ async function startServerOnly(config, poolLifecycle = null, flags = {}) {
  * @param {import('../git/worktree-pool-lifecycle').WorktreePoolLifecycle} [externalPoolLifecycle] - Shared pool lifecycle instance (avoids creating a fresh singleton)
  */
 async function performHeadlessReview(args, config, db, flags, options, externalPoolLifecycle = null) {
-  let prInfo = null;
+  const prInfo = await new PRArgumentParser(config).parsePRArguments(args);
+  return withPRPreparation({ db, owner: prInfo.owner, repo: prInfo.repo, prNumber: prInfo.number, worktreePath: flags.useCheckout ? process.cwd() : undefined },
+    release => performPinnedHeadlessReview(args, config, db, flags, options, externalPoolLifecycle, prInfo, release));
+}
+
+async function performPinnedHeadlessReview(args, config, db, flags, options, externalPoolLifecycle, prInfo, releasePreparation) {
   let poolWorktreeId = null;
   let poolLifecycle = null;
 
@@ -1350,7 +1355,7 @@ async function performHeadlessReview(args, config, db, flags, options, externalP
     // alternate hosts can resolve pasted URLs to the canonical
     // owner/repo before falling back to GitHub/Graphite parsers.
     const parser = new PRArgumentParser(config);
-    prInfo = await parser.parsePRArguments(args);
+    // PR identity was parsed before acquiring the complete preparation reservation.
 
     // Resolve + validate the council FAIL-FAST, before any worktree/network
     // work, so a bad handle or invalid config surfaces immediately. The actual
@@ -1418,6 +1423,7 @@ async function performHeadlessReview(args, config, db, flags, options, externalP
         );
       }
 
+      await new GitWorktreeManager(db).assertPinnedWorktree(worktreePath, prData);
       await registerRepositoryLocation(db, worktreePath, prInfo.owner, prInfo.repo);
       console.log(`Using current checkout at ${worktreePath}`);
 
@@ -1552,6 +1558,7 @@ async function performHeadlessReview(args, config, db, flags, options, externalP
       }
 
       console.log('Generating unified diff...');
+      await worktreeManager.assertPinnedWorktree(worktreePath, prData);
       diff = await worktreeManager.generateUnifiedDiff(worktreePath, prData);
       changedFiles = await worktreeManager.getChangedFiles(worktreePath, prData);
     }
@@ -1634,6 +1641,7 @@ async function performHeadlessReview(args, config, db, flags, options, externalP
 
     let analysisSummary = null;
     let analysisRunId;
+    releasePreparation();
     try {
       // Pass all instruction levels to ensure they're captured in the analysis run.
       // githubClient is forwarded so the analyzer can pre-fetch existing PR review
@@ -1846,8 +1854,13 @@ async function runHeadlessAnalysis(db, config, {
  *   raw `pr_data` blob (#557).
  */
 async function preparePrHeadless(db, config, flags, prArgs, externalPoolLifecycle = null) {
+  const prInfo = await new PRArgumentParser(config).parsePRArguments(prArgs);
+  return withPRPreparation({ db, owner: prInfo.owner, repo: prInfo.repo, prNumber: prInfo.number, worktreePath: flags.useCheckout ? process.cwd() : undefined },
+    () => preparePinnedPrHeadless(db, config, flags, externalPoolLifecycle, prInfo));
+}
+
+async function preparePinnedPrHeadless(db, config, flags, externalPoolLifecycle, prInfo) {
   const parser = new PRArgumentParser(config);
-  const prInfo = await parser.parsePRArguments(prArgs);
 
   // Fail-fast council validation (mirrors performHeadlessReview).
   if (flags.council) {
@@ -1914,6 +1927,7 @@ async function preparePrHeadless(db, config, flags, prArgs, externalPoolLifecycl
         `but current directory does not match. Either cd to the correct repository or remove --use-checkout.`
       );
     }
+    await new GitWorktreeManager(db).assertPinnedWorktree(worktreePath, prData);
     await registerRepositoryLocation(db, worktreePath, prInfo.owner, prInfo.repo);
     console.log(`Using current checkout at ${worktreePath}`);
 
@@ -2029,6 +2043,7 @@ async function preparePrHeadless(db, config, flags, prArgs, externalPoolLifecycl
     }
 
     console.log('Generating unified diff...');
+    await worktreeManager.assertPinnedWorktree(worktreePath, prData);
     diff = await worktreeManager.generateUnifiedDiff(worktreePath, prData);
     changedFiles = await worktreeManager.getChangedFiles(worktreePath, prData);
   }

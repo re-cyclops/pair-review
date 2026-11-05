@@ -68,6 +68,7 @@ const { CommentRepository } = require('../database');
 const { runExecutableAnalysis } = require('./executable-analysis');
 const analysesRouter = require('./analyses');
 const { WorktreeLockManager } = require('../git/worktree-lock');
+const { refreshPRReview } = require('../setup/pr-setup');
 const router = express.Router();
 
 /**
@@ -298,7 +299,7 @@ router.get('/api/pr/:owner/:repo/:number', async (req, res) => {
     const repository = normalizeRepository(owner, repo);
 
     // Get PR metadata from database
-    const prMetadata = await queryOne(req.app.get('db'), `
+    let prMetadata = await queryOne(req.app.get('db'), `
       SELECT
         id,
         pr_number,
@@ -320,6 +321,10 @@ router.get('/api/pr/:owner/:repo/:number', async (req, res) => {
         error: `Pull request #${prNumber} not found in repository ${repository}`
       });
     }
+    ({ prMetadata } = await refreshPRReview({
+      db: req.app.get('db'), config: req.app.get('config') || {}, owner, repo, prNumber,
+      githubToken: req.app.get('githubToken')
+    }));
 
     // Eagerly create the review record on first visit so all subsequent
     // events (analysis, comments, hooks) always have a real reviewId.
@@ -502,9 +507,7 @@ router.get('/api/pr/:owner/:repo/:number', async (req, res) => {
 
   } catch (error) {
     console.error('Error fetching PR data:', error);
-    res.status(500).json({
-      error: 'Internal server error while fetching pull request data'
-    });
+    res.status(error.statusCode || 500).json({ error: error.message || 'Failed to load the current pull request revision' });
   }
 });
 
@@ -552,73 +555,10 @@ router.post('/api/pr/:owner/:repo/:number/refresh', async (req, res) => {
       return res.status(500).json({ error: configErr.message });
     }
 
-    // Check if worktree is locked before modifying it
-    const worktreeManagerForLock = new GitWorktreeManager(db);
-    const existingWorktreePath = await worktreeManagerForLock.getWorktreePath({ owner, repo, number: prNumber });
-    if (existingWorktreePath) {
-      const lockState = new WorktreeLockManager(db).isLocked(existingWorktreePath);
-      if (lockState.locked) {
-        return res.status(409).json({
-          error: 'Worktree is in use by another operation',
-          holderId: lockState.holderId
-        });
-      }
-    }
-
-    const githubClient = new GitHubClient(binding);
-    const prData = await githubClient.fetchPullRequest(owner, repo, prNumber);
-
-    // Update worktree with latest changes
-    const worktreeManager = new GitWorktreeManager(db);
-    const worktreePath = await worktreeManager.updateWorktree(
-      owner,
-      repo,
-      prNumber,
-      prData
-    );
-
-    // Generate fresh diff and get changed files
-    const diffPrData = {
-      base_sha: prData.base_sha,
-      head_sha: prData.head_sha
-    };
-    const diff = await worktreeManager.generateUnifiedDiff(worktreePath, diffPrData);
-    const changedFiles = await worktreeManager.getChangedFiles(worktreePath, diffPrData);
-
-    // Prepare extended data
-    const extendedData = {
-      state: prData.state,
-      diff: diff,
-      changed_files: changedFiles,
-      additions: prData.additions || 0,
-      deletions: prData.deletions || 0,
-      html_url: prData.html_url,
-      base_sha: prData.base_sha,
-      head_sha: prData.head_sha,
-      node_id: prData.node_id,  // GraphQL node ID for PR (required for GraphQL review submission)
-      worktree_path: worktreePath
-    };
-
-    // Update database with new data
-    await run(db, `
-      UPDATE pr_metadata
-      SET
-        title = ?,
-        description = ?,
-        base_branch = ?,
-        head_branch = ?,
-        updated_at = CURRENT_TIMESTAMP,
-        pr_data = ?
-      WHERE pr_number = ? AND repository = ? COLLATE NOCASE
-    `, [
-      prData.title,
-      prData.body || '',
-      prData.base_branch,
-      prData.head_branch,
-      JSON.stringify(extendedData),
-      prNumber,
-      repository
-    ]);
+    const { prData, worktreePath, diff, changedFiles } = await refreshPRReview({
+      db, config, owner, repo, prNumber, githubToken: req.app.get('githubToken'), host: binding.host
+    });
+    const extendedData = { ...prData, diff, changed_files: changedFiles, worktree_path: worktreePath };
 
     logger.info(`Successfully refreshed PR #${prNumber} for ${repository}`);
 
@@ -733,7 +673,7 @@ router.post('/api/pr/:owner/:repo/:number/refresh', async (req, res) => {
 
   } catch (error) {
     logger.error('Error refreshing PR:', error);
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       error: 'Failed to refresh pull request: ' + error.message
     });
   }
@@ -1693,7 +1633,7 @@ router.post('/api/pr/:owner/:repo/:number/analyses', async (req, res) => {
     const db = req.app.get('db');
     const reviewRepo = new ReviewRepository(db);
     const prMetadataRepo = new PRMetadataRepository(db);
-    const prMetadata = await prMetadataRepo.getByPR(prNumber, repository);
+    let prMetadata = await prMetadataRepo.getByPR(prNumber, repository);
 
     if (!prMetadata) {
       return res.status(404).json({
@@ -1702,7 +1642,7 @@ router.post('/api/pr/:owner/:repo/:number/analyses', async (req, res) => {
     }
 
     const worktreeManager = new GitWorktreeManager(db);
-    const worktreePath = await worktreeManager.getWorktreePath({ owner, repo, number: prNumber });
+    let worktreePath = await worktreeManager.getWorktreePath({ owner, repo, number: prNumber });
 
     if (!await worktreeManager.worktreeExists({ owner, repo, number: prNumber })) {
       return res.status(404).json({
@@ -1720,6 +1660,9 @@ router.post('/api/pr/:owner/:repo/:number/analyses', async (req, res) => {
         });
       }
     }
+    ({ prMetadata, worktreePath } = await refreshPRReview({
+      db, config: req.app.get('config') || {}, owner, repo, prNumber, githubToken: req.app.get('githubToken')
+    }));
 
     const appConfig = req.app.get('config') || {};
     const globalInstructions = appConfig.globalInstructions || null;
@@ -1851,6 +1794,7 @@ router.post('/api/pr/:owner/:repo/:number/analyses', async (req, res) => {
       repoInstructions,
       requestInstructions,
       headSha: prMetadata.head_sha || null,
+      baseSha: prMetadata.base_sha || null,
       configType: 'single',
       levelsConfig,
       protocol: captureRunProtocol(appConfig, { provider, model, tier, levels: levelsConfig, ...providerOverrides })
@@ -2091,9 +2035,7 @@ router.post('/api/pr/:owner/:repo/:number/analyses', async (req, res) => {
 
   } catch (error) {
     logger.error('Error starting AI analysis:', error);
-    res.status(500).json({
-      error: 'Failed to start AI analysis'
-    });
+    res.status(error.statusCode || 500).json({ error: error.message || 'Failed to start AI analysis' });
   }
 });
 
@@ -2140,16 +2082,19 @@ router.post('/api/pr/:owner/:repo/:number/analyses/council', async (req, res) =>
     }
 
     const prMetadataRepo = new PRMetadataRepository(db);
-    const prMetadata = await prMetadataRepo.getByPR(prNumber, repository);
+    let prMetadata = await prMetadataRepo.getByPR(prNumber, repository);
     if (!prMetadata) {
       return res.status(404).json({ error: `Pull request #${prNumber} not found. Please load the PR first.` });
     }
 
     const worktreeManager = new GitWorktreeManager(db);
-    const worktreePath = await worktreeManager.getWorktreePath({ owner, repo, number: prNumber });
+    let worktreePath = await worktreeManager.getWorktreePath({ owner, repo, number: prNumber });
     if (!await worktreeManager.worktreeExists({ owner, repo, number: prNumber })) {
       return res.status(404).json({ error: 'Worktree not found for this PR. Please reload the PR.' });
     }
+    ({ prMetadata, worktreePath } = await refreshPRReview({
+      db, config: req.app.get('config') || {}, owner, repo, prNumber, githubToken: req.app.get('githubToken')
+    }));
 
     const reviewRepo = new ReviewRepository(db);
     const repoSettingsRepo = new RepoSettingsRepository(db);
@@ -2178,7 +2123,7 @@ router.post('/api/pr/:owner/:repo/:number/analyses/council', async (req, res) =>
     });
   } catch (error) {
     logger.error('Error starting council analysis:', error);
-    res.status(500).json({ error: 'Failed to start council analysis' });
+    res.status(error.statusCode || 500).json({ error: error.message || 'Failed to start council analysis' });
   }
 });
 

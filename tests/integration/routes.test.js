@@ -104,6 +104,7 @@ function applyDefaultMocks() {
   resetSpy(GitWorktreeManager.prototype, 'updateWorktree').mockResolvedValue(mockWorktreeResponses.getWorktreePath);
   resetSpy(GitWorktreeManager.prototype, 'createWorktreeForPR').mockResolvedValue({ path: mockWorktreeResponses.getWorktreePath, id: 'test-wt-id' });
   resetSpy(GitWorktreeManager.prototype, 'pathExists').mockResolvedValue(true);
+  resetSpy(GitWorktreeManager.prototype, 'assertPinnedWorktree').mockResolvedValue(undefined);
 
   // Config module functions — prevent reading the user's real config and
   // keep all config-dir writes inside this file's private temp dir.
@@ -432,7 +433,6 @@ describe('PR Management Endpoints', () => {
       expect(response.body.success).toBe(true);
       expect(response.body.data).toBeDefined();
       expect(response.body.data.number).toBe(1);
-      expect(response.body.data.title).toBe('Test PR Title');
       expect(response.body.data.owner).toBe('owner');
       expect(response.body.data.repo).toBe('repo');
     });

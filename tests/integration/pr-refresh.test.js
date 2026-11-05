@@ -24,6 +24,8 @@ const configModule = require('../../src/config');
 
 vi.spyOn(GitWorktreeManager.prototype, 'getWorktreePath').mockResolvedValue('/tmp/worktree/test');
 vi.spyOn(GitWorktreeManager.prototype, 'updateWorktree').mockResolvedValue('/tmp/worktree/test');
+vi.spyOn(GitWorktreeManager.prototype, 'assertPinnedWorktree').mockResolvedValue(undefined);
+vi.spyOn(GitHubClient.prototype, 'repositoryExists').mockResolvedValue(true);
 vi.spyOn(GitWorktreeManager.prototype, 'generateUnifiedDiff').mockResolvedValue(
   'diff --git a/file.js b/file.js\n--- a/file.js\n+++ b/file.js\n@@ -1,2 +1,3 @@\n+added\n line1\n line2'
 );

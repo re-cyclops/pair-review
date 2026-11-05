@@ -17,8 +17,6 @@ const { setupPRReview } = require('../setup/pr-setup');
 const { setupLocalReview } = require('../setup/local-setup');
 const { expandPath } = require('../config');
 const { resolvePreflightBinding, explicitHostForBinding, resolveBindingRepositoryForHost } = require('../utils/host-resolution');
-const { queryOne, ReviewRepository } = require('../database');
-const { normalizeRepository } = require('../utils/paths');
 const { rejectUrlLikeLocalReviewPath } = require('../utils/local-path-input');
 const { parseScopeArg, VALID_SCOPE_RANGES } = require('../local-scope');
 const logger = require('../utils/logger');
@@ -100,9 +98,8 @@ function sendSetupEvent(setupId, eventType, data) {
  *
  * Returns immediately with a { setupId } that the client uses to subscribe
  * to WebSocket progress events. If setup is already in-flight for this PR, the
- * existing setupId is returned. If the PR already exists in the database the
- * response includes `{ existing: true, reviewUrl }` so the client can
- * navigate directly.
+ * existing setupId is returned. Every completed setup fetches the latest remote
+ * revision before reusing the saved review and its worktree.
  */
 router.post('/api/setup/pr/:owner/:repo/:number', async (req, res) => {
   try {
@@ -161,61 +158,6 @@ router.post('/api/setup/pr/:owner/:repo/:number', async (req, res) => {
       return res.json({ setupId: existing.setupId });
     }
 
-    // Check if we already have data AND a worktree for this PR in the database.
-    // When a user deletes a worktree, PR metadata is preserved but the worktree
-    // record is removed. We must re-run setup to recreate the worktree.
-    const repository = normalizeRepository(owner, repo);
-    const existingPR = await queryOne(
-      db,
-      'SELECT id, pr_data FROM pr_metadata WHERE pr_number = ? AND repository = ? COLLATE NOCASE',
-      [prNumber, repository]
-    );
-    if (existingPR) {
-      const worktree = await queryOne(
-        db,
-        'SELECT id FROM worktrees WHERE pr_number = ? AND repository = ? COLLATE NOCASE',
-        [prNumber, repository]
-      );
-      if (worktree) {
-        // If the worktree belongs to the pool, verify it is still actively
-        // owned (in_use). Pool slots retain their worktrees row after being
-        // released — markAvailable() clears ownership without deleting the
-        // record. A released slot may have been reassigned to a different PR,
-        // so we must fall through to re-run setup and reacquire a pool slot.
-        const poolLifecycle = req.app.get('poolLifecycle');
-        const poolEntry = poolLifecycle ? await poolLifecycle.poolRepo.getPoolEntry(worktree.id) : null;
-        if (poolEntry && poolEntry.status !== 'in_use') {
-          if (poolEntry.status === 'available' && poolEntry.current_pr_number === prNumber) {
-            // Still associated with this PR — reclaim without re-setup
-            logger.info(`Reclaiming pool worktree ${worktree.id} for ${repository} #${prNumber} (was ${poolEntry.status})`);
-            await poolLifecycle.poolRepo.markInUse(poolEntry.id, prNumber);
-            const reviewRepo = new ReviewRepository(db);
-            const { review } = await reviewRepo.getOrCreate({ prNumber, repository });
-            await poolLifecycle.poolRepo.setCurrentReviewId(poolEntry.id, review.id);
-            return res.json({ existing: true, reviewUrl: `/pr/${owner}/${repo}/${prNumber}` });
-          }
-          logger.info(`Pool worktree ${worktree.id} for ${repository} #${prNumber} is ${poolEntry.status}, re-running setup to reacquire`);
-        } else {
-          return res.json({ existing: true, reviewUrl: `/pr/${owner}/${repo}/${prNumber}` });
-        }
-      } else {
-        logger.info(`PR metadata exists but worktree missing for ${repository} #${prNumber}, re-running setup`);
-      }
-    }
-
-    // If we have stored PR data with a head_sha, pass it to setupPRReview
-    // so it can attempt restore mode (skip GitHub fetch + diff regeneration).
-    let restoreMetadata = null;
-    if (existingPR && existingPR.pr_data) {
-      try {
-        const parsed = JSON.parse(existingPR.pr_data);
-        if (parsed.head_sha) {
-          restoreMetadata = parsed;
-        }
-      } catch (e) {
-        logger.warn(`Could not parse stored pr_data for ${repository} #${prNumber}`);
-      }
-    }
 
     // Start the async setup
     const setupId = crypto.randomUUID();
@@ -235,7 +177,6 @@ router.post('/api/setup/pr/:owner/:repo/:number', async (req, res) => {
           config,
           host: effectiveHost,
           poolLifecycle: req.app.get('poolLifecycle'),
-          restoreMetadata,
           onProgress: (progress) => {
             sendSetupEvent(setupId, 'step', progress);
           }

@@ -520,6 +520,7 @@ async function launchCouncilAnalysis(db, modeContext, councilConfig, councilId, 
     repoInstructions,
     requestInstructions,
     headSha: headSha || null,
+    baseSha: prMetadata?.base_sha || null,
     configType,
     levelsConfig,
     protocol: captureRunProtocol(modeConfig || {}, { ...councilConfig, providerOverrides, providerOverridesMap })

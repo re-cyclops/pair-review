@@ -14051,28 +14051,79 @@ diffs-container {
   #ai-panel-toggle { min-height: 44px; max-width: 180px; }
 }
 
-.historical-diff-dialog {
-  position: fixed;
-  inset: 0;
-  margin: auto;
-  width: min(960px, calc(100vw - 24px));
-  max-height: calc(100dvh - 24px);
-  box-sizing: border-box;
-  background: var(--color-bg-primary, #ffffff);
-  color: var(--color-text-primary, #1f2328);
-  border: 1px solid var(--color-border-primary, #d0d7de);
-  padding: 20px;
+.finding-navigation-guidance {
+  margin: 8px 0 12px;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  font-size: 13px;
+  line-height: 1.5;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
-.historical-diff-dialog h2 { font-size: 18px; }
-.historical-diff-dialog pre {
+.finding-navigation-guidance p { margin: 0 0 8px; }
+.finding-navigation-guidance p:last-child { margin-bottom: 0; }
+.finding-navigation-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.finding-navigation-guidance .btn { min-height: 32px; white-space: normal; }
+.finding-navigation-guidance details { margin-top: 8px; }
+.finding-navigation-guidance summary {
+  cursor: pointer;
+  min-height: 24px;
+  color: var(--color-text-link);
+}
+.finding-navigation-guidance pre {
+  max-height: 180px;
   overflow: auto;
-  max-height: 65dvh;
+  padding: 8px;
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
   font-size: 12px;
   line-height: 1.6;
+  white-space: pre;
 }
-.historical-diff-target {
-  background: var(--color-bg-tertiary);
-  outline: 2px solid var(--color-text-secondary);
+.finding-navigation-guidance :focus-visible {
+  outline: 2px solid var(--color-accent-primary);
+  outline-offset: 2px;
+}
+.diff-navigation-guidance {
+  position: sticky;
+  flex-shrink: 0;
+  top: var(--toolbar-height, 0px);
+  z-index: 4;
+  max-height: 45dvh;
+  overflow: auto;
+  margin: 12px 0;
+}
+@media (max-width: 900px) {
+  .diff-navigation-guidance { position: relative; top: auto; }
+}
+.finding-reanchor-form { display: grid; gap: 8px; margin-top: 8px; }
+.finding-reanchor-form label { display: grid; gap: 4px; }
+.finding-reanchor-body { white-space: pre-wrap; max-height: 180px; overflow: auto; }
+.finding-reanchor-form input:not([type="checkbox"]),
+.finding-reanchor-form select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  padding: 4px 8px;
+  font: inherit;
+  border: 1px solid var(--color-border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+}
+.finding-reanchor-form .finding-reanchor-confirm {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.finding-reanchor-confirm input { min-width: 24px; min-height: 24px; margin: 0; }
+@media (max-width: 600px) {
+  .finding-navigation-guidance .btn,
+  .finding-reanchor-form input:not([type="checkbox"]),
+  .finding-reanchor-form select { min-height: 44px; }
 }
 
 /* On narrow detail screens findings occupy the main pane, not a hidden rail. */

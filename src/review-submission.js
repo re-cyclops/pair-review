@@ -496,24 +496,28 @@ async function publishSubmission(options, confirmedDigest) {
   } finally { active.delete(id); }
 }
 
-async function reanchorDraft(options, { commentId, draft_key, expected_revision, head, as_file = false }) {
+async function reanchorDraft(options, { commentId, draft_key, expected_revision, head_sha, confirmed, file, line_start, line_end, side, is_file_level }) {
   const { db, client, target, reviewId } = options;
   if (!client || !target) throw fail('A current associated PR is required to validate a publication anchor');
-  if (!Number.isInteger(expected_revision) || typeof draft_key !== 'string' || typeof as_file !== 'boolean') throw fail('Draft identity, revision and anchor choice are required', 428);
+  if (confirmed !== true || !Number.isInteger(expected_revision) || typeof draft_key !== 'string' || typeof head_sha !== 'string') {
+    throw fail('Explicit relevance/anchor confirmation, draft identity, current head and expected draft revision are required', 428);
+  }
+  if (typeof file !== 'string' || !file || typeof is_file_level !== 'boolean' || !['LEFT', 'RIGHT'].includes(side) ||
+      !is_file_level && (!Number.isInteger(line_start) || line_start < 1 || !Number.isInteger(line_end) || line_end < line_start)) {
+    throw fail('Select a valid current file, side and line range (or explicitly choose file-level)', 400);
+  }
   const pr = await client.fetchPullRequest(target.owner, target.repo, target.prNumber);
-  if (!head || pr.head_sha !== head) throw fail('The head changed. Inspect the current revision before choosing this anchor.');
+  if (pr.head_sha !== head_sha) throw fail('The head changed. Inspect the current revision before confirming the issue and choosing its anchor.');
   const review = db.prepare('SELECT * FROM reviews WHERE id = ?').get(reviewId);
   await localIdentity(review, pr);
   const index = await anchorIndex(client, target, pr);
   return db.transaction(() => {
     const comment = db.prepare("SELECT * FROM comments WHERE id = ? AND review_id = ? AND source = 'user'").get(commentId, reviewId);
-    if (!comment || comment.draft_key !== draft_key || comment.revision !== expected_revision || comment.deleted_at || comment.status === 'submitted') throw fail('Draft changed before its anchor was confirmed');
-    if (!index.files.has(comment.file)) throw fail('This file is outside the current PR diff');
-    const fileLevel = as_file || Boolean(comment.is_file_level);
-    if (!fileLevel && (!index.lines.isLineInDiff(comment.file, comment.line_start, comment.side) ||
-      !index.lines.isLineInDiff(comment.file, comment.line_end || comment.line_start, comment.side))) throw fail('This line range is outside the current diff');
-    db.prepare('UPDATE comments SET commit_sha = ?, is_file_level = ?, line_start = ?, line_end = ?, diff_position = NULL WHERE id = ?')
-      .run(head, Number(fileLevel), fileLevel ? null : comment.line_start, fileLevel ? null : comment.line_end, comment.id);
+    if (!comment || comment.draft_key !== draft_key || comment.revision !== expected_revision || comment.deleted_at || !['active', 'draft'].includes(comment.status)) throw fail('Draft changed before its relevance and anchor were confirmed');
+    if (!index.files.has(file)) throw fail('This file is outside the current PR diff. Choose a current anchor or exclude the draft.');
+    if (!is_file_level && (!index.lines.isLineInDiff(file, line_start, side) || !index.lines.isLineInDiff(file, line_end, side))) throw fail('This line range is outside the current diff. Choose a current range, explicitly choose file-level, or exclude the draft.');
+    db.prepare('UPDATE comments SET file = ?, side = ?, commit_sha = ?, is_file_level = ?, line_start = ?, line_end = ?, diff_position = NULL WHERE id = ?')
+      .run(file, side, head_sha, Number(is_file_level), is_file_level ? null : line_start, is_file_level ? null : line_end, comment.id);
     return db.prepare('SELECT * FROM comments WHERE id = ?').get(comment.id);
   })();
 }

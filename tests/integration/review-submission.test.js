@@ -172,7 +172,7 @@ describe('Manifest-bound native review publication', () => {
     expect(invalid.comments[0]).toMatchObject({ id, body: 'Exact contextual text', wire: { line: 500, isFileLevel: false } });
     expect((await publish(invalid)).status).toBe(409);
     const row = db.prepare('SELECT * FROM comments WHERE id = ?').get(id);
-    expect((await request(`/comments/${id}/anchor`, 'PUT', { draft_key: row.draft_key, expected_revision: row.revision, head: host.state.head, as_file: true })).status).toBe(200);
+    expect((await request(`/comments/${id}/reanchor`, 'POST', { draft_key: row.draft_key, expected_revision: row.revision, head_sha: host.state.head, confirmed: true, file: row.file, side: row.side, line_start: row.line_start, line_end: row.line_end || row.line_start, is_file_level: true })).status).toBe(200);
     const authorized = await preview();
     expect((await publish(authorized)).status).toBe(200);
     expect([...host.state.reviews.values()][0].comments[0]).toMatchObject({ body: 'Exact contextual text', subjectType: 'FILE', line: null });
@@ -417,7 +417,7 @@ describe('Manifest-bound native review publication', () => {
     expect((await publish(await preview())).status).toBe(409);
     expect(host.state.calls).toEqual([]);
     const row = db.prepare('SELECT * FROM comments WHERE id = ?').get(id);
-    await request(`/comments/${id}/anchor`, 'PUT', { draft_key: row.draft_key, expected_revision: row.revision, head: host.state.head, as_file: false });
+    await request(`/comments/${id}/reanchor`, 'POST', { draft_key: row.draft_key, expected_revision: row.revision, head_sha: host.state.head, confirmed: true, file: row.file, side: row.side, line_start: row.line_start, line_end: row.line_end || row.line_start, is_file_level: false });
     const manifest = await preview();
     expect(manifest.comments[0].originalHead).toBe(host.state.head);
     expect((await publish(manifest)).data.receipt.state).toBe('submitted');

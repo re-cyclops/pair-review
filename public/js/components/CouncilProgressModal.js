@@ -982,7 +982,7 @@ class CouncilProgressModal {
         .then((didSwitch) => {
           if (this.currentAnalysisId !== analysisId) return;
           if (didSwitch) {
-            return manager.loadAISuggestions();
+            return manager._reloadAfterAnalysis ? manager._reloadAfterAnalysis() : manager.loadAISuggestions();
           }
           console.log('Council analysis complete — user will see indicator on dropdown');
           return Promise.resolve();

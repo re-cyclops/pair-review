@@ -11,15 +11,12 @@
  *
  * The fix threads `cloneUrl` through findRepositoryPath, sourced from
  * `prData.repository.clone_url` (populated by GitHubClient.fetchPullRequest
- * from the resolved host binding). When `cloneUrl` is undefined (older
- * restore snapshots, defensive callers) the Tier 3 fallback keeps the
- * github.com URL so behaviour is unchanged for the simple case.
+ * from the resolved host binding). Defensive callers without a clone URL
+ * retain the github.com Tier 3 fallback.
  *
  * A repo's explicitly configured `repos[...].clone_url` reaches the same
- * field: `GitHubClient.fetchPullRequest` substitutes it for the API's value,
- * and restore mode (which never fetches) hydrates `prData.repository` from
- * config before any consumer sees it — so every call site here reads
- * `prData.repository.clone_url` and nothing else.
+ * field: GitHubClient.fetchPullRequest substitutes it for the API's value,
+ * so every setup fetch uses the resolved host and configured clone URL.
  *
  * These tests pin (textually — runtime end-to-end is exercised in
  * tests/integration/pr-setup.test.js):

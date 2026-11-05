@@ -61,7 +61,15 @@ Map the tool's output to this exact JSON schema:
     "confidence": 0.85,
     "is_file_level": false
   }],
-  "summary": "Overall assessment"
+  "summary": "Overall assessment",
+  "revisionRechecks": [{
+    "id": "saved feedback id from the tool output",
+    "relevance": "still_relevant|resolved|changed|unverified",
+    "reason": "Tool's substantive reassessment",
+    "next_action": "Tool's recommended action",
+    "suggested_body": null,
+    "location": null
+  }]
 }
 
 Rules:
@@ -70,6 +78,7 @@ Rules:
 - Use "NEW" for old_or_new (external tools review the new version)
 - Preserve severity if the tool provides it
 - Set is_file_level: true and line_start/line_end to null for findings without line numbers
+- Preserve revisionRechecks provided by the tool, including ids, suggested_body and location; do not invent outcomes when the tool omits them
 - Output ONLY valid JSON, no markdown or explanation
 
 ${mappingInstructions}
@@ -366,10 +375,7 @@ function createExecutableProviderClass(id, config) {
 
             settle(resolve, {
               success: true,
-              data: {
-                suggestions: mapped.suggestions,
-                summary: mapped.summary
-              }
+              data: mapped
             });
           } catch (err) {
             logger.error(`[${id}] Post-processing failed: ${err.message}`);
@@ -393,10 +399,15 @@ function createExecutableProviderClass(id, config) {
      * Map raw tool output to pair-review's suggestion schema using an LLM.
      *
      * @param {string} rawOutput - Raw JSON string from the external tool
-     * @returns {Promise<{suggestions: Array, summary: string}>}
+     * @returns {Promise<{suggestions: Array, summary: string, revisionRechecks?: Array}>}
      */
     async mapOutputToSchema(rawOutput) {
       const mappingPrompt = buildMappingPrompt(this.mappingInstructions, rawOutput);
+      const structuredOutput = data => ({
+        suggestions: data.suggestions || [],
+        summary: data.summary || '',
+        ...(Array.isArray(data.revisionRechecks) ? { revisionRechecks: data.revisionRechecks } : {})
+      });
 
       // Find a mapping provider: prefer the user's configured default, fall back to
       // any registered non-executable provider. Never hardcode a specific provider.
@@ -424,14 +435,14 @@ function createExecutableProviderClass(id, config) {
 
       // Try to extract suggestions from the result
       if (result && result.suggestions) {
-        return { suggestions: result.suggestions, summary: result.summary || '' };
+        return structuredOutput(result);
       }
 
       // If result has a data property (from structured output)
       if (result && result.data) {
         const data = result.data;
         if (data.suggestions) {
-          return { suggestions: data.suggestions, summary: data.summary || '' };
+          return structuredOutput(data);
         }
       }
 
@@ -439,16 +450,13 @@ function createExecutableProviderClass(id, config) {
       if (result && result.raw) {
         const extracted = jsonExtractor.extractJSON(result.raw, 'mapping');
         if (extracted.success && extracted.data) {
-          return {
-            suggestions: extracted.data.suggestions || [],
-            summary: extracted.data.summary || ''
-          };
+          return structuredOutput(extracted.data);
         }
       }
 
       // Last resort: accept only if the result actually has a suggestions array
       if (result && typeof result === 'object' && Array.isArray(result.suggestions)) {
-        return { suggestions: result.suggestions, summary: result.summary || '' };
+        return structuredOutput(result);
       }
 
       throw new Error(`[${id}] Failed to map tool output to suggestion schema`);

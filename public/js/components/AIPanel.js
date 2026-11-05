@@ -414,6 +414,8 @@ class AIPanel {
     }
 
     setRevisionContext({ historical = false, message = '' } = {}) {
+        ++this._navGen;
+        this.clearNavigationGuidance();
         this.historicalFindings = historical;
         this.revisionMessage = message;
         this.updateFindingsAction();
@@ -1307,77 +1309,341 @@ class AIPanel {
         return false;
     }
 
-    /**
-     * Scroll to an AI finding/suggestion in the diff view
-     * @param {string} findingId
-     * @param {string} file
-     * @param {number|string} line
-     * @param {('LEFT'|'RIGHT')} [side] - Diff side; resolved from the finding
-     *   model (finding.side) when omitted, defaulting to 'RIGHT'.
-     */
-    async openHistoricalFinding(findingId, file, line, side) {
-        const runId = window.prManager?.analysisHistoryManager?.getSelectedRunId();
+    // Diff text is evidence for a location, not for whether an issue still applies.
+    static sideLines(patch, side) {
+        const lines = [];
+        let oldLine = 0, newLine = 0, inHunk = false;
+        for (const text of (patch || '').split('\n')) {
+            const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(text);
+            if (hunk) {
+                oldLine = Number(hunk[1]); newLine = Number(hunk[2]); inHunk = true;
+                continue;
+            }
+            if (!inHunk || ![' ', '+', '-'].includes(text[0])) continue;
+            if (side === 'LEFT' ? text[0] !== '+' : text[0] !== '-') {
+                lines.push({ line: side === 'LEFT' ? oldLine : newLine, text: text.slice(1) });
+            }
+            if (text[0] !== '+') oldLine++;
+            if (text[0] !== '-') newLine++;
+        }
+        return lines;
+    }
+
+    static matchFindingLocation(savedPatch, currentPatch, item, side) {
+        const saved = AIPanel.sideLines(savedPatch, side);
+        const current = AIPanel.sideLines(currentPatch, side);
+        const start = Number(item.line_start), end = Number(item.line_end || start);
+        const first = saved.findIndex(row => row.line === start);
+        const last = saved.findIndex(row => row.line === end);
+        if (first < 0 || last < first) return null;
+        const context = saved.slice(Math.max(0, first - 2), last + 3);
+        // shortcut: only contiguous saved diff context is mapped; full-file or
+        // rename mapping needs verified blob contents before expanding this.
+        if (context.length < 3 || context.some((row, i) => i && row.line !== context[i - 1].line + 1)
+            || context.filter(row => /[A-Za-z0-9_]{3}/.test(row.text)).length < 2) return null;
+        const matches = rows => rows.filter((row, index) => context.every((expected, offset) =>
+            rows[index + offset]?.text === expected.text
+            && rows[index + offset]?.line === row.line + offset));
+        if (matches(saved).length !== 1) return null;
+        const candidates = matches(current);
+        if (candidates.length !== 1) return null;
+        const offset = candidates[0].line - context[0].line;
+        return { file: item.file, line_start: start + offset, line_end: end + offset, side };
+    }
+
+    clearNavigationGuidance() {
+        this.panel?.querySelectorAll('.finding-navigation-guidance').forEach(node => node.remove());
+        document.querySelector('.diff-navigation-guidance')?.remove();
+    }
+
+    showNavigationGuidance(item, { message, matched = false, evidence = '', inDiff = false, location = null } = {}) {
+        this.clearNavigationGuidance();
+        const manager = window.prManager;
+        const notice = document.createElement('section');
+        notice.className = `finding-navigation-guidance${inDiff ? ' diff-navigation-guidance' : ''}`;
+        notice.setAttribute('aria-label', 'Finding location and revision');
+        const status = document.createElement('p');
+        status.setAttribute('role', 'status');
+        status.textContent = message;
+        notice.append(status);
+        const currentHead = manager?.displayedProgressContext?.head || manager?.currentPR?.head_sha || manager?.currentPR?.localHeadSha;
+        const recheck = item.revision_recheck?.head_sha === currentHead ? item.revision_recheck : null;
+        if (recheck) {
+            const reason = document.createElement('p');
+            const outcome = recheck.status === 'checked' ? (recheck.relevance || 'unverified').replaceAll('_', ' ') : 'unverified';
+            const genericUnverified = recheck.status !== 'checked' && recheck.reason === 'This saved feedback has not been rechecked on the current revision.';
+            reason.textContent = genericUnverified ? 'Issue relevance has not been rechecked on this revision.'
+                : `Latest issue recheck: ${outcome}. ${recheck.reason || ''} ${recheck.next_action || ''}`;
+            if (!genericUnverified) notice.append(reason);
+            if (recheck.suggested_body) {
+                const suggestion = document.createElement('details');
+                const title = document.createElement('summary');
+                title.textContent = 'Suggested update · your text is unchanged';
+                const text = document.createElement('p');
+                text.textContent = recheck.suggested_body;
+                suggestion.append(title, text);
+                notice.append(suggestion);
+            }
+        }
+        const actions = document.createElement('div');
+        actions.className = 'finding-navigation-actions';
+        const action = (label, callback) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'btn btn-sm btn-secondary';
+            button.textContent = label;
+            button.onclick = callback;
+            actions.append(button);
+        };
+        if (!matched && item.file && manager?.findFileElement?.(item.file)) {
+            action('Open current file', async () => {
+                const generation = ++this._navGen;
+                await this.navigateToCode({ file: item.file }, generation);
+                if (generation === this._navGen) this.showNavigationGuidance(item, { message, evidence, inDiff: true });
+            });
+        }
+        if (manager?.triggerAIAnalysis) action('Reanalyze latest', () => manager.triggerAIAnalysis());
+        if (item.source === 'user' || this.comments?.some(comment => comment.parent_id === item.id)) {
+            if (manager?.openReviewModal) action('Review pending comment', () => manager.openReviewModal());
+        }
+        notice.append(actions);
+        if (item.source === 'user' && currentHead) this.appendReanchorForm(notice, item, location, currentHead);
+        if (evidence) {
+            const details = document.createElement('details');
+            const summary = document.createElement('summary');
+            summary.textContent = 'Saved code context';
+            const snippet = document.createElement('pre');
+            snippet.tabIndex = 0;
+            snippet.setAttribute('aria-label', 'Saved code, not current code');
+            snippet.textContent = evidence;
+            details.append(summary, snippet);
+            notice.append(details);
+        }
+        if (inDiff) {
+            const container = document.getElementById('diff-container');
+            if (container) container.before(notice);
+        } else {
+            const type = item.source === 'user' ? 'comment' : 'finding';
+            const button = Array.from(this.findingsList?.querySelectorAll('.finding-item') || [])
+                .find(node => node.dataset.id === String(item.id) && node.dataset.itemType === type);
+            const wrapper = button?.closest('.finding-item-wrapper');
+            if (wrapper) wrapper.after(notice);
+            else this.findingsList?.prepend(notice);
+        }
+        return notice;
+    }
+
+    appendReanchorForm(notice, item, location, head, onSaved = null) {
         const manager = window.prManager;
         const reviewId = manager?.currentPR?.id;
-        if (!runId) {
-            window.toast?.showWarning('The original diff is unavailable for this legacy review.');
-            return;
+        const currentHead = () => manager?.displayedProgressContext?.head || manager?.currentPR?.head_sha || manager?.currentPR?.localHeadSha;
+        const isCurrent = () => window.prManager === manager && manager?.currentPR?.id === reviewId && currentHead() === head;
+        const anchorIdentity = draft => JSON.stringify([draft.file, draft.line_start || null, draft.line_end || null,
+            draft.side || 'RIGHT', !!draft.is_file_level, draft.commit_sha || null]);
+        let inspected = { ...item };
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = 'Choose current anchor…';
+        const form = document.createElement('form');
+        form.className = 'finding-reanchor-form';
+        const authored = document.createElement('p');
+        authored.className = 'finding-reanchor-body';
+        authored.textContent = inspected.body || '';
+        form.append(authored);
+        const fields = {};
+        const field = (name, label, value, type = 'text') => {
+            const wrapper = document.createElement('label');
+            wrapper.textContent = label;
+            const input = document.createElement('input');
+            input.name = name; input.type = type; input.value = value ?? '';
+            input.autocomplete = 'off';
+            if (type === 'number') input.min = '1';
+            wrapper.append(input); form.append(wrapper); fields[name] = input;
+        };
+        field('file', 'Current file path', location?.file || item.file);
+        fields.file.required = true;
+        field('start', 'Start line (blank for file comment)', location?.line_start, 'number');
+        field('end', 'End line', location?.line_end, 'number');
+        const sideLabel = document.createElement('label');
+        sideLabel.textContent = 'Diff side';
+        const select = document.createElement('select');
+        for (const [value, text] of [['RIGHT', 'Current code (RIGHT)'], ['LEFT', 'Base code (LEFT)']]) {
+            const option = document.createElement('option');
+            option.value = value; option.textContent = text; select.append(option);
         }
-        try {
-            const response = await fetch(`/api/analyses/runs/${encodeURIComponent(runId)}?includeDiff=true`);
-            if (!response.ok) throw new Error('Could not load the saved review diff.');
-            const { run } = await response.json();
-            if (manager?.currentPR?.id !== reviewId || manager?.analysisHistoryManager?.getSelectedRunId() !== runId) return;
-            if (String(run?.id) !== String(runId) || String(run?.review_id) !== String(reviewId)) throw new Error('Saved review context does not match this review.');
-            if (typeof run?.diff !== 'string') throw new Error('The original diff was not saved for this review. Historical findings remain available in the list.');
-            const finding = this.findings.find(f => String(f.id) === String(findingId));
-            const targetSide = side || finding?.side || 'RIGHT';
-            const dialog = document.createElement('dialog');
-            dialog.className = 'historical-diff-dialog';
-            const heading = document.createElement('h2');
-            heading.id = 'historical-diff-title';
-            dialog.setAttribute('aria-labelledby', heading.id);
-            heading.textContent = `Historical AI review · ${run.head_sha?.slice(0, 7) || 'revision unknown'}`;
-            const location = document.createElement('p');
-            location.textContent = `${file || 'Review diff'}${line ? `:${line}` : ''} · Saved code, read-only`;
-            const close = document.createElement('button');
-            close.type = 'button';
-            close.className = 'btn';
-            close.textContent = 'Close saved diff';
-            const code = document.createElement('pre');
-            code.tabIndex = 0;
-            const patches = manager.parseUnifiedDiff(run.diff);
-            const patch = patches.get(file);
-            let oldLine = 0, newLine = 0, target = null, inHunk = false;
-            for (const text of (patch || run.diff).split('\n')) {
-                const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(text);
-                if (hunk) { oldLine = Number(hunk[1]); newLine = Number(hunk[2]); inHunk = true; }
-                const row = document.createElement('span');
-                row.textContent = text + '\n';
-                const content = inHunk && !hunk && [' ', '+', '-'].includes(text[0]);
-                const number = targetSide === 'LEFT' ? oldLine : newLine;
-                const onSide = targetSide === 'LEFT' ? text[0] !== '+' : text[0] !== '-';
-                if (!target && patch && content && onSide && number === Number(line)) {
-                    target = row;
-                    row.className = 'historical-diff-target';
-                }
-                code.appendChild(row);
-                if (content) {
-                    if (text[0] !== '+') oldLine++;
-                    if (text[0] !== '-') newLine++;
-                }
+        select.value = location?.side || item.side || 'RIGHT';
+        sideLabel.append(select); form.append(sideLabel);
+        const confirmLabel = document.createElement('label');
+        confirmLabel.className = 'finding-reanchor-confirm';
+        const confirmed = document.createElement('input');
+        confirmed.type = 'checkbox'; confirmed.required = true;
+        confirmLabel.append(confirmed, document.createTextNode('I checked that this comment still applies at this current anchor.'));
+        const save = document.createElement('button');
+        save.type = 'submit'; save.className = 'btn btn-sm btn-secondary';
+        save.textContent = 'Confirm current anchor'; save.disabled = true;
+        confirmed.onchange = () => { save.disabled = !confirmed.checked; };
+        form.addEventListener('input', event => {
+            if (event.target === confirmed) return;
+            confirmed.checked = false; save.disabled = true;
+        });
+        const result = document.createElement('p');
+        result.setAttribute('role', 'status');
+        form.append(confirmLabel, save, result);
+        form.onsubmit = async event => {
+            event.preventDefault();
+            if (!confirmed.checked || save.disabled) return;
+            if (!isCurrent()) {
+                result.textContent = 'The viewed review or head changed. Open this comment on the current revision and confirm again.';
+                confirmed.checked = false; save.disabled = true;
+                return;
             }
-            if (line && !target) location.textContent += ' · Line is outside the saved diff context.';
-            dialog.append(heading, location, close, code);
-            const previousFocus = document.activeElement;
-            close.onclick = () => dialog.close();
-            dialog.addEventListener('close', () => { dialog.remove(); previousFocus?.focus(); }, { once: true });
-            document.body.appendChild(dialog);
-            dialog.showModal();
-            close.focus();
-            target?.scrollIntoView({ block: 'center' });
+            const chosen = { file: fields.file.value, line_start: Number(fields.start.value) || null,
+                line_end: Number(fields.end.value || fields.start.value) || null, side: select.value,
+                is_file_level: !fields.start.value };
+            const controls = [...Object.values(fields), select, confirmed];
+            controls.forEach(control => { control.disabled = true; });
+            save.disabled = true; result.textContent = 'Checking and saving current anchor…';
+            try {
+                await window.reviewDrafts?.flushAll?.(reviewId);
+                if (!isCurrent()) throw new Error('The viewed review or head changed. Open the current comment and confirm again.');
+                const latestResponse = await fetch(`/api/reviews/${reviewId}/comments/${inspected.id}`);
+                if (!latestResponse.ok) throw new Error('Could not load the saved draft. Review pending comments and try again.');
+                const latest = await latestResponse.json();
+                if (!isCurrent()) throw new Error('The viewed review or head changed. Open the current comment and confirm again.');
+                const draft = latest.comment || latest;
+                if (String(draft.id) !== String(inspected.id) || draft.draft_key !== inspected.draft_key
+                    || (draft.review_id != null && String(draft.review_id) !== String(reviewId))) {
+                    throw new Error('The draft identity changed. Reload pending comments before confirming an anchor.');
+                }
+                if (draft.body !== inspected.body || anchorIdentity(draft) !== anchorIdentity(inspected)) {
+                    inspected = { ...draft };
+                    authored.textContent = inspected.body || '';
+                    confirmed.checked = false; save.disabled = true;
+                    result.textContent = 'Draft changed. Inspect the latest saved text and confirm again.';
+                    authored.tabIndex = -1; authored.focus({ preventScroll: true });
+                    return;
+                }
+                const response = await fetch(`/api/reviews/${reviewId}/comments/${inspected.id}/reanchor`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ draft_key: inspected.draft_key, expected_revision: draft.revision,
+                        head_sha: head, confirmed: true, ...chosen })
+                });
+                const data = await response.json();
+                if (!isCurrent()) return;
+                if (!response.ok) throw new Error(data.error || 'The anchor was not saved. Reload current code and try again.');
+                result.textContent = 'Current anchor confirmed. Your comment text is unchanged.';
+                confirmed.checked = false;
+                window.reviewDrafts?.ingest?.([data.comment]);
+                await manager.loadUserComments();
+                if (isCurrent()) await onSaved?.();
+            } catch (error) {
+                result.textContent = error.message;
+                confirmed.checked = false;
+                save.disabled = true;
+            } finally {
+                controls.forEach(control => { control.disabled = false; });
+            }
+        };
+        details.append(summary, form); notice.append(details);
+    }
+
+    async navigateToCode(location, generation) {
+        const manager = window.prManager;
+        const file = location.file;
+        const reviewId = manager?.currentPR?.id, patches = manager?.filePatches, renderGeneration = manager?._renderGen;
+        const isCurrent = () => generation === this._navGen && manager?.currentPR?.id === reviewId
+            && manager?.filePatches === patches && manager?._renderGen === renderGeneration;
+        const expansion = this.expandFileIfCollapsed(file);
+        if (expansion && typeof expansion.then === 'function') await expansion;
+        if (!isCurrent()) return false;
+        await manager?.ensureFileBodyRendered?.(file);
+        if (!isCurrent()) return false;
+        if (location.line_start) {
+            await manager?.ensureLinesVisible?.([location]);
+            if (!isCurrent()) return false;
+        }
+        const wrapper = manager?.findFileElement?.(file) || window.DiffRenderer?.findFileElement?.(file);
+        if (!wrapper) return false;
+        const side = location.side || 'RIGHT';
+        if (location.line_start && manager?.pierreBridge?.files?.has(file)) {
+            if (!manager.pierreBridge.isLineVisible(file, location.line_start, side)) return false;
+            this._revealDiffForNavigation();
+            const found = manager.pierreBridge.scrollToLine(file, location.line_start, side);
+            if (!found) return false;
+            wrapper.tabIndex = -1;
+            wrapper.focus({ preventScroll: true });
+            return true;
+        }
+        const target = location.line_start
+            ? Array.from(wrapper.querySelectorAll('tr')).find(row => manager?.getLineNumber?.(row, side) === location.line_start)
+            : wrapper.querySelector('.d2h-file-header') || wrapper;
+        if (!target) return false;
+        this._revealDiffForNavigation();
+        this._scrollDiffTarget(target);
+        target.classList.add('highlight-flash');
+        setTimeout(() => target.classList.remove('highlight-flash'), 2000);
+        target.tabIndex = -1;
+        target.focus({ preventScroll: true });
+        return true;
+    }
+
+    async navigateOlderItem(item, side, generation) {
+        const manager = window.prManager;
+        const reviewId = manager?.currentPR?.id;
+        const patches = manager?.filePatches;
+        const renderGeneration = manager?._renderGen;
+        const history = manager?.analysisHistoryManager;
+        const runId = item.ai_run_id || (item.source === 'user'
+            ? history?.runs?.find(run => run.head_sha === item.commit_sha)?.id
+            : history?.getSelectedRunId());
+        const isCurrent = () => generation === this._navGen && manager?.currentPR?.id === reviewId
+            && manager?.filePatches === patches && manager?._renderGen === renderGeneration;
+        this.showNavigationGuidance(item, { message: 'Checking saved code against the current diff…' });
+        let evidence = '';
+        try {
+            if (!runId) throw new Error('Saved code is unavailable. This location cannot be verified.');
+            const response = await fetch(`/api/analyses/runs/${encodeURIComponent(runId)}?includeDiff=true`);
+            if (!isCurrent()) return;
+            if (!response.ok) throw new Error('Saved code could not be loaded. This location is unverified.');
+            const { run } = await response.json();
+            if (!isCurrent()) return;
+            if (String(run?.id) !== String(runId) || String(run?.review_id) !== String(reviewId)
+                || typeof run?.diff !== 'string') throw new Error('Saved code is unavailable. This location cannot be verified.');
+            const savedPatch = manager.parseUnifiedDiff(run.diff).get(item.file);
+            const currentPatch = patches?.get(item.file);
+            const rows = AIPanel.sideLines(savedPatch, side);
+            const index = rows.findIndex(row => row.line === Number(item.line_start));
+            evidence = index < 0 ? '' : rows.slice(Math.max(0, index - 2), index + 6)
+                .map(row => `${row.line}  ${row.text}`).join('\n');
+            const fileLevel = item.is_file_level === true || item.is_file_level === 1;
+            const location = fileLevel && savedPatch && currentPatch ? { file: item.file }
+                : AIPanel.matchFindingLocation(savedPatch, currentPatch, item, side);
+            if (!location) {
+                this.showNavigationGuidance(item, {
+                    message: currentPatch ? 'Code changed or the location is ambiguous. No current line was selected. Recheck the issue and choose a new anchor before publishing.'
+                        : 'This file is missing from the current diff. Recheck the issue before publishing; the saved text has been preserved.',
+                    evidence
+                });
+                return;
+            }
+            if (!isCurrent()) return;
+            const found = await this.navigateToCode(location, generation);
+            if (!isCurrent()) return;
+            const head = manager?.displayedProgressContext?.head || manager?.currentPR?.head_sha || manager?.currentPR?.localHeadSha;
+            const recheck = item.revision_recheck;
+            const relevance = recheck?.head_sha === head && recheck.status === 'checked' && recheck.relevance !== 'unverified'
+                ? `Latest issue recheck: ${(recheck.relevance || 'unverified').replaceAll('_', ' ')}`
+                : 'Issue relevance needs recheck';
+            this.showNavigationGuidance(item, {
+                message: found ? `${fileLevel ? 'Current file opened' : 'Location matched'} · ${relevance}.`
+                    : 'Code context matched, but the current line could not be displayed. Open the current file and choose an anchor before publishing.',
+                matched: found, evidence, inDiff: found, location
+            });
+            // The inline notice changes layout; land on the code again after it
+            // exists, otherwise a phone can stop above the actual anchor.
+            if (found && isCurrent()) await this.navigateToCode(location, generation);
         } catch (error) {
-            window.toast?.showWarning(error.message);
+            if (isCurrent()) this.showNavigationGuidance(item, { message: error.message, evidence });
         }
     }
 
@@ -1386,16 +1652,18 @@ class AIPanel {
     }
 
     async scrollToFinding(findingId, file, line, side) {
-        if (this.historicalFindings) {
-            await this.openHistoricalFinding(findingId, file, line, side);
+        const finding = this.findings?.find(f => String(f.id) === String(findingId));
+        if (this.historicalFindings || (finding?.revision && finding.revision.state !== 'current')) {
+            const generation = ++this._navGen;
+            await this.navigateOlderItem(finding || { id: findingId, file, line_start: line }, side || finding?.side || 'RIGHT', generation);
             return;
         }
+        this.clearNavigationGuidance();
         this._revealDiffForNavigation();
         const myGen = ++this._navGen;
         // Resolve the diff side: explicit arg wins, else the finding's own side,
         // else RIGHT. Deletions live on the LEFT, so a hardcoded RIGHT would
         // reveal the wrong line for deletion-side findings.
-        const finding = this.findings?.find(f => String(f.id) === String(findingId));
         const resolvedSide = side
             || finding?.side
             || 'RIGHT';
@@ -1427,29 +1695,8 @@ class AIPanel {
                 targetSuggestion = document.querySelector(`.ai-suggestion[data-suggestion-id="${findingId}"]`);
             }
 
-            // Fallback: match by file and line (for suggestions without IDs)
-            if (!targetSuggestion && file) {
-                const suggestions = document.querySelectorAll('.ai-suggestion');
-                for (const suggestion of suggestions) {
-                    const suggestionFile = suggestion.closest('[data-file-name]')?.dataset?.fileName;
-                    if (suggestionFile && suggestionFile.includes(file)) {
-                        // If we have a line number, try to match more precisely
-                        if (line) {
-                            const row = suggestion.closest('tr');
-                            const prevRow = row?.previousElementSibling;
-                            const rowLine = prevRow?.querySelector('.line-num2')?.textContent?.trim();
-                            if (rowLine === line) {
-                                targetSuggestion = suggestion;
-                                break;
-                            }
-                        } else {
-                            // No line specified, take first match in file
-                            targetSuggestion = suggestion;
-                            break;
-                        }
-                    }
-                }
-            }
+            // Without an exact suggestion identity, navigate the requested code
+            // instead of accidentally selecting another card on that line.
 
             if (targetSuggestion) {
                 const minimizer = window.prManager?.commentMinimizer;
@@ -1461,8 +1708,18 @@ class AIPanel {
                     scrollTarget = minimizer.findDiffRowFor(targetSuggestion) || targetSuggestion;
                 }
                 this._scrollDiffTarget(scrollTarget);
+                targetSuggestion.tabIndex = -1;
+                targetSuggestion.focus({ preventScroll: true });
                 targetSuggestion.classList.add('current-suggestion');
                 setTimeout(() => targetSuggestion.classList.remove('current-suggestion'), 2000);
+            } else if (file) {
+                const found = await this.navigateToCode({
+                    file, line_start: finding?.line_start || Number(line) || null,
+                    line_end: finding?.line_end || Number(line) || null, side: resolvedSide
+                }, myGen);
+                if (myGen === this._navGen && !found) this.showNavigationGuidance(finding || { id: findingId, file }, {
+                    message: 'This location could not be displayed. Open the current file or reanalyze the latest code.'
+                });
             }
         };
 
@@ -1480,7 +1737,7 @@ class AIPanel {
     _scrollDiffTarget(target) {
         // Land the target at the top of the diff panel (scroll-margin-top in
         // pr.css offsets it below the sticky toolbar + file header).
-        const options = { behavior: 'smooth', block: 'start' };
+        const options = { behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'start' };
         if (window.ScrollUtils?.scrollIntoViewStable) {
             window.ScrollUtils.scrollIntoViewStable(target, options);
         } else {
@@ -1497,11 +1754,18 @@ class AIPanel {
      *   model (comment.side) when omitted, defaulting to 'RIGHT'.
      */
     async scrollToComment(commentId, file, line, side) {
+        const comment = this.comments?.find(c => String(c.id) === String(commentId));
+        const currentHead = window.prManager?.displayedProgressContext?.head || window.prManager?.currentPR?.head_sha || window.prManager?.currentPR?.localHeadSha;
+        if (comment && (!comment.commit_sha || !currentHead || comment.commit_sha !== currentHead)) {
+            const generation = ++this._navGen;
+            await this.navigateOlderItem({ ...comment, source: 'user' }, side || comment.side || 'RIGHT', generation);
+            return;
+        }
+        this.clearNavigationGuidance();
         this._revealDiffForNavigation();
         const myGen = ++this._navGen;
         // Resolve the diff side: explicit arg wins, else the comment's own side,
         // else RIGHT.
-        const comment = this.comments?.find(c => String(c.id) === String(commentId));
         const resolvedSide = side
             || comment?.side
             || 'RIGHT';
@@ -1890,7 +2154,7 @@ class AIPanel {
         return `
             <div class="finding-item-wrapper${isSelected ? ' finding-selected' : ''}">
                 ${selectCheckbox}
-                <button class="finding-item finding-${type} ${statusClass}" data-index="${index}" data-id="${finding.id || ''}" data-file="${finding.file || ''}" data-line="${lineNum || ''}" data-item-type="finding" title="${window.escapeHtmlAttribute(itemTitle)}">
+                <button class="finding-item finding-${type} ${statusClass}" data-index="${index}" data-id="${finding.id || ''}" data-file="${this.escapeHtml(finding.file || '')}" data-line="${lineNum || ''}" data-item-type="finding" title="${window.escapeHtmlAttribute(itemTitle)}">
                     ${indicator}
                     <div class="finding-content">
                         <span class="finding-title">${this.escapeHtml(title)}</span>
@@ -1967,7 +2231,7 @@ class AIPanel {
 
         return `
             <div class="finding-item-wrapper">
-                <button class="finding-item finding-comment ${comment.parent_id ? 'comment-ai-origin' : 'comment-user-origin'}${isFileLevel ? ' file-level' : ''}${dismissedClass}" data-index="${index}" data-id="${comment.id || ''}" data-file="${comment.file || ''}" data-line="${lineNum || ''}" data-is-file-level="${isFileLevel ? '1' : '0'}" data-item-type="comment" title="${fullLocation}">
+                <button class="finding-item finding-comment ${comment.parent_id ? 'comment-ai-origin' : 'comment-user-origin'}${isFileLevel ? ' file-level' : ''}${dismissedClass}" data-index="${index}" data-id="${comment.id || ''}" data-file="${this.escapeHtml(comment.file || '')}" data-line="${lineNum || ''}" data-is-file-level="${isFileLevel ? '1' : '0'}" data-item-type="comment" title="${this.escapeHtml(fullLocation)}">
                     <span class="comment-icon">${icon}</span>
                     <div class="finding-content">
                         <span class="finding-title">${this.escapeHtml(title)}</span>

@@ -32,6 +32,7 @@ const { GitHubClient } = require('../github/client');
 const { resolveSingleProviderModel } = require('../review-config');
 const activity = require('../analysis-activity');
 
+const { refreshPRReview } = require('../setup/pr-setup');
 // All valid tier values: canonical tiers + aliases (for Zod enum validation)
 const ALL_TIER_VALUES = /** @type {[string, ...string[]]} */ ([...TIERS, ...Object.keys(TIER_ALIASES)]);
 
@@ -733,7 +734,7 @@ function createMCPServer(db, options = {}) {
 
           // Check for PR metadata
           const prMetadataRepo = new PRMetadataRepository(db);
-          const prMetadata = await prMetadataRepo.getByPR(prNumber, repository);
+          let prMetadata = await prMetadataRepo.getByPR(prNumber, repository);
           if (!prMetadata) {
             return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: `Pull request #${prNumber} not found. Please load the PR in pair-review first.` }) }] };
           }
@@ -743,7 +744,9 @@ function createMCPServer(db, options = {}) {
           if (!await worktreeManager.worktreeExists({ owner, repo, number: prNumber })) {
             return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: 'Worktree not found for this PR. Please reload the PR in pair-review.' }) }] };
           }
-          const worktreePath = await worktreeManager.getWorktreePath({ owner, repo, number: prNumber });
+          let worktreePath = await worktreeManager.getWorktreePath({ owner, repo, number: prNumber });
+          const fresh = await refreshPRReview({ db, config, owner, repo, prNumber, githubToken: options.githubToken });
+          ({ prMetadata, worktreePath } = fresh);
 
           // Get or create review record
           const { review } = await reviewRepo.getOrCreate({ prNumber, repository });
@@ -808,10 +811,7 @@ function createMCPServer(db, options = {}) {
           // review comments when args.excludePrevious.github is set. Uses
           // the repo's binding so alt-host repos route to the right host
           // with the right token.
-          const prAnalysisBinding = resolveHostBinding(repository, config);
-          const prAnalysisGithubClient = prAnalysisBinding.token
-            ? new GitHubClient(prAnalysisBinding)
-            : undefined;
+          const prAnalysisGithubClient = fresh.githubClient;
           if (prAnalysisGithubClient) {
             logger.debug(`analyzer githubClient wired for ${owner}/${repo}#${prNumber} (mcp)`);
           }
@@ -831,6 +831,7 @@ function createMCPServer(db, options = {}) {
             repoInstructions,
             requestInstructions,
             headSha: prMetadata.head_sha || null,
+            baseSha: prMetadata.base_sha || null,
             protocol: captureRunProtocol(config, { provider, model, tier })
           });
 

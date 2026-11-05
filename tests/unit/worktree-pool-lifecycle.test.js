@@ -1,5 +1,6 @@
 // Copyright 2026 Tim Perkins (tjwp) | SPDX-License-Identifier: Apache-2.0
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createTestDatabase, closeTestDatabase } from '../utils/schema';
 
 const { WorktreePoolLifecycle } = require('../../src/git/worktree-pool-lifecycle.js');
 const { GRACE_PERIOD_MS } = require('../../src/git/worktree-pool-usage.js');
@@ -11,11 +12,14 @@ function createMockDeps() {
     reset: vi.fn().mockResolvedValue(undefined),
     clean: vi.fn().mockResolvedValue(undefined),
     checkout: vi.fn().mockResolvedValue(undefined),
+    raw: vi.fn().mockResolvedValue(undefined),
   };
 
   const mockWorktreeManagerInstance = {
     createWorktreeForPR: vi.fn().mockResolvedValue({ path: '/tmp/worktree/pair-review--abc', id: 'pair-review--abc' }),
     refreshWorktree: vi.fn().mockResolvedValue('/tmp/worktree/pair-review--abc'),
+    hasLocalChanges: vi.fn().mockResolvedValue(false),
+    assertPinnedWorktree: vi.fn().mockResolvedValue(undefined),
     executeCheckoutScript: vi.fn().mockResolvedValue(undefined),
     cleanupWorktree: vi.fn().mockResolvedValue(undefined),
     removeWorktree: vi.fn().mockResolvedValue(undefined),
@@ -109,11 +113,15 @@ const options = {
 describe('WorktreePoolLifecycle', () => {
   let deps;
   let lifecycle;
+  let db;
 
   beforeEach(() => {
+    db = createTestDatabase();
     deps = createMockDeps();
-    lifecycle = new WorktreePoolLifecycle({}, {}, deps);
+    lifecycle = new WorktreePoolLifecycle(db, {}, deps);
   });
+
+  afterEach(() => closeTestDatabase(db));
 
 
   // ── acquireForPR (ported from WorktreePoolManager) ──────────────────────
@@ -157,7 +165,7 @@ describe('WorktreePoolLifecycle', () => {
         prData,
         { remote: 'origin' }
       );
-      expect(deps._mockGit.checkout).toHaveBeenCalled();
+      expect(deps._mockGit.raw).toHaveBeenCalledWith(['checkout', '--detach', '--no-overwrite-ignore', 'abc123']);
     });
 
     it('creates a new worktree when pool is not full (reserveSlot succeeds)', async () => {
@@ -295,16 +303,14 @@ describe('WorktreePoolLifecycle', () => {
         callOrder.push('ensureBaseShaAvailable');
         return Promise.resolve();
       });
-      deps._mockGit.reset.mockImplementation(() => { callOrder.push('reset'); return Promise.resolve(); });
-      deps._mockGit.clean.mockImplementation(() => { callOrder.push('clean'); return Promise.resolve(); });
-      deps._mockGit.checkout.mockImplementation(() => { callOrder.push('checkout'); return Promise.resolve(); });
+      deps._mockGit.raw.mockImplementation(() => { callOrder.push('checkout'); return Promise.resolve(); });
       deps.worktreeRepo.switchPR.mockImplementation(() => { callOrder.push('switchPR'); return Promise.resolve([]); });
       deps._mockUsageTracker.clearWorktree.mockImplementation(() => { callOrder.push('clearWorktree'); });
       deps.poolRepo.markInUse.mockImplementation(() => { callOrder.push('markInUse'); return Promise.resolve(); });
 
       await lifecycle._switchPoolWorktree(poolEntry, worktreeRecord, prInfo, prData, options);
 
-      expect(callOrder).toEqual(['resolveRemoteForPR', 'fetchPRHead', 'ensureBaseShaAvailable', 'reset', 'clean', 'checkout', 'switchPR', 'clearWorktree', 'markInUse']);
+      expect(callOrder).toEqual(['resolveRemoteForPR', 'fetchPRHead', 'ensureBaseShaAvailable', 'checkout', 'switchPR', 'clearWorktree', 'markInUse']);
     });
 
     it('ensures the base SHA is available before switching the pool worktree', async () => {
@@ -337,11 +343,12 @@ describe('WorktreePoolLifecycle', () => {
       );
     });
 
-    it('calls git reset --hard and git clean -fd before checkout', async () => {
+    it('preserves local files and uses a non-forced ignored-file-safe checkout', async () => {
       await lifecycle._switchPoolWorktree(poolEntry, worktreeRecord, prInfo, prData, options);
 
-      expect(deps._mockGit.reset).toHaveBeenCalledWith(['--hard', 'HEAD']);
-      expect(deps._mockGit.clean).toHaveBeenCalledWith('f', ['-d']);
+      expect(deps._mockGit.reset).not.toHaveBeenCalled();
+      expect(deps._mockGit.clean).not.toHaveBeenCalled();
+      expect(deps._mockGit.raw).toHaveBeenCalledWith(['checkout', '--detach', '--no-overwrite-ignore', 'abc123']);
     });
 
     it('clears all tracking state via usageTracker.clearWorktree', async () => {
@@ -355,9 +362,7 @@ describe('WorktreePoolLifecycle', () => {
 
       await lifecycle._switchPoolWorktree(poolEntry, worktreeRecord, prInfo, prData, options);
 
-      expect(deps._mockWorktreeManagerInstance.cleanupWorktree).toHaveBeenCalledTimes(2);
-      expect(deps._mockWorktreeManagerInstance.cleanupWorktree).toHaveBeenCalledWith('/tmp/legacy-wt-1');
-      expect(deps._mockWorktreeManagerInstance.cleanupWorktree).toHaveBeenCalledWith('/tmp/legacy-wt-2');
+      expect(deps._mockWorktreeManagerInstance.cleanupWorktree).not.toHaveBeenCalled();
     });
 
     it('does not fail when disk cleanup throws (best-effort)', async () => {
@@ -368,7 +373,7 @@ describe('WorktreePoolLifecycle', () => {
       const result = await lifecycle._switchPoolWorktree(poolEntry, worktreeRecord, prInfo, prData, options);
 
       expect(result.worktreeId).toBe('pair-review--xyz');
-      expect(deps._mockWorktreeManagerInstance.cleanupWorktree).toHaveBeenCalledWith('/tmp/legacy-wt');
+      expect(deps._mockWorktreeManagerInstance.cleanupWorktree).not.toHaveBeenCalled();
     });
 
     it('does not attempt cleanup when switchPR returns empty array', async () => {
@@ -396,7 +401,7 @@ describe('WorktreePoolLifecycle', () => {
 
       await lifecycle._switchPoolWorktree(poolEntry, worktreeRecord, prInfo, prDataWithSha, options);
 
-      expect(deps._mockGit.checkout).toHaveBeenCalledWith(['deadbeef1234']);
+      expect(deps._mockGit.raw).toHaveBeenCalledWith(['checkout', '--detach', '--no-overwrite-ignore', 'deadbeef1234']);
     });
 
     it('checks out prData.head_sha (flat format) instead of ref when available', async () => {
@@ -409,7 +414,7 @@ describe('WorktreePoolLifecycle', () => {
 
       await lifecycle._switchPoolWorktree(poolEntry, worktreeRecord, prInfo, prDataFlat, options);
 
-      expect(deps._mockGit.checkout).toHaveBeenCalledWith(['flat1234abcd']);
+      expect(deps._mockGit.raw).toHaveBeenCalledWith(['checkout', '--detach', '--no-overwrite-ignore', 'flat1234abcd']);
     });
 
     it('falls back to ref checkout when no head_sha in prData', async () => {
@@ -425,11 +430,11 @@ describe('WorktreePoolLifecycle', () => {
 
       await lifecycle._switchPoolWorktree(poolEntry, worktreeRecord, prInfo, prDataNoSha, options);
 
-      expect(deps._mockGit.checkout).toHaveBeenCalledWith(['refs/remotes/origin/pr-123']);
+      expect(deps._mockGit.raw).toHaveBeenCalledWith(['checkout', '--detach', '--no-overwrite-ignore', 'refs/remotes/origin/pr-123']);
     });
 
     it('propagates error when SHA checkout fails (rollback happens)', async () => {
-      deps._mockGit.checkout.mockRejectedValue(new Error('checkout failed: unknown revision'));
+      deps._mockGit.raw.mockRejectedValue(new Error('checkout failed: unknown revision'));
 
       await expect(lifecycle._switchPoolWorktree(poolEntry, worktreeRecord, prInfo, prData, options))
         .rejects.toThrow('checkout failed: unknown revision');
@@ -489,8 +494,8 @@ describe('WorktreePoolLifecycle', () => {
     it('calls refreshWorktree and marks in use', async () => {
       const result = await lifecycle._refreshPoolWorktree(poolEntry, worktreeRecord, prInfo, prData);
 
-      expect(deps._mockGit.reset).toHaveBeenCalledWith(['--hard', 'HEAD']);
-      expect(deps._mockGit.clean).toHaveBeenCalledWith('f', ['-d']);
+      expect(deps._mockGit.reset).not.toHaveBeenCalled();
+      expect(deps._mockGit.clean).not.toHaveBeenCalled();
       expect(deps._mockWorktreeManagerInstance.refreshWorktree).toHaveBeenCalledWith(
         worktreeRecord,
         123,
@@ -506,7 +511,7 @@ describe('WorktreePoolLifecycle', () => {
       expect(result).toEqual({ worktreePath: '/tmp/worktree/pair-review--abc', worktreeId: 'pair-review--abc' });
     });
 
-    it('executes reset+clean before refreshWorktree (call ordering)', async () => {
+    it('refreshes and verifies without reset or cleaning user files', async () => {
       const callOrder = [];
       deps._mockGit.reset.mockImplementation(() => { callOrder.push('reset'); return Promise.resolve(); });
       deps._mockGit.clean.mockImplementation(() => { callOrder.push('clean'); return Promise.resolve(); });
@@ -515,7 +520,7 @@ describe('WorktreePoolLifecycle', () => {
 
       await lifecycle._refreshPoolWorktree(poolEntry, worktreeRecord, prInfo, prData);
 
-      expect(callOrder).toEqual(['reset', 'clean', 'refreshWorktree', 'markInUse']);
+      expect(callOrder).toEqual(['refreshWorktree', 'markInUse']);
     });
 
     it('skips refresh when worktree HEAD matches target SHA', async () => {
@@ -585,30 +590,21 @@ describe('WorktreePoolLifecycle', () => {
       expect(result).toEqual({ worktreePath: '/tmp/worktree/pair-review--abc', worktreeId: 'pair-review--abc' });
     });
 
-    it('checks out targetSha after refreshWorktree when HEAD differs', async () => {
+    it('verifies the pinned target after refreshing a different HEAD', async () => {
       deps._mockGit.revparse = vi.fn().mockResolvedValue('different_sha_999');
 
       await lifecycle._refreshPoolWorktree(poolEntry, worktreeRecord, prInfo, prData);
 
       // refreshWorktree should have been called first
       expect(deps._mockWorktreeManagerInstance.refreshWorktree).toHaveBeenCalled();
-      // Then an explicit checkout of the target SHA
-      expect(deps._mockGit.checkout).toHaveBeenCalledWith(['abc123']);
+      expect(deps._mockWorktreeManagerInstance.assertPinnedWorktree).toHaveBeenCalledWith(poolEntry.path, expect.objectContaining({ head_sha: 'abc123' }));
     });
 
-    it('falls back gracefully when targetSha checkout fails after refreshWorktree', async () => {
+    it('rejects a refresh that did not reach the pinned head', async () => {
       deps._mockGit.revparse = vi.fn().mockResolvedValue('different_sha_999');
-      deps._mockGit.checkout.mockRejectedValue(new Error('fatal: reference is not a tree: abc123'));
-
-      // Should NOT throw -- falls back to FETCH_HEAD with a warning
-      const result = await lifecycle._refreshPoolWorktree(poolEntry, worktreeRecord, prInfo, prData);
-
-      expect(deps._mockWorktreeManagerInstance.refreshWorktree).toHaveBeenCalled();
-      expect(deps._mockGit.checkout).toHaveBeenCalledWith(['abc123']);
-      // Should still succeed and return the worktree path
-      expect(result).toEqual({ worktreePath: '/tmp/worktree/pair-review--abc', worktreeId: 'pair-review--abc' });
-      // Should still mark in_use
-      expect(deps.poolRepo.markInUse).toHaveBeenCalledWith('pair-review--abc', 123);
+      deps._mockWorktreeManagerInstance.assertPinnedWorktree.mockRejectedValue(new Error('wrong head'));
+      await expect(lifecycle._refreshPoolWorktree(poolEntry, worktreeRecord, prInfo, prData)).rejects.toThrow('wrong head');
+      expect(deps.poolRepo.markInUse).not.toHaveBeenCalled();
     });
   });
 

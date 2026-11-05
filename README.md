@@ -316,10 +316,11 @@ completion and then prints the identical result (same summary, byte-identical
 `--json` document read from the shared database). This is what lets a `pair-loop`
 run, or any `--headless` invocation, be watched live in the browser.
 
-"Compatible" is strict: the server must report the same package version and
-resolve the same SQLite database file as the CLI. Anything else — no server, a
-version mismatch, or a different database — runs in-process as before. Two flags
-tune the behavior:
+"Compatible" is strict: the server must report the same package version, resolve
+the same SQLite database file as the CLI, and advertise
+`dotfilesReviewFreshness: 1` in `/health`. A server missing that capability must be
+restarted before it can receive delegated reviews. Anything incompatible runs
+in-process unless `--require-server` was requested. Two flags tune the behavior:
 
 - `--no-server` — always run in-process, even when a compatible server is
   running (skip the delegation probe). Use for a fully isolated run with no live
@@ -936,12 +937,13 @@ body, with actions outside that scrollport so they cannot cover an editor or
 **More options**. Those options contain the optional AI summary, host-draft
 action, and saved-draft reload.
 
-A stale snapshot explains the viewed and latest revisions and offers
-**Update to latest commits**. Updating retains saved drafts and analysis history;
-an open unsaved editor pauses replacement. Existing safe automatic refresh still
-applies when there is no session work to preserve. Old AI findings are labelled
-historical and open their saved code in a read-only view, never as annotations
-on unrelated current lines. Legacy runs without saved code explain that limit.
+PR setup, reopening a saved review, and starting analysis fetch the latest remote
+base and head by default. The checkout, diff and run stay pinned to that snapshot;
+saved drafts and analysis history are retained. Dirty worktrees, ignored-file
+collisions and active work prevent unsafe checkout replacement and explain what
+must finish or be preserved before retrying. An open unsaved editor pauses later
+diff replacement. Local reviews retain their separate working-directory stale
+warning and explicit refresh behavior.
 
 ### Keyboard navigation and display
 
@@ -1186,10 +1188,23 @@ diff when ancestry, scope, local changes, renamed/deleted paths, or missing
 history prevent a reliable comparison. The baseline is additional AI context,
 not a smaller analysis scope, and is frozen in each run's protocol receipt.
 
-Findings from an older or unknown revision are labelled without rewriting
-their text or anchors. Draft publication still requires current, verified
-anchors. The analysis-history selector owns the displayed run across refreshes;
-late responses and deferred renders cannot replace its newer findings.
+On a newer PR head, the same analysis reassesses prior findings, pending drafts
+and review context. Each saved item receives a relevance outcome, reason and next
+action; omitted or failed checks stay **unverified**, even if the new review has
+zero findings. Suggested wording never replaces authored draft text.
+
+Clicking a current finding reveals its code. Historical findings and pending
+comments navigate only when saved code/context maps unambiguously to the current
+file, side and range. That location match is not a semantic relevance check.
+Changed or unavailable code gets inline guidance, **Reanalyze latest**, and
+optional bounded saved evidence instead of a full historical-diff dialog.
+
+Old drafts remain blocked from publication until the reviewer inspects their
+current text and code and explicitly confirms relevance and a current-head
+anchor. Concurrent draft edits or a changed head invalidate that confirmation;
+prepare a fresh submission preview afterward. The analysis-history selector
+still owns the displayed run across refreshes, so late responses cannot replace
+newer findings.
 
 
 ### Three-Level AI Analysis
